@@ -1,0 +1,102 @@
+# generated: 2026-04-14
+# last_updated: 2026-04-14
+# project: motif-chess
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-04-14
+last_updated: 2026-04-15  # updated: story 1-1 marked done; story 1-2 marked ready-for-dev
+project: motif-chess
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+
+  # ─── Epic 1: Game Database Foundation ───────────────────────────────────────
+  epic-1: in-progress
+  1-1-project-scaffold-restructure: done
+  1-2-domain-types-move-encoding-error-contracts: ready-for-dev
+  1-3-sqlite-game-store: backlog
+  1-4-database-manager-schema-lifecycle-manifest: backlog
+  1-5-duckdb-position-schema-scratch-base-rebuild: backlog
+  epic-1-retrospective: optional
+
+  # ─── Epic 2: PGN Import Pipeline ────────────────────────────────────────────
+  epic-2: backlog
+  2-1-spdlog-logger-infrastructure: backlog
+  2-2-pgn-reader-pgnlib-adapter: backlog
+  2-3-import-worker-game-processing-unit: backlog
+  2-4-parallel-import-pipeline-with-checkpoint-resume: backlog
+  2-5-import-completion-summary-error-logging: backlog
+  epic-2-retrospective: optional
+
+  # ─── Epic 3: Position Search & Opening Statistics ───────────────────────────
+  epic-3: backlog
+  3-1-position-search-by-zobrist-hash: backlog
+  3-2-opening-statistics-per-position: backlog
+  3-3-lazy-opening-tree-with-prefetch: backlog
+  epic-3-retrospective: optional
+
+  # ─── Epic 4: Desktop Application ────────────────────────────────────────────
+  epic-4: backlog
+  4-1-application-shell-config-pgn-file-handler: backlog
+  4-2-chessboard-widget-game-navigation: backlog
+  4-3-game-list-browser: backlog
+  4-4-pgn-import-dialog: backlog
+  4-5-position-search-panel: backlog
+  epic-4-retrospective: optional
+
+  # ─── Epic 5: Engine Integration (Phase 2) ───────────────────────────────────
+  epic-5: backlog
+  5-1-engine-configuration-lifecycle: backlog
+  5-2-real-time-engine-output-crash-isolation: backlog
+  epic-5-retrospective: optional
+
+  # ─── Epic 6: Statistical Analysis (Phase 2) ─────────────────────────────────
+  epic-6: backlog
+  6-1-performance-statistics-by-opening-color: backlog
+  6-2-game-phase-time-management-statistics: backlog
+  epic-6-retrospective: optional
+
+  # ─── Epic 7: Repertoire Management (Phase 2) ────────────────────────────────
+  epic-7: backlog
+  7-1-build-save-annotated-repertoire-lines: backlog
+  7-2-repertoire-drill-mode: backlog
+  epic-7-retrospective: optional
+
+  # ─── Epic 8: AI Repertoire Construction (Phase 3) ───────────────────────────
+  epic-8: backlog
+  8-1-corpus-analysis-player-profiling: backlog
+  8-2-personalized-repertoire-generation: backlog
+  epic-8-retrospective: optional
