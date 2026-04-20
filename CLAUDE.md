@@ -1,5 +1,8 @@
 # Motif Chess — Agent Instructions
 
+**Read `CONVENTIONS.md` before writing any code.** It is the authoritative source for naming, SQL style,
+DuckDB API restrictions, error handling, module boundaries, packaging workflow, and story-done criteria.
+
 ## Build
 
     cmake --preset=dev
@@ -8,7 +11,7 @@
 
 ## Code
 
-- C++20, Clang 21 (llvmPackages_21)
+- C++23, Clang 21 (llvmPackages_21)
 - Zero warnings from clang-tidy and cppcheck
 - clang-format before every commit
 - tl::expected for errors, not exceptions
