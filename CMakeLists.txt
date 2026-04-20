@@ -24,6 +24,12 @@ add_subdirectory(source/motif/import)
 add_subdirectory(source/motif/search)
 add_subdirectory(source/motif/engine)
 
+# ---- Install rules ----
+
+if(NOT CMAKE_SKIP_INSTALL_RULES)
+  include(cmake/install-rules.cmake)
+endif()
+
 # ---- Developer mode ----
 
 if(NOT motif_DEVELOPER_MODE)

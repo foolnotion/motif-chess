@@ -5,6 +5,24 @@
     {
       "name": "fmt",
       "version>=": "11.0.2#1"
+    },
+    {
+      "name": "glaze"
+    },
+    {
+      "name": "sqlite3"
+    },
+    {
+      "name": "duckdb"
+    },
+    {
+      "name": "spdlog"
+    },
+    {
+      "name": "tl-expected"
+    },
+    {
+      "name": "pgnlib"
     }
   ],
   "default-features": [],

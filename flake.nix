@@ -8,10 +8,13 @@
     foolnotion.inputs.nixpkgs.follows = "nixpkgs";
     chesslib.url = "github:foolnotion/chesslib";
     chesslib.inputs.nixpkgs.follows = "nixpkgs";
+    chesslib.inputs.foolnotion.follows = "foolnotion";
     pgnlib.url = "github:foolnotion/pgnlib";
     pgnlib.inputs.nixpkgs.follows = "nixpkgs";
+    pgnlib.inputs.foolnotion.follows = "foolnotion";
     ucilib.url = "github:foolnotion/ucilib";
     ucilib.inputs.nixpkgs.follows = "nixpkgs";
+    ucilib.inputs.foolnotion.follows = "foolnotion";
   };
 
   outputs =
@@ -41,6 +44,9 @@
           };
           inherit (pkgs.llvmPackages_21) stdenv;
           mkShell = pkgs.mkShell.override { inherit stdenv; };
+          glaze-no-ssl = pkgs.glaze.overrideAttrs (old: {
+            cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DGLZ_ENABLE_SSL=OFF" ];
+          });
         in
         rec {
           packages.default = stdenv.mkDerivation {
@@ -59,11 +65,16 @@
 
             buildInputs = with pkgs; [
               # core deps (design doc)
+              cpptrace
               fmt
+              glaze-no-ssl
+              libassert
+              libdwarf
               magic-enum
               mdspan
               microsoft-gsl
               tl-expected
+              spdlog
               sqlite
               duckdb
               reproc

@@ -1,0 +1,257 @@
+{
+  "nodes": {
+    "chesslib": {
+      "inputs": {
+        "flake-parts": "flake-parts",
+        "foolnotion": [
+          "foolnotion"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1776422448,
+        "narHash": "sha256-7Hw+NDZoa+vjeJFGGVF7Q/6uuAg45iOyCWtOSm3bGvE=",
+        "owner": "foolnotion",
+        "repo": "chesslib",
+        "rev": "4081052418d4e83162a0158a169a06a8597c6300",
+        "type": "github"
+      },
+      "original": {
+        "owner": "foolnotion",
+        "repo": "chesslib",
+        "type": "github"
+      }
+    },
+    "flake-parts": {
+      "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib"
+      },
+      "locked": {
+        "lastModified": 1772408722,
+        "narHash": "sha256-rHuJtdcOjK7rAHpHphUb1iCvgkU3GpfvicLMwwnfMT0=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "f20dc5d9b8027381c474144ecabc9034d6a839a3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "flake-parts_2": {
+      "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib_2"
+      },
+      "locked": {
+        "lastModified": 1775087534,
+        "narHash": "sha256-91qqW8lhL7TLwgQWijoGBbiD4t7/q75KTi8NxjVmSmA=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "3107b77cd68437b9a76194f0f7f9c55f2329ca5b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "flake-parts_3": {
+      "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib_3"
+      },
+      "locked": {
+        "lastModified": 1775087534,
+        "narHash": "sha256-91qqW8lhL7TLwgQWijoGBbiD4t7/q75KTi8NxjVmSmA=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "3107b77cd68437b9a76194f0f7f9c55f2329ca5b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "flake-parts_4": {
+      "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib_4"
+      },
+      "locked": {
+        "lastModified": 1775087534,
+        "narHash": "sha256-91qqW8lhL7TLwgQWijoGBbiD4t7/q75KTi8NxjVmSmA=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "3107b77cd68437b9a76194f0f7f9c55f2329ca5b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "foolnotion": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1776423489,
+        "narHash": "sha256-bdGVqxQ4B++c1Pex5DCbau5DmIRBzKqx7t8fXAmrvKA=",
+        "owner": "foolnotion",
+        "repo": "nur-pkg",
+        "rev": "7e06557de020fc35c6b2432f55d4523b67698be5",
+        "type": "github"
+      },
+      "original": {
+        "owner": "foolnotion",
+        "ref": "master",
+        "repo": "nur-pkg",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1776429422,
+        "narHash": "sha256-ROQ6RGXdvk/JlXw6ue9/GLBm7kM+ZzmdTy8QSW+mbWk=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "05c600aa3b1c90ca5e28a2c21441fd5e522b20be",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "master",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-lib": {
+      "locked": {
+        "lastModified": 1772328832,
+        "narHash": "sha256-e+/T/pmEkLP6BHhYjx6GmwP5ivonQQn0bJdH9YrRB+Q=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "c185c7a5e5dd8f9add5b2f8ebeff00888b070742",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "nixpkgs-lib_2": {
+      "locked": {
+        "lastModified": 1774748309,
+        "narHash": "sha256-+U7gF3qxzwD5TZuANzZPeJTZRHS29OFQgkQ2kiTJBIQ=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "333c4e0545a6da976206c74db8773a1645b5870a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "nixpkgs-lib_3": {
+      "locked": {
+        "lastModified": 1774748309,
+        "narHash": "sha256-+U7gF3qxzwD5TZuANzZPeJTZRHS29OFQgkQ2kiTJBIQ=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "333c4e0545a6da976206c74db8773a1645b5870a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "nixpkgs-lib_4": {
+      "locked": {
+        "lastModified": 1774748309,
+        "narHash": "sha256-+U7gF3qxzwD5TZuANzZPeJTZRHS29OFQgkQ2kiTJBIQ=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "333c4e0545a6da976206c74db8773a1645b5870a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "pgnlib": {
+      "inputs": {
+        "flake-parts": "flake-parts_3",
+        "foolnotion": [
+          "foolnotion"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1776422451,
+        "narHash": "sha256-mWPMEyPhxm4KY+vcDVfl0qpOR4WSK6NtOmEPM0Phb2w=",
+        "owner": "foolnotion",
+        "repo": "pgnlib",
+        "rev": "d9017f9de766376ccc6928ebd952b1b3ef7bdef4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "foolnotion",
+        "repo": "pgnlib",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "chesslib": "chesslib",
+        "flake-parts": "flake-parts_2",
+        "foolnotion": "foolnotion",
+        "nixpkgs": "nixpkgs",
+        "pgnlib": "pgnlib",
+        "ucilib": "ucilib"
+      }
+    },
+    "ucilib": {
+      "inputs": {
+        "flake-parts": "flake-parts_4",
+        "foolnotion": [
+          "foolnotion"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1776422454,
+        "narHash": "sha256-2+XRjNGjZkP2xbpmct7uXc5dTH0k/hsaeEs+9m5s1dc=",
+        "owner": "foolnotion",
+        "repo": "ucilib",
+        "rev": "8e7a6ca50a98ed6972599c8a44c4c46275a5f9e0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "foolnotion",
+        "repo": "ucilib",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
