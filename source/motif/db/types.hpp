@@ -28,6 +28,15 @@ struct position {
     std::uint16_t ply{};
 };
 
+struct position_row {
+    std::uint64_t             zobrist_hash{};
+    std::uint32_t             game_id{};
+    std::uint16_t             ply{};
+    std::int8_t               result{};
+    std::optional<std::int16_t> white_elo;
+    std::optional<std::int16_t> black_elo;
+};
+
 struct game {
     player white;
     player black;
