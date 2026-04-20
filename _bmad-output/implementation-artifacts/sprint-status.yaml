@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-15  # updated: story 1-1 marked done; story 1-2 marked ready-for-dev
+last_updated: 2026-04-20  # updated: story 2-4 done after review fixes
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -44,20 +44,20 @@ story_location: _bmad-output/implementation-artifacts
 development_status:
 
   # ─── Epic 1: Game Database Foundation ───────────────────────────────────────
-  epic-1: in-progress
+  epic-1: done
   1-1-project-scaffold-restructure: done
-  1-2-domain-types-move-encoding-error-contracts: ready-for-dev
-  1-3-sqlite-game-store: backlog
-  1-4-database-manager-schema-lifecycle-manifest: backlog
-  1-5-duckdb-position-schema-scratch-base-rebuild: backlog
-  epic-1-retrospective: optional
+  1-2-domain-types-move-encoding-error-contracts: done
+  1-3-sqlite-game-store: done
+  1-4-database-manager-schema-lifecycle-manifest: done
+  1-5-duckdb-position-schema-scratch-base-rebuild: done
+  epic-1-retrospective: done
 
   # ─── Epic 2: PGN Import Pipeline ────────────────────────────────────────────
-  epic-2: backlog
-  2-1-spdlog-logger-infrastructure: backlog
-  2-2-pgn-reader-pgnlib-adapter: backlog
-  2-3-import-worker-game-processing-unit: backlog
-  2-4-parallel-import-pipeline-with-checkpoint-resume: backlog
+  epic-2: in-progress
+  2-1-spdlog-logger-infrastructure: done
+  2-2-pgn-reader-pgnlib-adapter: done
+  2-3-import-worker-game-processing-unit: done
+  2-4-parallel-import-pipeline-with-checkpoint-resume: done
   2-5-import-completion-summary-error-logging: backlog
   epic-2-retrospective: optional
 
