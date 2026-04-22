@@ -57,7 +57,13 @@ public:
     [[nodiscard]] auto dir() const noexcept -> std::filesystem::path const&;
 
     // Drop and repopulate the DuckDB position table from all games in SQLite.
-    auto rebuild_position_store() -> result<void>;
+    auto rebuild_position_store(bool create_index = true,
+                                bool sort_by_zobrist = false) -> result<void>;
+
+    // Experimental: rebuild into partition tables and create one index per
+    // partition serially to cap peak memory during index construction.
+    auto rebuild_partitioned_position_store(std::uint32_t game_id_span)
+        -> result<void>;
 
     // Release all connections and clear internal state.
     // Safe to call multiple times.
