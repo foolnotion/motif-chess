@@ -475,6 +475,43 @@ So that I can trust the import was complete and can audit any data that was excl
 
 Users can find any board position by Zobrist hash, view move frequency and win/draw/loss statistics, and explore a lazily-loaded opening tree with per-node performance data. First 5 levels of the tree are prefetched for fast click-through.
 
+
+### Story 2.9: Import Pipeline Performance Optimization
+
+As a developer,
+I want to optimize the import pipeline's performance to close the NFR03 gap,
+by addressing memory locality, pipeline batching friction, and allocation overhead
+identified through Story 2.8 profiling and cache miss analysis.
+
+**Acceptance Criteria:**
+
+**Given** the import pipeline memory hotspots are identified
+**When** optimization changes are implemented
+**Then** cache miss rate reduces by at least 15% (from 47% to ≤40%)
+**And** this reduction is verified through perf stat on 10k games fixture
+
+**Given** the taskflow pipeline batching friction is identified
+**When** optimization changes are implemented
+**Then** futex contention time reduces by at least 50% (from 8% to ≤4% of wall time)
+**And** this reduction is verified through perf stat on 10k games fixture
+
+**Given** the allocation pressure in hot paths is identified
+**When** optimization changes are implemented
+**Then** malloc/free rate in prepare_game and position generation reduces by at least 60%
+**And** this reduction is verified through perf stat on 10k games fixture
+
+**Given** all optimizations are implemented
+**When** benchmarked on 10k games fixture with deferred position index build
+**Then** wall time improves by at least 20% compared to post-2.8 baseline (13.5s)
+**Or** extrapolated time for 10M games reaches ≤25 minutes (down from 3.7 hours)
+
+**Given** any downstream tuning is applied
+**Then** all Epic 2 correctness guarantees remain intact: malformed inputs never crash (NFR10); resume behavior is correct (NFR08); structured summary and enriched logging are unchanged (FR14, AR06); all tests pass under `dev-sanitize` with zero ASan/UBSan violations (NFR11)
+
+**Given** the architectural boundary between import pipeline and storage is preserved
+**When** optimizations are implemented
+**Then** import pipeline continues to use motif_db::position_store public API only
+**And** no direct DuckDB C API calls bypass motif_db abstraction
 ### Story 3.1: Position Search by Zobrist Hash
 
 As a user,
