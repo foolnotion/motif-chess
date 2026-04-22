@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -16,7 +18,7 @@
 
 #include <chesslib/board/board.hpp>  // NOLINT(misc-include-cleaner)
 #include <chesslib/board/move_codec.hpp>
-#include <chesslib/util/san_replay.hpp>
+#include <chesslib/util/san.hpp>
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <spdlog/spdlog.h>
 #include <taskflow/algorithm/pipeline.hpp>  // NOLINT(misc-include-cleaner)
@@ -45,6 +47,62 @@ auto current_time_ns() noexcept -> std::int64_t
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+constexpr std::string_view event_marker = "[Event \"";
+
+auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
+{
+    auto file = std::ifstream {pgn_path, std::ios::binary | std::ios::ate};
+    if (!file.is_open()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const file_size = file.tellg();
+    if (file_size == std::streampos {0}) {
+        return std::size_t {0};
+    }
+    file.seekg(0);
+
+    constexpr std::size_t buf_size = 1 << 20;
+    constexpr std::size_t overlap = event_marker.size() - 1;
+    auto buf = std::string(buf_size + overlap, '\0');
+    std::size_t count = 0;
+    std::size_t carry = 0;
+
+    while (true) {
+        file.read(buf.data() + static_cast<std::ptrdiff_t>(carry),
+                  static_cast<std::streamsize>(buf_size));
+        auto const read_len = static_cast<std::size_t>(file.gcount());
+        if (read_len == 0 && carry == 0) {
+            break;
+        }
+
+        auto const total = carry + read_len;
+        auto const* data = buf.data();
+        auto const* end = data + total;
+
+        auto const* pos = data;
+        while (pos < end) {
+            pos =
+                std::search(pos, end, event_marker.begin(), event_marker.end());
+            if (pos == end) {
+                break;
+            }
+            ++count;
+            pos += event_marker.size();
+        }
+
+        if (read_len == 0) {
+            break;
+        }
+
+        auto const keep = std::min(total, overlap);
+        std::memmove(buf.data(), end - keep, keep);
+        carry = keep;
+    }
+
+    return count;
 }
 
 auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key)
@@ -187,13 +245,14 @@ auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
     encoded_moves.reserve(pgn_game.moves.size());
     position_rows.reserve(pgn_game.moves.size());
 
-    auto replay = chesslib::san::replayer {board};
     for (auto const& node : pgn_game.moves) {
-        auto move_result = replay.play(node.san);
+        auto move_result = chesslib::san::from_string(board, node.san);
         if (!move_result) {
             return tl::unexpected {error_code::parse_error};
         }
         encoded_moves.push_back(chesslib::codec::encode(*move_result));
+        chesslib::move_maker mmaker {board, *move_result};
+        mmaker.make();
         position_rows.push_back(motif::db::position_row {
             .zobrist_hash = board.hash(),
             .game_id = 0,
@@ -230,6 +289,8 @@ auto import_pipeline::progress() const noexcept -> import_progress
         .games_processed = games_processed_.load(std::memory_order_relaxed),
         .games_committed = games_committed_.load(std::memory_order_relaxed),
         .games_skipped = games_skipped_.load(std::memory_order_relaxed),
+        .errors = games_errored_.load(std::memory_order_relaxed),
+        .total_games = total_games_.load(std::memory_order_relaxed),
         .elapsed = elapsed,
     };
 }
@@ -279,7 +340,13 @@ auto import_pipeline::run_from(
     games_processed_.store(0, std::memory_order_relaxed);
     games_committed_.store(0, std::memory_order_relaxed);
     games_skipped_.store(0, std::memory_order_relaxed);
+    games_errored_.store(0, std::memory_order_relaxed);
+    total_games_.store(0, std::memory_order_relaxed);
     start_time_ns_.store(current_time_ns(), std::memory_order_relaxed);
+
+    if (auto game_count = count_games(pgn_path); game_count.has_value()) {
+        total_games_.store(*game_count, std::memory_order_relaxed);
+    }
 
     pgn_reader reader {pgn_path};
     if (start_offset > 0) {
@@ -291,8 +358,48 @@ auto import_pipeline::run_from(
     std::int64_t last_game_id = pre_last_game_id;
     std::int64_t committed = pre_committed;
     std::size_t batch_pending = 0;
+    bool sqlite_tx_open = false;
     bool eof_reached = false;
     std::optional<error_code> fatal_error;
+
+    auto begin_sqlite_batch = [&]() -> bool
+    {
+        if (sqlite_tx_open) {
+            return true;
+        }
+        auto begin_res = db_.store().begin_transaction();
+        if (!begin_res) {
+            return false;
+        }
+        sqlite_tx_open = true;
+        return true;
+    };
+
+    auto rollback_sqlite_batch = [&]() noexcept -> void
+    {
+        if (!sqlite_tx_open) {
+            return;
+        }
+        db_.store().rollback_transaction();
+        sqlite_tx_open = false;
+    };
+
+    auto commit_sqlite_batch = [&]() -> bool
+    {
+        if (!sqlite_tx_open) {
+            return true;
+        }
+        auto commit_res = db_.store().commit_transaction();
+        if (!commit_res) {
+            return false;
+        }
+        sqlite_tx_open = false;
+        return true;
+    };
+
+    if (!begin_sqlite_batch()) {
+        return tl::unexpected {error_code::io_failure};
+    }
 
     std::vector<pipeline_slot> slots(config.num_lines);
 
@@ -347,9 +454,29 @@ auto import_pipeline::run_from(
 
         if (slot.state == slot_state::parse_error) {
             games_skipped_.fetch_add(1, std::memory_order_relaxed);
+            games_errored_.fetch_add(1, std::memory_order_relaxed);
             if (log) {
-                log->warn("game skipped: parse error at offset {}",
-                          slot.game_start_offset);
+                auto const error_desc =
+                    slot.error ? to_string(*slot.error) : "pgn read error";
+                auto const tags_available = !slot.pgn_game.tags.empty();
+                if (tags_available) {
+                    auto const white = find_tag(slot.pgn_game.tags, "White");
+                    auto const black = find_tag(slot.pgn_game.tags, "Black");
+                    auto const event = find_tag(slot.pgn_game.tags, "Event");
+                    log->warn(
+                        "Skipped game at offset {}: {}. White: \"{}\", "
+                        "Black: \"{}\", Event: \"{}\"",
+                        slot.game_start_offset,
+                        error_desc,
+                        white.empty() ? "N/A" : white,
+                        black.empty() ? "N/A" : black,
+                        event.empty() ? "N/A" : event);
+                } else {
+                    log->warn(
+                        "Skipped game at offset {}: {} (headers unavailable)",
+                        slot.game_start_offset,
+                        error_desc);
+                }
             }
             slot.state = slot_state::empty;
             return;
@@ -363,13 +490,18 @@ auto import_pipeline::run_from(
 
         auto ins = db_.store().insert(prep.game_row);
         if (!ins) {
-            games_skipped_.fetch_add(1, std::memory_order_relaxed);
             if (ins.error() == motif::db::error_code::duplicate) {
+                games_skipped_.fetch_add(1, std::memory_order_relaxed);
                 if (log) {
                     log->warn("duplicate game skipped at offset {}",
                               slot.game_start_offset);
                 }
             } else {
+                games_errored_.fetch_add(1, std::memory_order_relaxed);
+                rollback_sqlite_batch();
+                fatal_error = error_code::io_failure;
+                eof_reached = true;
+                pflow.stop();
                 if (log) {
                     log->error("SQLite insert failed at offset {}",
                                slot.game_start_offset);
@@ -385,7 +517,7 @@ auto import_pipeline::run_from(
             row.game_id = game_id;
         }
 
-        if (!prep.position_rows.empty()) {
+        if (config.write_positions && !prep.position_rows.empty()) {
             if (auto pos_res = db_.positions().insert_batch(prep.position_rows);
                 !pos_res)
             {
@@ -403,6 +535,19 @@ auto import_pipeline::run_from(
         games_committed_.fetch_add(1, std::memory_order_relaxed);
 
         if (batch_pending >= config.batch_size) {
+            if (!commit_sqlite_batch()) {
+                rollback_sqlite_batch();
+                fatal_error = error_code::io_failure;
+                eof_reached = true;
+                pflow.stop();
+                if (log) {
+                    log->error("SQLite batch commit failed");
+                }
+                slot.prepared.reset();
+                slot.state = slot_state::empty;
+                return;
+            }
+
             import_checkpoint const chk {
                 .source_path = pgn_path.string(),
                 .byte_offset = slot.next_game_offset,
@@ -415,6 +560,17 @@ auto import_pipeline::run_from(
                 }
             }
             batch_pending = 0;
+            if (!begin_sqlite_batch()) {
+                fatal_error = error_code::io_failure;
+                eof_reached = true;
+                pflow.stop();
+                if (log) {
+                    log->error("SQLite batch begin failed");
+                }
+                slot.prepared.reset();
+                slot.state = slot_state::empty;
+                return;
+            }
         }
 
         slot.prepared.reset();
@@ -435,7 +591,23 @@ auto import_pipeline::run_from(
     executor.run(taskflow).wait();
 
     if (fatal_error.has_value() && *fatal_error != error_code::eof) {
+        rollback_sqlite_batch();
         return tl::unexpected {*fatal_error};
+    }
+
+    if (!commit_sqlite_batch()) {
+        rollback_sqlite_batch();
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    if (!config.write_positions && config.rebuild_positions_after_import) {
+        if (auto rebuild_res = db_.rebuild_position_store(
+                config.create_position_index_after_rebuild,
+                config.sort_positions_by_zobrist_after_rebuild);
+            !rebuild_res)
+        {
+            return tl::unexpected {error_code::io_failure};
+        }
     }
 
     delete_checkpoint(db_.dir());
@@ -449,7 +621,7 @@ auto import_pipeline::run_from(
         .total_attempted = games_processed_.load(std::memory_order_relaxed),
         .committed = static_cast<std::size_t>(committed - pre_committed),
         .skipped = games_skipped_.load(std::memory_order_relaxed),
-        .errors = 0,
+        .errors = games_errored_.load(std::memory_order_relaxed),
         .elapsed = elapsed,
     };
 }
