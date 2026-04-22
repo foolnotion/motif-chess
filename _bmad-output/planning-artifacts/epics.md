@@ -469,12 +469,23 @@ So that I can trust the import was complete and can audit any data that was excl
 **Then** `import_summary.committed == 0` and `import_summary.skipped == N`
 **And** no crash, no ASan/UBSan violations (NFR10, NFR11)
 
----
+### Story 2.6: Adopt Upstream chesslib SAN Optimization
 
-## Epic 3: Position Search & Opening Statistics
+As a developer,
+I want to adopt the upstream chesslib SAN resolution optimization,
+so that the import pipeline benefits from the reported large isolated gains in SAN parsing speed.
 
-Users can find any board position by Zobrist hash, view move frequency and win/draw/loss statistics, and explore a lazily-loaded opening tree with per-node performance data. First 5 levels of the tree are prefetched for fast click-through.
+### Story 2.7: Integrate pgnlib Import Stream into Import Pipeline
 
+As a developer,
+I want to integrate the upstream pgnlib `import_stream` API into the import pipeline,
+so that PGN parsing and materialization gains are realized in the hot path.
+
+### Story 2.8: Reprofile and Tune Remaining Import/Storage Path
+
+As a developer,
+I want to reprofile the import pipeline after the chesslib and pgnlib optimizations are adopted,
+so that remaining bottlenecks in the SQLite/DuckDB storage path are identified and addressed.
 
 ### Story 2.9: Import Pipeline Performance Optimization
 
@@ -512,6 +523,13 @@ identified through Story 2.8 profiling and cache miss analysis.
 **When** optimizations are implemented
 **Then** import pipeline continues to use motif_db::position_store public API only
 **And** no direct DuckDB C API calls bypass motif_db abstraction
+
+---
+
+## Epic 3: Position Search & Opening Statistics
+
+Users can find any board position by Zobrist hash, view move frequency and win/draw/loss statistics, and explore a lazily-loaded opening tree with per-node performance data. First 5 levels of the tree are prefetched for fast click-through.
+
 ### Story 3.1: Position Search by Zobrist Hash
 
 As a user,
