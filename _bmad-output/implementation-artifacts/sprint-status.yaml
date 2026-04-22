@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-22  # updated: story 2-5 code review completed
+last_updated: 2026-04-22  # updated: epic 2 complete, all stories done
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -52,15 +52,17 @@ story_location: _bmad-output/implementation-artifacts
   epic-1-retrospective: done
 
   # ─── Epic 2: PGN Import Pipeline ───────────────────────────────────────────
-  epic-2: in-progress
+  epic-2: done
   2-1-spdlog-logger-infrastructure: done
   2-2-pgn-reader-pgnlib-adapter: done
   2-3-import-worker-game-processing-unit: done
   2-4-parallel-import-pipeline-with-checkpoint-resume: done
   2-5-import-completion-summary-error-logging: done
-  2-8: backlog
-  2-9: backlog
-  epic-2-retrospective: optional
+  2-6-adopt-upstream-chesslib-san-optimization: done
+  2-7-integrate-pgnlib-import-stream-into-import-pipeline: done
+  2-8-reprofile-and-tune-remaining-import-storage-path: done
+  2-9-import-pipeline-performance-optimization: done
+  epic-2-retrospective: done
 
   # ─── Epic 3: Position Search & Opening Statistics ───────────────────────────
   epic-3: backlog
