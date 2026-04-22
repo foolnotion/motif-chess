@@ -14,3 +14,6 @@ compile_commands.json
 .claude/
 .cursor/
 .direnv/
+.github/skills/
+.gemini/
+.opencode/
