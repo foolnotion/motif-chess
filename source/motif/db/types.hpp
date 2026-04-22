@@ -37,6 +37,20 @@ struct position_row {
     std::optional<std::int16_t> black_elo;
 };
 
+struct position_match {
+    std::uint32_t game_id{};
+    std::uint16_t ply{};
+    std::int8_t   result{};
+    std::optional<std::int16_t> white_elo;
+    std::optional<std::int16_t> black_elo;
+};
+
+struct opening_move_stat {
+    std::uint32_t game_id{};
+    std::uint16_t ply{};
+    std::int8_t   result{};
+};
+
 struct game {
     player white;
     player black;

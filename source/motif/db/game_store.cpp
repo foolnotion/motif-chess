@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -31,20 +32,45 @@ struct stmt_deleter {
 };
 using unique_stmt = std::unique_ptr<sqlite3_stmt, stmt_deleter>;
 
+auto finalize_stmt(sqlite3_stmt*& stmt) noexcept -> void
+{
+    if (stmt != nullptr) {
+        sqlite3_finalize(stmt);
+        stmt = nullptr;
+    }
+}
+
+auto reset_stmt(sqlite3_stmt* stmt) noexcept -> void
+{
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+}
+
 // Wraps BEGIN/COMMIT/ROLLBACK so early returns automatically issue ROLLBACK.
 class txn_guard {
 public:
     explicit txn_guard(sqlite3* conn) noexcept
         : db_{conn}
-        , began_{sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr) == SQLITE_OK}
-    {}
+    {
+        if (sqlite3_get_autocommit(db_) == 0) {
+            began_ = true;
+            started_local_ = false;
+            return;
+        }
+        began_ = sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr) == SQLITE_OK;
+        started_local_ = began_;
+    }
     ~txn_guard() noexcept {
-        if (!committed_) {
+        if (started_local_ && !committed_) {
             sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
         }
     }
     [[nodiscard]] auto began() const noexcept -> bool { return began_; }
     [[nodiscard]] auto commit() noexcept -> bool {
+        if (!started_local_) {
+            committed_ = true;
+            return true;
+        }
         int const commit_rc = sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);
         if (commit_rc == SQLITE_OK) {
             committed_ = true;
@@ -60,6 +86,7 @@ public:
 private:
     sqlite3* db_;
     bool     began_{false};
+    bool     started_local_{false};
     bool     committed_{false};
 };
 
@@ -178,60 +205,102 @@ auto bind_optional_int( // NOLINT(llvm-prefer-static-over-anonymous-namespace)
     return sqlite3_column_int(stmt->get(), 0) == 1;
 }
 
-[[nodiscard]] auto insert_game_tags( // NOLINT(llvm-prefer-static-over-anonymous-namespace)
-    sqlite3* conn,
-    std::uint32_t game_id,
-    std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>
-{
-    for (auto const& [tag_name, tag_value] : extra_tags) {
-        std::int64_t tag_id = 0;
-
-        auto tag_sel = prepare(conn, "SELECT id FROM tag WHERE name = ?");
-        if (!tag_sel) {
-            return tl::unexpected{tag_sel.error()};
-        }
-        sqlite3_bind_text(
-            tag_sel->get(), 1,
-            tag_name.c_str(), static_cast<int>(tag_name.size()), SQLITE_TRANSIENT);
-
-        if (sqlite3_step(tag_sel->get()) == SQLITE_ROW) {
-            tag_id = sqlite3_column_int64(tag_sel->get(), 0);
-        } else {
-            auto tag_ins = prepare(conn, "INSERT INTO tag(name) VALUES(?)");
-            if (!tag_ins) {
-                return tl::unexpected{tag_ins.error()};
-            }
-            sqlite3_bind_text(
-                tag_ins->get(), 1,
-                tag_name.c_str(), static_cast<int>(tag_name.size()), SQLITE_TRANSIENT);
-            if (sqlite3_step(tag_ins->get()) != SQLITE_DONE) {
-                return tl::unexpected{error_code::io_failure};
-            }
-            tag_id = sqlite3_last_insert_rowid(conn);
-        }
-
-        auto gt_ins = prepare(conn,
-            "INSERT INTO game_tag(game_id, tag_id, value) VALUES(?, ?, ?)");
-        if (!gt_ins) {
-            return tl::unexpected{gt_ins.error()};
-        }
-        sqlite3_bind_int64(gt_ins->get(), 1, static_cast<std::int64_t>(game_id));
-        sqlite3_bind_int64(gt_ins->get(), 2, tag_id);
-        sqlite3_bind_text(
-            gt_ins->get(), 3,
-            tag_value.c_str(), static_cast<int>(tag_value.size()), SQLITE_TRANSIENT);
-        if (sqlite3_step(gt_ins->get()) != SQLITE_DONE) {
-            return tl::unexpected{error_code::io_failure};
-        }
-    }
-    return {};
-}
-
 } // namespace
 
 // ── game_store ────────────────────────────────────────────────────────────────
 
 game_store::game_store(sqlite3* conn) noexcept : db_{conn} {}
+
+game_store::~game_store() noexcept
+{
+    finalize_stmt(select_player_stmt_);
+    finalize_stmt(insert_player_stmt_);
+    finalize_stmt(select_event_stmt_);
+    finalize_stmt(insert_event_stmt_);
+    finalize_stmt(insert_game_stmt_);
+    finalize_stmt(select_tag_stmt_);
+    finalize_stmt(insert_tag_stmt_);
+    finalize_stmt(insert_game_tag_stmt_);
+}
+
+game_store::game_store(game_store&& other) noexcept
+    : db_ {std::exchange(other.db_, nullptr)}
+    , player_id_cache_ {std::move(other.player_id_cache_)}
+    , event_id_cache_ {std::move(other.event_id_cache_)}
+    , tag_id_cache_ {std::move(other.tag_id_cache_)}
+    , select_player_stmt_ {std::exchange(other.select_player_stmt_, nullptr)}
+    , insert_player_stmt_ {std::exchange(other.insert_player_stmt_, nullptr)}
+    , select_event_stmt_ {std::exchange(other.select_event_stmt_, nullptr)}
+    , insert_event_stmt_ {std::exchange(other.insert_event_stmt_, nullptr)}
+    , insert_game_stmt_ {std::exchange(other.insert_game_stmt_, nullptr)}
+    , select_tag_stmt_ {std::exchange(other.select_tag_stmt_, nullptr)}
+    , insert_tag_stmt_ {std::exchange(other.insert_tag_stmt_, nullptr)}
+    , insert_game_tag_stmt_ {std::exchange(other.insert_game_tag_stmt_, nullptr)}
+{
+}
+
+auto game_store::operator=(game_store&& other) noexcept -> game_store&
+{
+    if (this != &other) {
+        finalize_stmt(select_player_stmt_);
+        finalize_stmt(insert_player_stmt_);
+        finalize_stmt(select_event_stmt_);
+        finalize_stmt(insert_event_stmt_);
+        finalize_stmt(insert_game_stmt_);
+        finalize_stmt(select_tag_stmt_);
+        finalize_stmt(insert_tag_stmt_);
+        finalize_stmt(insert_game_tag_stmt_);
+
+        db_ = std::exchange(other.db_, nullptr);
+        player_id_cache_ = std::move(other.player_id_cache_);
+        event_id_cache_ = std::move(other.event_id_cache_);
+        tag_id_cache_ = std::move(other.tag_id_cache_);
+        select_player_stmt_ = std::exchange(other.select_player_stmt_, nullptr);
+        insert_player_stmt_ = std::exchange(other.insert_player_stmt_, nullptr);
+        select_event_stmt_ = std::exchange(other.select_event_stmt_, nullptr);
+        insert_event_stmt_ = std::exchange(other.insert_event_stmt_, nullptr);
+        insert_game_stmt_ = std::exchange(other.insert_game_stmt_, nullptr);
+        select_tag_stmt_ = std::exchange(other.select_tag_stmt_, nullptr);
+        insert_tag_stmt_ = std::exchange(other.insert_tag_stmt_, nullptr);
+        insert_game_tag_stmt_ = std::exchange(other.insert_game_tag_stmt_, nullptr);
+    }
+    return *this;
+}
+
+auto game_store::prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql)
+    -> result<sqlite3_stmt*>
+{
+    if (stmt == nullptr) {
+        sqlite3_stmt* raw = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &raw, nullptr) != SQLITE_OK) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        stmt = raw;
+    }
+    reset_stmt(stmt);
+    return stmt;
+}
+
+auto game_store::begin_transaction() -> result<void>
+{
+    if (sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+auto game_store::commit_transaction() -> result<void>
+{
+    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+auto game_store::rollback_transaction() noexcept -> void
+{
+    sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+}
 
 auto game_store::create_schema() -> result<void> {
     auto pragma_rc = exec(db_, "PRAGMA foreign_keys = ON;");
@@ -301,64 +370,147 @@ auto game_store::create_schema() -> result<void> {
 }
 
 auto game_store::find_or_insert_player(player const& plr) -> result<std::int64_t> {
+    if (auto const cached = player_id_cache_.find(plr.name);
+        cached != player_id_cache_.end())
     {
-        auto sel = prepare(db_, "SELECT id FROM player WHERE name = ?");
+        return cached->second;
+    }
+
+    {
+        auto sel = prepare_cached_stmt(select_player_stmt_,
+                                       "SELECT id FROM player WHERE name = ?");
         if (!sel) {
-            return tl::unexpected{sel.error()};
+            return tl::unexpected {sel.error()};
         }
         sqlite3_bind_text(
-            sel->get(), 1,
+            *sel, 1,
             plr.name.c_str(), static_cast<int>(plr.name.size()), SQLITE_TRANSIENT);
-        if (sqlite3_step(sel->get()) == SQLITE_ROW) {
-            return sqlite3_column_int64(sel->get(), 0);
+        if (sqlite3_step(*sel) == SQLITE_ROW) {
+            auto const player_id = sqlite3_column_int64(*sel, 0);
+            player_id_cache_.emplace(plr.name, player_id);
+            return player_id;
         }
     }
 
-    auto ins = prepare(db_, "INSERT INTO player(name, elo, title, country) VALUES(?, ?, ?, ?)");
+    auto ins = prepare_cached_stmt(insert_player_stmt_,
+                                   "INSERT INTO player(name, elo, title, country) VALUES(?, ?, ?, ?)");
     if (!ins) {
         return tl::unexpected{ins.error()};
     }
     sqlite3_bind_text(
-        ins->get(), 1,
+        *ins, 1,
         plr.name.c_str(), static_cast<int>(plr.name.size()), SQLITE_TRANSIENT);
-    bind_optional_int(ins->get(), 2, plr.elo);
-    bind_optional_text(ins->get(), 3, plr.title);
-    bind_optional_text(ins->get(), 4, plr.country);
+    bind_optional_int(*ins, 2, plr.elo);
+    bind_optional_text(*ins, 3, plr.title);
+    bind_optional_text(*ins, 4, plr.country);
 
-    if (sqlite3_step(ins->get()) != SQLITE_DONE) {
+    if (sqlite3_step(*ins) != SQLITE_DONE) {
         return tl::unexpected{error_code::io_failure};
     }
-    return sqlite3_last_insert_rowid(db_);
+    auto const player_id = sqlite3_last_insert_rowid(db_);
+    player_id_cache_.emplace(plr.name, player_id);
+    return player_id;
 }
 
 auto game_store::find_or_insert_event(event const& evt) -> result<std::int64_t> {
+    if (auto const cached = event_id_cache_.find(evt.name);
+        cached != event_id_cache_.end())
     {
-        auto sel = prepare(db_, "SELECT id FROM event WHERE name = ?");
+        return cached->second;
+    }
+
+    {
+        auto sel = prepare_cached_stmt(select_event_stmt_,
+                                       "SELECT id FROM event WHERE name = ?");
         if (!sel) {
             return tl::unexpected{sel.error()};
         }
         sqlite3_bind_text(
-            sel->get(), 1,
+            *sel, 1,
             evt.name.c_str(), static_cast<int>(evt.name.size()), SQLITE_TRANSIENT);
-        if (sqlite3_step(sel->get()) == SQLITE_ROW) {
-            return sqlite3_column_int64(sel->get(), 0);
+        if (sqlite3_step(*sel) == SQLITE_ROW) {
+            auto const event_id = sqlite3_column_int64(*sel, 0);
+            event_id_cache_.emplace(evt.name, event_id);
+            return event_id;
         }
     }
 
-    auto ins = prepare(db_, "INSERT INTO event(name, site, date) VALUES(?, ?, ?)");
+    auto ins = prepare_cached_stmt(insert_event_stmt_,
+                                   "INSERT INTO event(name, site, date) VALUES(?, ?, ?)");
     if (!ins) {
         return tl::unexpected{ins.error()};
     }
     sqlite3_bind_text(
-        ins->get(), 1,
+        *ins, 1,
         evt.name.c_str(), static_cast<int>(evt.name.size()), SQLITE_TRANSIENT);
-    bind_optional_text(ins->get(), 2, evt.site);
-    bind_optional_text(ins->get(), 3, evt.date);
+    bind_optional_text(*ins, 2, evt.site);
+    bind_optional_text(*ins, 3, evt.date);
 
-    if (sqlite3_step(ins->get()) != SQLITE_DONE) {
+    if (sqlite3_step(*ins) != SQLITE_DONE) {
         return tl::unexpected{error_code::io_failure};
     }
-    return sqlite3_last_insert_rowid(db_);
+    auto const event_id = sqlite3_last_insert_rowid(db_);
+    event_id_cache_.emplace(evt.name, event_id);
+    return event_id;
+}
+
+auto game_store::insert_game_tags(
+    std::uint32_t game_id,
+    std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>
+{
+    for (auto const& [tag_name, tag_value] : extra_tags) {
+        std::int64_t tag_id = 0;
+
+        if (auto const cached = tag_id_cache_.find(tag_name);
+            cached != tag_id_cache_.end())
+        {
+            tag_id = cached->second;
+        } else {
+            auto tag_sel = prepare_cached_stmt(select_tag_stmt_,
+                                               "SELECT id FROM tag WHERE name = ?");
+            if (!tag_sel) {
+                return tl::unexpected {tag_sel.error()};
+            }
+            sqlite3_bind_text(
+                *tag_sel, 1,
+                tag_name.c_str(), static_cast<int>(tag_name.size()), SQLITE_TRANSIENT);
+
+            if (sqlite3_step(*tag_sel) == SQLITE_ROW) {
+                tag_id = sqlite3_column_int64(*tag_sel, 0);
+            } else {
+                auto tag_ins = prepare_cached_stmt(insert_tag_stmt_,
+                                                   "INSERT INTO tag(name) VALUES(?)");
+                if (!tag_ins) {
+                    return tl::unexpected {tag_ins.error()};
+                }
+                sqlite3_bind_text(
+                    *tag_ins, 1,
+                    tag_name.c_str(), static_cast<int>(tag_name.size()), SQLITE_TRANSIENT);
+                if (sqlite3_step(*tag_ins) != SQLITE_DONE) {
+                    return tl::unexpected {error_code::io_failure};
+                }
+                tag_id = sqlite3_last_insert_rowid(db_);
+            }
+            tag_id_cache_.emplace(tag_name, tag_id);
+        }
+
+        auto game_tag_ins = prepare_cached_stmt(
+            insert_game_tag_stmt_,
+            "INSERT INTO game_tag(game_id, tag_id, value) VALUES(?, ?, ?)");
+        if (!game_tag_ins) {
+            return tl::unexpected {game_tag_ins.error()};
+        }
+        sqlite3_bind_int64(*game_tag_ins, 1, static_cast<std::int64_t>(game_id));
+        sqlite3_bind_int64(*game_tag_ins, 2, tag_id);
+        sqlite3_bind_text(
+            *game_tag_ins, 3,
+            tag_value.c_str(), static_cast<int>(tag_value.size()), SQLITE_TRANSIENT);
+        if (sqlite3_step(*game_tag_ins) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    return {};
 }
 
 auto game_store::insert(game const& src_game) -> result<std::uint32_t> {
@@ -388,32 +540,33 @@ auto game_store::insert(game const& src_game) -> result<std::uint32_t> {
     auto const& moves      = src_game.moves;
     auto const  blob_bytes = moves.size() * sizeof(std::uint16_t);
 
-    auto game_ins = prepare(db_,
+    auto game_ins = prepare_cached_stmt(
+        insert_game_stmt_,
         "INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves) "
         "VALUES(?, ?, ?, ?, ?, ?, ?)");
     if (!game_ins) {
         return tl::unexpected{game_ins.error()};
     }
 
-    sqlite3_bind_int64(game_ins->get(), game_ins_param::white_id, *white_id);
-    sqlite3_bind_int64(game_ins->get(), game_ins_param::black_id, *black_id);
+    sqlite3_bind_int64(*game_ins, game_ins_param::white_id, *white_id);
+    sqlite3_bind_int64(*game_ins, game_ins_param::black_id, *black_id);
     if (event_id_val) {
-        sqlite3_bind_int64(game_ins->get(), game_ins_param::event_id, *event_id_val);
+        sqlite3_bind_int64(*game_ins, game_ins_param::event_id, *event_id_val);
     } else {
-        sqlite3_bind_null(game_ins->get(), game_ins_param::event_id);
+        sqlite3_bind_null(*game_ins, game_ins_param::event_id);
     }
-    bind_optional_text(game_ins->get(), game_ins_param::date, src_game.date);
-    sqlite3_bind_text(game_ins->get(), game_ins_param::result,
+    bind_optional_text(*game_ins, game_ins_param::date, src_game.date);
+    sqlite3_bind_text(*game_ins, game_ins_param::result,
         src_game.result.c_str(), static_cast<int>(src_game.result.size()), SQLITE_TRANSIENT);
-    bind_optional_text(game_ins->get(), game_ins_param::eco, src_game.eco);
+    bind_optional_text(*game_ins, game_ins_param::eco, src_game.eco);
     if (blob_bytes == 0) {
-        sqlite3_bind_zeroblob(game_ins->get(), game_ins_param::moves, 0);
+        sqlite3_bind_zeroblob(*game_ins, game_ins_param::moves, 0);
     } else {
-        sqlite3_bind_blob(game_ins->get(), game_ins_param::moves,
+        sqlite3_bind_blob(*game_ins, game_ins_param::moves,
             moves.data(), static_cast<int>(blob_bytes), SQLITE_TRANSIENT);
     }
 
-    int const ins_rc = sqlite3_step(game_ins->get());
+    int const ins_rc = sqlite3_step(*game_ins);
     if (ins_rc == SQLITE_CONSTRAINT) {
         return tl::unexpected{error_code::duplicate};
     }
@@ -423,7 +576,7 @@ auto game_store::insert(game const& src_game) -> result<std::uint32_t> {
 
     auto const new_game_id = static_cast<std::uint32_t>(sqlite3_last_insert_rowid(db_));
 
-    auto tags_rc = insert_game_tags(db_, new_game_id, src_game.extra_tags);
+    auto tags_rc = insert_game_tags(new_game_id, src_game.extra_tags);
     if (!tags_rc) {
         return tl::unexpected{tags_rc.error()};
     }
