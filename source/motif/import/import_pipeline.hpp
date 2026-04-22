@@ -17,15 +17,15 @@ namespace motif::import
 
 struct import_config
 {
-    static constexpr std::size_t k_default_lines = 64;
+    static constexpr std::size_t k_default_lines = 1;
     static constexpr std::size_t k_default_batch_size = 500;
 
-    // Taskflow executor threads; default = hardware_concurrency (≥1).
-    std::size_t num_workers {std::max(1U, std::thread::hardware_concurrency())};
-    // In-flight pipeline slots — bounds peak memory (each slot holds one
-    // pgn::game).
+    std::size_t num_workers {1};
     std::size_t num_lines {k_default_lines};
-    // Write checkpoint every batch_size games committed.
+    bool write_positions {false};
+    bool rebuild_positions_after_import {true};
+    bool create_position_index_after_rebuild {true};
+    bool sort_positions_by_zobrist_after_rebuild {false};
     std::size_t batch_size {k_default_batch_size};
 };
 
@@ -43,6 +43,8 @@ struct import_progress
     std::size_t games_processed {};
     std::size_t games_committed {};
     std::size_t games_skipped {};
+    std::size_t errors {};
+    std::size_t total_games {};
     std::chrono::milliseconds elapsed {};
 };
 
@@ -79,6 +81,8 @@ class import_pipeline
     std::atomic<std::size_t> games_processed_ {0};
     std::atomic<std::size_t> games_committed_ {0};
     std::atomic<std::size_t> games_skipped_ {0};
+    std::atomic<std::size_t> games_errored_ {0};
+    std::atomic<std::size_t> total_games_ {0};
     std::atomic<std::int64_t> start_time_ns_ {0};
 };
 

@@ -14,7 +14,7 @@
 
 #include <chesslib/board/board.hpp>  // NOLINT(misc-include-cleaner)
 #include <chesslib/board/move_codec.hpp>
-#include <chesslib/util/san_replay.hpp>
+#include <chesslib/util/san.hpp>
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <tl/expected.hpp>
 
@@ -198,13 +198,14 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     encoded_moves.reserve(pgn_game.moves.size());
     position_rows.reserve(pgn_game.moves.size());
 
-    auto replay = chesslib::san::replayer {board};
     for (auto const& node : pgn_game.moves) {
-        auto move_res = replay.play(node.san);
+        auto move_res = chesslib::san::from_string(board, node.san);
         if (!move_res) {
             return tl::unexpected(error_code::parse_error);
         }
         encoded_moves.push_back(chesslib::codec::encode(*move_res));
+        chesslib::move_maker mmaker {board, *move_res};
+        mmaker.make();
 
         position_rows.push_back(motif::db::position_row {
             .zobrist_hash = board.hash(),
