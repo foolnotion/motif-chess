@@ -584,7 +584,7 @@ So that I can click through the main line of an opening rapidly without per-move
 **Given** a user opens the opening tree from the starting position
 **When** `opening_tree::open` is called
 **Then** the first 5 levels of the tree are prefetched in a single DuckDB query and held in memory (AR10)
-**And** each node contains the statistics from Story 3.2 (move frequency, win/draw/loss, avg Elo)
+**And** each node contains the statistics from Story 3.2 (move frequency, win/draw/loss, avg Elo, ECO code, opening name)
 
 **Given** the user expands a node beyond depth 5
 **When** `opening_tree::expand` is called on that node
