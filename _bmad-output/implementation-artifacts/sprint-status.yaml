@@ -35,13 +35,13 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-22  # updated: epic 2 complete, all stories done
+last_updated: 2026-04-23  # updated: story 3.2 code review, patches applied
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
 
-  development_status:
+development_status:
   # ─── Epic 1: Game Database Foundation ───────────────────────────────────────
   epic-1: done
   1-1-project-scaffold-restructure: done
@@ -62,12 +62,14 @@ story_location: _bmad-output/implementation-artifacts
   2-7-integrate-pgnlib-import-stream-into-import-pipeline: done
   2-8-reprofile-and-tune-remaining-import-storage-path: done
   2-9-import-pipeline-performance-optimization: done
+  2-10-apply-d009-sorted-zobrist-plus-deferred-cleanup: done
+  2-11-concurrency-exploration-for-serial-import: done
   epic-2-retrospective: done
 
   # ─── Epic 3: Position Search & Opening Statistics ───────────────────────────
-  epic-3: backlog
-  3-1-position-search-by-zobrist-hash: backlog
-  3-2-opening-statistics-per-position: backlog
+  epic-3: in-progress
+  3-1-position-search-by-zobrist-hash: done
+  3-2-opening-statistics-per-position: in-progress
   3-3-lazy-opening-tree-with-prefetch: backlog
 
   # ─── Epic 4: Desktop Application ───────────────────────────────────
