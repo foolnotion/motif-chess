@@ -1,18 +1,20 @@
-#include "motif/db/position_store.hpp"
-
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <vector>
 
-#include "motif/db/types.hpp"
+#include "motif/db/position_store.hpp"
 
 #include <duckdb.h>
 #include <tl/expected.hpp>
 
 #include "motif/db/error.hpp"
+#include "motif/db/types.hpp"
 
-namespace {
+namespace
+{
 
 // language=sql
 constexpr char const* create_position = R"sql(
@@ -27,18 +29,9 @@ constexpr char const* create_position = R"sql(
 )sql";
 
 // language=sql
-constexpr char const* create_position_idx = R"sql(
-    CREATE INDEX IF NOT EXISTS idx_position_zobrist_hash
-    ON position(zobrist_hash)
-)sql";
-
-// language=sql
-constexpr char const* drop_position_idx = R"sql(
-    DROP INDEX IF EXISTS idx_position_zobrist_hash
-)sql";
-
-// language=sql
 constexpr char const* sort_position_by_zobrist = R"sql(
+    DROP TABLE IF EXISTS position_sorted;
+
     CREATE TABLE position_sorted AS
     SELECT *
     FROM position
@@ -48,45 +41,22 @@ constexpr char const* sort_position_by_zobrist = R"sql(
     ALTER TABLE position_sorted RENAME TO position;
 )sql";
 
-} // namespace
+}  // namespace
 
-namespace motif::db {
+namespace motif::db
+{
 
 position_store::position_store(duckdb_connection con) noexcept
-    : con_{con}
+    : con_ {con}
 {
 }
 
 auto position_store::initialize_schema() -> result<void>
 {
-    duckdb_result res{};
+    duckdb_result res {};
     auto const create_ret = duckdb_query(con_, create_position, &res);
     duckdb_destroy_result(&res);
     if (create_ret == DuckDBError) {
-        return tl::unexpected{error_code::io_failure};
-    }
-
-    return create_zobrist_index();
-}
-
-auto position_store::create_zobrist_index() -> result<void>
-{
-    duckdb_result idx_res {};
-    auto const idx_ret = duckdb_query(con_, create_position_idx, &idx_res);
-    duckdb_destroy_result(&idx_res);
-    if (idx_ret == DuckDBError) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    return {};
-}
-
-auto position_store::drop_zobrist_index() -> result<void>
-{
-    duckdb_result idx_res {};
-    auto const idx_ret = duckdb_query(con_, drop_position_idx, &idx_res);
-    duckdb_destroy_result(&idx_res);
-    if (idx_ret == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -105,11 +75,14 @@ auto position_store::sort_by_zobrist() -> result<void>
     return {};
 }
 
-auto position_store::insert_batch(std::span<position_row const> rows) -> result<void>
+auto position_store::insert_batch(std::span<position_row const> rows)
+    -> result<void>
 {
-    duckdb_appender appender{};
-    if (duckdb_appender_create(con_, nullptr, "position", &appender) == DuckDBError) {
-        return tl::unexpected{error_code::io_failure};
+    duckdb_appender appender {};
+    if (duckdb_appender_create(con_, nullptr, "position", &appender)
+        == DuckDBError)
+    {
+        return tl::unexpected {error_code::io_failure};
     }
 
     for (auto const& row : rows) {
@@ -130,60 +103,66 @@ auto position_store::insert_batch(std::span<position_row const> rows) -> result<
         }
         if (duckdb_appender_end_row(appender) == DuckDBError) {
             duckdb_appender_destroy(&appender);
-            return tl::unexpected{error_code::io_failure};
+            return tl::unexpected {error_code::io_failure};
         }
     }
 
     auto const flush_ret = duckdb_appender_flush(appender);
     duckdb_appender_destroy(&appender);
     if (flush_ret == DuckDBError) {
-        return tl::unexpected{error_code::io_failure};
+        return tl::unexpected {error_code::io_failure};
     }
 
     return {};
 }
 
-auto position_store::row_count() -> result<std::int64_t>
+auto position_store::row_count() const -> result<std::int64_t>
 {
-    duckdb_result res{};
-    if (duckdb_query(con_, "SELECT count(*) FROM position", &res) == DuckDBError) {
+    duckdb_result res {};
+    if (duckdb_query(con_, "SELECT count(*) FROM position", &res)
+        == DuckDBError)
+    {
         duckdb_destroy_result(&res);
-        return tl::unexpected{error_code::io_failure};
+        return tl::unexpected {error_code::io_failure};
     }
     auto const count = duckdb_value_int64(&res, 0, 0);
     duckdb_destroy_result(&res);
     return count;
 }
 
-auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash)
+auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash) const
     -> result<std::vector<position_match>>
 {
-    duckdb_result res{};
+    duckdb_result res {};
     std::ostringstream sql;
-    sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position WHERE zobrist_hash = "
+    sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position "
+           "WHERE zobrist_hash = "
         << zobrist_hash;
     if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
         duckdb_destroy_result(&res);
-        return tl::unexpected{error_code::io_failure};
+        return tl::unexpected {error_code::io_failure};
     }
 
-    auto const row_count = duckdb_row_count(&res);
+    auto const row_count = static_cast<std::size_t>(duckdb_row_count(&res));
     std::vector<position_match> matches;
-    matches.reserve(static_cast<std::size_t>(row_count));
+    matches.reserve(row_count);
 
-    for (std::int64_t i = 0; i < row_count; ++i) {
-        auto white_elo = std::optional<std::int16_t>{};
-        if (!duckdb_value_is_null(&res, 3, i)) {
-            white_elo = static_cast<std::int16_t>(duckdb_value_int16(&res, 3, i));
+    for (std::size_t i = 0; i < row_count; ++i) {
+        auto const row_idx = static_cast<idx_t>(i);
+        auto white_elo = std::optional<std::int16_t> {};
+        if (!duckdb_value_is_null(&res, 3, row_idx)) {
+            white_elo =
+                static_cast<std::int16_t>(duckdb_value_int16(&res, 3, row_idx));
         }
-        auto black_elo = std::optional<std::int16_t>{};
-        if (!duckdb_value_is_null(&res, 4, i)) {
-            black_elo = static_cast<std::int16_t>(duckdb_value_int16(&res, 4, i));
+        auto black_elo = std::optional<std::int16_t> {};
+        if (!duckdb_value_is_null(&res, 4, row_idx)) {
+            black_elo =
+                static_cast<std::int16_t>(duckdb_value_int16(&res, 4, row_idx));
         }
-        matches.push_back(position_match{
-            .game_id = duckdb_value_uint32(&res, 0, i),
-            .ply = static_cast<std::uint16_t>(duckdb_value_int16(&res, 1, i)),
-            .result = duckdb_value_int8(&res, 2, i),
+        matches.push_back(position_match {
+            .game_id = duckdb_value_uint32(&res, 0, row_idx),
+            .ply = static_cast<std::uint16_t>(duckdb_value_int16(&res, 1, row_idx)),
+            .result = duckdb_value_int8(&res, 2, row_idx),
             .white_elo = white_elo,
             .black_elo = black_elo,
         });
@@ -193,27 +172,41 @@ auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash)
     return matches;
 }
 
-auto position_store::query_opening_moves(std::uint64_t const zobrist_hash)
+auto position_store::query_opening_moves(std::uint64_t const zobrist_hash) const
     -> result<std::vector<opening_move_stat>>
 {
-    duckdb_result res{};
+    duckdb_result res {};
     std::ostringstream sql;
-    sql << "SELECT game_id, ply, result FROM position WHERE zobrist_hash = "
+    sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position "
+           "WHERE zobrist_hash = "
         << zobrist_hash;
     if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
         duckdb_destroy_result(&res);
-        return tl::unexpected{error_code::io_failure};
+        return tl::unexpected {error_code::io_failure};
     }
 
-    auto const row_count = duckdb_row_count(&res);
+    auto const row_count = static_cast<std::size_t>(duckdb_row_count(&res));
     std::vector<opening_move_stat> stats;
-    stats.reserve(static_cast<std::size_t>(row_count));
+    stats.reserve(row_count);
 
-    for (std::int64_t i = 0; i < row_count; ++i) {
-        stats.push_back(opening_move_stat{
-            .game_id = duckdb_value_uint32(&res, 0, i),
-            .ply = static_cast<std::uint16_t>(duckdb_value_int16(&res, 1, i)),
-            .result = duckdb_value_int8(&res, 2, i),
+    for (std::size_t i = 0; i < row_count; ++i) {
+        auto const row_idx = static_cast<idx_t>(i);
+        auto white_elo = std::optional<std::int16_t> {};
+        if (!duckdb_value_is_null(&res, 3, row_idx)) {
+            white_elo =
+                static_cast<std::int16_t>(duckdb_value_int16(&res, 3, row_idx));
+        }
+        auto black_elo = std::optional<std::int16_t> {};
+        if (!duckdb_value_is_null(&res, 4, row_idx)) {
+            black_elo =
+                static_cast<std::int16_t>(duckdb_value_int16(&res, 4, row_idx));
+        }
+        stats.push_back(opening_move_stat {
+            .game_id = duckdb_value_uint32(&res, 0, row_idx),
+            .ply = static_cast<std::uint16_t>(duckdb_value_int16(&res, 1, row_idx)),
+            .result = duckdb_value_int8(&res, 2, row_idx),
+            .white_elo = white_elo,
+            .black_elo = black_elo,
         });
     }
 
@@ -221,29 +214,30 @@ auto position_store::query_opening_moves(std::uint64_t const zobrist_hash)
     return stats;
 }
 
-auto position_store::sample_zobrist_hashes(std::size_t const limit)
+auto position_store::sample_zobrist_hashes(std::size_t const limit,
+                                             std::uint64_t const seed) const
     -> result<std::vector<std::uint64_t>>
 {
-    duckdb_result res{};
+    duckdb_result res {};
     std::ostringstream sql;
     sql << "SELECT DISTINCT zobrist_hash FROM position USING SAMPLE reservoir("
-        << limit << " ROWS)";
+        << limit << " ROWS) REPEATABLE (" << seed << ")";
     if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
         duckdb_destroy_result(&res);
-        return tl::unexpected{error_code::io_failure};
+        return tl::unexpected {error_code::io_failure};
     }
 
-    auto const row_count = duckdb_row_count(&res);
+    auto const row_count = static_cast<std::size_t>(duckdb_row_count(&res));
     std::vector<std::uint64_t> hashes;
-    hashes.reserve(static_cast<std::size_t>(row_count));
+    hashes.reserve(row_count);
 
-    for (std::int64_t i = 0; i < row_count; ++i) {
+    for (std::size_t i = 0; i < row_count; ++i) {
         hashes.push_back(
-            static_cast<std::uint64_t>(duckdb_value_uint64(&res, 0, i)));
+            duckdb_value_uint64(&res, 0, static_cast<idx_t>(i)));
     }
 
     duckdb_destroy_result(&res);
     return hashes;
 }
 
-} // namespace motif::db
+}  // namespace motif::db

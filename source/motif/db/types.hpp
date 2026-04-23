@@ -7,51 +7,77 @@
 #include <utility>
 #include <vector>
 
-namespace motif::db {
+namespace motif::db
+{
 
-struct player {
+struct player
+{
     std::string name;
     std::optional<std::int32_t> elo;
     std::optional<std::string> title;
     std::optional<std::string> country;
 };
 
-struct event {
+struct event
+{
     std::string name;
     std::optional<std::string> site;
     std::optional<std::string> date;
 };
 
-struct position {
-    std::uint64_t zobrist_hash{};
-    std::uint32_t game_id{};
-    std::uint16_t ply{};
+struct position
+{
+    std::uint64_t zobrist_hash {};
+    std::uint32_t game_id {};
+    std::uint16_t ply {};
 };
 
-struct position_row {
-    std::uint64_t             zobrist_hash{};
-    std::uint32_t             game_id{};
-    std::uint16_t             ply{};
-    std::int8_t               result{};
+struct position_row
+{
+    std::uint64_t zobrist_hash {};
+    std::uint32_t game_id {};
+    std::uint16_t ply {};
+    std::int8_t result {};
     std::optional<std::int16_t> white_elo;
     std::optional<std::int16_t> black_elo;
 };
 
-struct position_match {
-    std::uint32_t game_id{};
-    std::uint16_t ply{};
-    std::int8_t   result{};
+struct position_match
+{
+    std::uint32_t game_id {};
+    std::uint16_t ply {};
+    std::int8_t result {};
     std::optional<std::int16_t> white_elo;
     std::optional<std::int16_t> black_elo;
 };
 
-struct opening_move_stat {
-    std::uint32_t game_id{};
-    std::uint16_t ply{};
-    std::int8_t   result{};
+struct opening_move_stat
+{
+    std::uint32_t game_id {};
+    std::uint16_t ply {};
+    std::int8_t result {};
+    std::optional<std::int16_t> white_elo;
+    std::optional<std::int16_t> black_elo;
 };
 
-struct game {
+struct game_context
+{
+    std::optional<std::string> eco;
+    std::optional<std::string> opening_name;
+    std::vector<std::uint16_t> moves;
+};
+
+struct opening_context
+{
+    std::optional<std::int32_t> white_elo;
+    std::optional<std::int32_t> black_elo;
+    std::optional<std::string> eco;
+    std::optional<std::string> opening_name;
+    std::vector<std::uint16_t> moves;
+};
+
+struct game
+{
     player white;
     player black;
     std::optional<event> event_details;
@@ -62,4 +88,4 @@ struct game {
     std::vector<std::pair<std::string, std::string>> extra_tags;
 };
 
-} // namespace motif::db
+}  // namespace motif::db
