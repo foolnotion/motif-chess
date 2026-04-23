@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -17,8 +18,8 @@
 #include <chesslib/board/move_codec.hpp>
 #include <duckdb.h>
 #include <gtl/meminfo.hpp>
-#include <sqlite3.h>
 #include <spdlog/spdlog.h>
+#include <sqlite3.h>
 #include <tl/expected.hpp>
 
 #include "motif/db/error.hpp"
@@ -50,8 +51,8 @@ auto exec_duckdb(duckdb_connection con, char const* sql) -> result<void>
 }
 
 auto append_position_rows_to(duckdb_connection con,
-                            std::string const& table_name,
-                            std::span<position_row const> rows) -> result<void>
+                             std::string const& table_name,
+                             std::span<position_row const> rows) -> result<void>
 {
     duckdb_appender appender {};
     if (duckdb_appender_create(con, nullptr, table_name.c_str(), &appender)
@@ -270,7 +271,7 @@ database_manager::database_manager(database_manager&& other) noexcept
     , dir_ {std::move(other.dir_)}
     , duck_db_ {std::exchange(other.duck_db_, nullptr)}
     , duck_con_ {std::exchange(other.duck_con_, nullptr)}
-    , positions_ {std::move(other.positions_)}
+    , positions_ {other.positions_}
 {
     other.store_.reset();
     other.positions_.reset();
@@ -287,7 +288,7 @@ auto database_manager::operator=(database_manager&& other) noexcept
         dir_ = std::move(other.dir_);
         duck_db_ = std::exchange(other.duck_db_, nullptr);
         duck_con_ = std::exchange(other.duck_con_, nullptr);
-        positions_ = std::move(other.positions_);
+        positions_ = other.positions_;
         other.store_.reset();
         other.positions_.reset();
     }
@@ -500,8 +501,7 @@ auto database_manager::positions() const noexcept -> position_store const&
     return *positions_;
 }
 
-auto database_manager::rebuild_position_store(bool const create_index,
-                                             bool const sort_by_zobrist)
+auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
     -> result<void>
 {
     if (duck_con_ == nullptr || !positions_) {
@@ -519,11 +519,6 @@ auto database_manager::rebuild_position_store(bool const create_index,
     };
 
     log_rss("start");
-
-    if (auto drop_res = positions_->drop_zobrist_index(); !drop_res) {
-        return tl::unexpected {drop_res.error()};
-    }
-    log_rss("after_drop_index");
 
     duckdb_result tx_res {};
     if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
@@ -554,6 +549,7 @@ auto database_manager::rebuild_position_store(bool const create_index,
             conn_, "SELECT id FROM game ORDER BY id", -1, &raw, nullptr)
         != SQLITE_OK)
     {
+        rollback();
         return tl::unexpected {error_code::io_failure};
     }
     auto const stmt_guard =
@@ -624,6 +620,14 @@ auto database_manager::rebuild_position_store(bool const create_index,
         return tl::unexpected {flush_res.error()};
     }
 
+    if (sort_by_zobrist) {
+        if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
+            rollback();
+            return tl::unexpected {sort_res.error()};
+        }
+        log_rss("after_sort_by_zobrist");
+    }
+
     duckdb_result commit_res {};
     if (duckdb_query(duck_con_, "COMMIT", &commit_res) == DuckDBError) {
         duckdb_destroy_result(&commit_res);
@@ -632,20 +636,6 @@ auto database_manager::rebuild_position_store(bool const create_index,
     }
     duckdb_destroy_result(&commit_res);
     log_rss("after_commit");
-
-    if (sort_by_zobrist) {
-        if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
-            return tl::unexpected {sort_res.error()};
-        }
-        log_rss("after_sort_by_zobrist");
-    }
-
-    if (create_index) {
-        if (auto create_res = positions_->create_zobrist_index(); !create_res) {
-            return tl::unexpected {create_res.error()};
-        }
-        log_rss("after_create_index");
-    }
 
     return {};
 }
@@ -670,10 +660,8 @@ auto database_manager::rebuild_partitioned_position_store(
 
     log_rss("start");
 
-    if (auto drop_res = positions_->drop_zobrist_index(); !drop_res) {
-        return tl::unexpected {drop_res.error()};
-    }
-    if (auto del_res = exec_duckdb(duck_con_, "DELETE FROM position"); !del_res) {
+    if (auto del_res = exec_duckdb(duck_con_, "DELETE FROM position"); !del_res)
+    {
         return tl::unexpected {del_res.error()};
     }
 
@@ -700,7 +688,6 @@ auto database_manager::rebuild_partitioned_position_store(
     }
     log_rss("after_collect_game_ids");
 
-    std::vector<std::uint32_t> created_partitions;
     std::vector<position_row> pending_rows;
     pending_rows.reserve(rebuild_batch_rows);
     std::optional<std::uint32_t> current_partition_id;
@@ -711,7 +698,8 @@ auto database_manager::rebuild_partitioned_position_store(
             return {};
         }
         auto const table_name = partition_table_name(partition_id);
-        auto ins_res = append_position_rows_to(duck_con_, table_name, pending_rows);
+        auto ins_res =
+            append_position_rows_to(duck_con_, table_name, pending_rows);
         pending_rows.clear();
         if (!ins_res) {
             return tl::unexpected {ins_res.error()};
@@ -742,10 +730,10 @@ auto database_manager::rebuild_partitioned_position_store(
             if (!create_res) {
                 return tl::unexpected {create_res.error()};
             }
-            created_partitions.push_back(partition_id);
             current_partition_id = partition_id;
         }
 
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) — store_ checked at function entry
         auto game_res = store_->get(game_id);
         if (!game_res) {
             return tl::unexpected {game_res.error()};
@@ -771,18 +759,6 @@ auto database_manager::rebuild_partitioned_position_store(
         if (!flush_res) {
             return tl::unexpected {flush_res.error()};
         }
-    }
-
-    for (auto const partition_id : created_partitions) {
-        auto const table_name = partition_table_name(partition_id);
-        std::ostringstream index_sql;
-        index_sql << "CREATE INDEX IF NOT EXISTS idx_" << table_name
-                  << "_zobrist_hash ON " << table_name << "(zobrist_hash)";
-        auto index_res = exec_duckdb(duck_con_, index_sql.str().c_str());
-        if (!index_res) {
-            return tl::unexpected {index_res.error()};
-        }
-        log_rss("after_partition_index");
     }
 
     return {};

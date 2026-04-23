@@ -3,6 +3,9 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <gtl/phmap.hpp>
 
@@ -13,21 +16,24 @@
 struct sqlite3;
 struct sqlite3_stmt;
 
-namespace motif::db {
+namespace motif::db
+{
 
-class game_store {
-public:
+class game_store
+{
+  public:
     explicit game_store(sqlite3* conn) noexcept;
     ~game_store() noexcept;
 
-    game_store(game_store const&)                    = delete;
+    game_store(game_store const&) = delete;
     auto operator=(game_store const&) -> game_store& = delete;
     game_store(game_store&& other) noexcept;
     auto operator=(game_store&& other) noexcept -> game_store&;
 
     // Create the five tables and supporting indexes.
     // Must be called once per connection before any other method.
-    // Duplicate key: (white_id, black_id, coalesced event_id, coalesced date, result, moves).
+    // Duplicate key: (white_id, black_id, coalesced event_id, coalesced date,
+    // result, moves).
     auto create_schema() -> result<void>;
 
     // Insert a game.  Returns the new game row id on success.
@@ -43,13 +49,21 @@ public:
 
     // Retrieve a game by id.  Returns error_code::not_found if absent.
     auto get(std::uint32_t game_id) -> result<game>;
+    auto get(std::uint32_t game_id) const -> result<game>;
+    auto get_opening_context(std::uint32_t game_id) -> result<opening_context>;
+    auto get_opening_context(std::uint32_t game_id) const
+        -> result<opening_context>;
+    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids)
+        -> result<std::unordered_map<std::uint32_t, game_context>>;
+    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const
+        -> result<std::unordered_map<std::uint32_t, game_context>>;
 
     // Delete the game row and all associated game_tag rows.
     // Player and event rows are preserved.
     // Returns error_code::not_found if the id does not exist.
     auto remove(std::uint32_t game_id) -> result<void>;
 
-private:
+  private:
     sqlite3* db_;
     gtl::flat_hash_map<std::string, std::int64_t> player_id_cache_;
     gtl::flat_hash_map<std::string, std::int64_t> event_id_cache_;
@@ -66,11 +80,12 @@ private:
 
     auto find_or_insert_player(player const& plr) -> result<std::int64_t>;
     auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
-    auto insert_game_tags(std::uint32_t game_id,
-                          std::vector<std::pair<std::string, std::string>> const& extra_tags)
+    auto insert_game_tags(
+        std::uint32_t game_id,
+        std::vector<std::pair<std::string, std::string>> const& extra_tags)
         -> result<void>;
     auto prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql)
         -> result<sqlite3_stmt*>;
 };
 
-} // namespace motif::db
+}  // namespace motif::db

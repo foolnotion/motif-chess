@@ -1,6 +1,7 @@
 // NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -14,7 +15,8 @@
 
 struct sqlite3;
 
-namespace motif::db {
+namespace motif::db
+{
 
 // Owns the lifecycle of a named chess database bundle:
 //   <dir>/games.db        — SQLite WAL (game metadata and moves)
@@ -22,11 +24,12 @@ namespace motif::db {
 //   <dir>/manifest.json   — glaze-serialized bundle metadata
 //
 // Obtain instances via the create() or open() factory methods.
-class database_manager {
-public:
+class database_manager
+{
+  public:
     ~database_manager();
 
-    database_manager(database_manager const&)                    = delete;
+    database_manager(database_manager const&) = delete;
     auto operator=(database_manager const&) -> database_manager& = delete;
     database_manager(database_manager&& other) noexcept;
     auto operator=(database_manager&& other) noexcept -> database_manager&;
@@ -57,11 +60,10 @@ public:
     [[nodiscard]] auto dir() const noexcept -> std::filesystem::path const&;
 
     // Drop and repopulate the DuckDB position table from all games in SQLite.
-    auto rebuild_position_store(bool create_index = true,
-                                bool sort_by_zobrist = false) -> result<void>;
+    auto rebuild_position_store(bool sort_by_zobrist = true) -> result<void>;
 
-    // Experimental: rebuild into partition tables and create one index per
-    // partition serially to cap peak memory during index construction.
+    // Experimental: rebuild into partition tables serially to cap peak memory
+    // during large imports.
     auto rebuild_partitioned_position_store(std::uint32_t game_id_span)
         -> result<void>;
 
@@ -69,16 +71,16 @@ public:
     // Safe to call multiple times.
     void close() noexcept;
 
-private:
+  private:
     database_manager() = default;
 
-    sqlite3*                    conn_{nullptr};
-    std::optional<game_store>   store_;
-    db_manifest                 manifest_;
-    std::filesystem::path       dir_;
-    duckdb_database             duck_db_{nullptr};
-    duckdb_connection           duck_con_{nullptr};
+    sqlite3* conn_ {nullptr};
+    std::optional<game_store> store_;
+    db_manifest manifest_;
+    std::filesystem::path dir_;
+    duckdb_database duck_db_ {nullptr};
+    duckdb_connection duck_con_ {nullptr};
     std::optional<position_store> positions_;
 };
 
-} // namespace motif::db
+}  // namespace motif::db
