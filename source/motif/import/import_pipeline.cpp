@@ -1,16 +1,15 @@
 #include <algorithm>
 #include <atomic>
-#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <ios>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -32,6 +31,7 @@
 #include "motif/db/types.hpp"
 #include "motif/import/checkpoint.hpp"
 #include "motif/import/error.hpp"
+#include "motif/import/pgn_helpers.hpp"
 #include "motif/import/pgn_reader.hpp"
 
 namespace motif::import
@@ -39,8 +39,6 @@ namespace motif::import
 
 namespace
 {
-
-constexpr std::int16_t k_max_elo = 32767;
 
 auto current_time_ns() noexcept -> std::int64_t
 {
@@ -64,13 +62,14 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
     }
     file.seekg(0);
 
-    constexpr std::size_t buf_size = 1 << 20;
+    constexpr std::size_t buf_size = 1048576;
     constexpr std::size_t overlap = event_marker.size() - 1;
     auto buf = std::string(buf_size + overlap, '\0');
     std::size_t count = 0;
     std::size_t carry = 0;
 
     while (true) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         file.read(buf.data() + static_cast<std::ptrdiff_t>(carry),
                   static_cast<std::streamsize>(buf_size));
         auto const read_len = static_cast<std::size_t>(file.gcount());
@@ -80,6 +79,7 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
 
         auto const total = carry + read_len;
         auto const* data = buf.data();
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         auto const* end = data + total;
 
         auto const* pos = data;
@@ -90,6 +90,7 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
                 break;
             }
             ++count;
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
             pos += event_marker.size();
         }
 
@@ -98,67 +99,12 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
         }
 
         auto const keep = std::min(total, overlap);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         std::memmove(buf.data(), end - keep, keep);
         carry = keep;
     }
 
     return count;
-}
-
-auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key)
-    -> std::string
-{
-    for (auto const& tag : tags) {
-        if (tag.key == key) {
-            return tag.value;
-        }
-    }
-    return {};
-}
-
-auto parse_elo(std::string const& raw) -> std::optional<std::int16_t>
-{
-    if (raw.empty() || raw == "?") {
-        return std::nullopt;
-    }
-    int val {};
-    auto const* const beg = raw.data();
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto const* const fin = raw.data() + raw.size();
-    auto const parsed = std::from_chars(beg, fin, val);
-    if (parsed.ec != std::errc {} || parsed.ptr != fin || val < 0
-        || val > k_max_elo)
-    {
-        return std::nullopt;
-    }
-    return static_cast<std::int16_t>(val);
-}
-
-auto pgn_result_to_string(pgn::result res) noexcept -> std::string
-{
-    switch (res) {
-        case pgn::result::white:
-            return "1-0";
-        case pgn::result::black:
-            return "0-1";
-        case pgn::result::draw:
-            return "1/2-1/2";
-        case pgn::result::unknown:
-            return "*";
-    }
-    return "*";
-}
-
-auto pgn_result_to_int8(pgn::result res) noexcept -> std::int8_t
-{
-    switch (res) {
-        case pgn::result::white:
-            return 1;
-        case pgn::result::black:
-            return -1;
-        default:
-            return 0;
-    }
 }
 
 struct prepared_game
@@ -185,7 +131,8 @@ struct pipeline_slot
 };
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
+auto prepare_game(pgn::game const& pgn_game, bool write_positions)
+    -> result<prepared_game>
 {
     auto const& tags = pgn_game.tags;
 
@@ -241,9 +188,11 @@ auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
 
     auto board = chesslib::board {};
     std::vector<std::uint16_t> encoded_moves;
-    std::vector<motif::db::position_row> position_rows;
     encoded_moves.reserve(pgn_game.moves.size());
-    position_rows.reserve(pgn_game.moves.size());
+    std::vector<motif::db::position_row> position_rows;
+    if (write_positions) {
+        position_rows.reserve(pgn_game.moves.size());
+    }
 
     for (auto const& node : pgn_game.moves) {
         auto move_result = chesslib::san::from_string(board, node.san);
@@ -253,14 +202,16 @@ auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
         encoded_moves.push_back(chesslib::codec::encode(*move_result));
         chesslib::move_maker mmaker {board, *move_result};
         mmaker.make();
-        position_rows.push_back(motif::db::position_row {
-            .zobrist_hash = board.hash(),
-            .game_id = 0,
-            .ply = static_cast<std::uint16_t>(encoded_moves.size()),
-            .result = result_int,
-            .white_elo = white_elo_opt,
-            .black_elo = black_elo_opt,
-        });
+        if (write_positions) {
+            position_rows.push_back(motif::db::position_row {
+                .zobrist_hash = board.hash(),
+                .game_id = 0,
+                .ply = static_cast<std::uint16_t>(encoded_moves.size()),
+                .result = result_int,
+                .white_elo = white_elo_opt,
+                .black_elo = black_elo_opt,
+            });
+        }
     }
 
     game_row.moves = std::move(encoded_moves);
@@ -335,6 +286,17 @@ auto import_pipeline::run_from(
     std::int64_t pre_last_game_id,
     import_config const& config) -> result<import_summary>
 {
+    if (config.num_workers == 0 || config.num_lines == 0) {
+        auto log = spdlog::get("motif.import");
+        if (log) {
+            log->error(
+                "import_config validation failed: num_workers={} num_lines={}",
+                config.num_workers,
+                config.num_lines);
+        }
+        return tl::unexpected {error_code::invalid_state};
+    }
+
     auto log = spdlog::get("motif.import");
 
     games_processed_.store(0, std::memory_order_relaxed);
@@ -437,7 +399,7 @@ auto import_pipeline::run_from(
         if (slot.state != slot_state::ready) {
             return;
         }
-        auto prep = prepare_game(slot.pgn_game);
+        auto prep = prepare_game(slot.pgn_game, config.write_positions);
         if (!prep) {
             slot.state = slot_state::parse_error;
             slot.error = prep.error();
@@ -602,7 +564,6 @@ auto import_pipeline::run_from(
 
     if (!config.write_positions && config.rebuild_positions_after_import) {
         if (auto rebuild_res = db_.rebuild_position_store(
-                config.create_position_index_after_rebuild,
                 config.sort_positions_by_zobrist_after_rebuild);
             !rebuild_res)
         {

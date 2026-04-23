@@ -1,13 +1,11 @@
 // NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <thread>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/import/error.hpp"
@@ -17,16 +15,16 @@ namespace motif::import
 
 struct import_config
 {
-    static constexpr std::size_t k_default_lines = 1;
-    static constexpr std::size_t k_default_batch_size = 500;
+    static constexpr std::size_t default_num_workers = 4;
+    static constexpr std::size_t default_lines = 64;
+    static constexpr std::size_t default_batch_size = 500;
 
-    std::size_t num_workers {1};
-    std::size_t num_lines {k_default_lines};
+    std::size_t num_workers {default_num_workers};
+    std::size_t num_lines {default_lines};
     bool write_positions {false};
     bool rebuild_positions_after_import {true};
-    bool create_position_index_after_rebuild {true};
-    bool sort_positions_by_zobrist_after_rebuild {false};
-    std::size_t batch_size {k_default_batch_size};
+    bool sort_positions_by_zobrist_after_rebuild {true};
+    std::size_t batch_size {default_batch_size};
 };
 
 struct import_summary
