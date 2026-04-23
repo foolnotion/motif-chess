@@ -17,3 +17,6 @@ compile_commands.json
 .github/skills/
 .gemini/
 .opencode/
+
+# Local benchmark corpora
+bench/data/
