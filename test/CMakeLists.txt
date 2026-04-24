@@ -43,6 +43,7 @@ catch_discover_tests(motif_import_test)
 add_executable(motif_search_test
     source/motif_search/position_search_test.cpp
     source/motif_search/opening_stats_test.cpp
+    source/motif_search/opening_tree_test.cpp
 )
 target_link_libraries(motif_search_test PRIVATE motif_search motif_import Catch2::Catch2WithMain)
 target_compile_features(motif_search_test PRIVATE cxx_std_23)

@@ -27,6 +27,9 @@ class position_store
         -> result<std::vector<position_match>>;
     auto query_opening_moves(std::uint64_t zobrist_hash) const
         -> result<std::vector<opening_move_stat>>;
+    auto query_tree_slice(std::uint64_t root_hash,
+                          std::uint16_t max_depth) const
+        -> result<std::vector<tree_position_row>>;
     auto sample_zobrist_hashes(std::size_t limit, std::uint64_t seed = 0) const
         -> result<std::vector<std::uint64_t>>;
 

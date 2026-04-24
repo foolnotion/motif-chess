@@ -136,8 +136,8 @@ auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash) const
     duckdb_result res {};
     std::ostringstream sql;
     sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position "
-           "WHERE zobrist_hash = "
-        << zobrist_hash;
+           "WHERE zobrist_hash = CAST("
+        << zobrist_hash << " AS UBIGINT)";
     if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
         duckdb_destroy_result(&res);
         return tl::unexpected {error_code::io_failure};
@@ -178,8 +178,8 @@ auto position_store::query_opening_moves(std::uint64_t const zobrist_hash) const
     duckdb_result res {};
     std::ostringstream sql;
     sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position "
-           "WHERE zobrist_hash = "
-        << zobrist_hash;
+           "WHERE zobrist_hash = CAST("
+        << zobrist_hash << " AS UBIGINT)";
     if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
         duckdb_destroy_result(&res);
         return tl::unexpected {error_code::io_failure};
@@ -214,8 +214,70 @@ auto position_store::query_opening_moves(std::uint64_t const zobrist_hash) const
     return stats;
 }
 
+auto position_store::query_tree_slice(std::uint64_t const root_hash,
+                                      std::uint16_t const max_depth) const
+    -> result<std::vector<tree_position_row>>
+{
+    constexpr auto white_elo_col = 5;
+    constexpr auto black_elo_col = 6;
+
+    duckdb_result res {};
+    std::ostringstream sql;
+    sql << "SELECT "
+           "p_root.game_id, "
+           "p_root.ply AS root_ply, "
+           "CAST(p_cont.ply - p_root.ply AS USMALLINT) AS depth, "
+           "p_cont.zobrist_hash AS child_hash, "
+           "p_cont.result, "
+           "p_cont.white_elo, "
+           "p_cont.black_elo "
+           "FROM position p_root "
+           "JOIN position p_cont "
+           "ON  p_root.game_id = p_cont.game_id "
+           "AND p_cont.ply > p_root.ply "
+           "AND p_cont.ply <= p_root.ply + "
+        << max_depth
+        << " WHERE p_root.zobrist_hash = CAST(" << root_hash
+        << " AS UBIGINT)"
+        << " ORDER BY p_root.game_id, p_cont.ply";
+    if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
+        duckdb_destroy_result(&res);
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const row_count = static_cast<std::size_t>(duckdb_row_count(&res));
+    std::vector<tree_position_row> rows;
+    rows.reserve(row_count);
+
+    for (std::size_t i = 0; i < row_count; ++i) {
+        auto const row_idx = static_cast<idx_t>(i);
+        auto white_elo = std::optional<std::int16_t> {};
+        if (!duckdb_value_is_null(&res, white_elo_col, row_idx)) {
+            white_elo = static_cast<std::int16_t>(
+                duckdb_value_int16(&res, white_elo_col, row_idx));
+        }
+        auto black_elo = std::optional<std::int16_t> {};
+        if (!duckdb_value_is_null(&res, black_elo_col, row_idx)) {
+            black_elo = static_cast<std::int16_t>(
+                duckdb_value_int16(&res, black_elo_col, row_idx));
+        }
+        rows.push_back(tree_position_row {
+            .game_id = duckdb_value_uint32(&res, 0, row_idx),
+            .root_ply = duckdb_value_uint16(&res, 1, row_idx),
+            .depth = duckdb_value_uint16(&res, 2, row_idx),
+            .child_hash = duckdb_value_uint64(&res, 3, row_idx),
+            .result = duckdb_value_int8(&res, 4, row_idx),
+            .white_elo = white_elo,
+            .black_elo = black_elo,
+        });
+    }
+
+    duckdb_destroy_result(&res);
+    return rows;
+}
+
 auto position_store::sample_zobrist_hashes(std::size_t const limit,
-                                             std::uint64_t const seed) const
+                                           std::uint64_t const seed) const
     -> result<std::vector<std::uint64_t>>
 {
     duckdb_result res {};
@@ -232,8 +294,7 @@ auto position_store::sample_zobrist_hashes(std::size_t const limit,
     hashes.reserve(row_count);
 
     for (std::size_t i = 0; i < row_count; ++i) {
-        hashes.push_back(
-            duckdb_value_uint64(&res, 0, static_cast<idx_t>(i)));
+        hashes.push_back(duckdb_value_uint64(&res, 0, static_cast<idx_t>(i)));
     }
 
     duckdb_destroy_result(&res);

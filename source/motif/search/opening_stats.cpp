@@ -44,8 +44,8 @@ struct continuation_key_hash
         constexpr std::size_t lshift = 12U;
         constexpr std::size_t rshift = 4U;
         auto seed = std::hash<std::uint32_t> {}(key.game_id);
-        seed ^= static_cast<std::size_t>(key.encoded_move)
-                + phi + (seed << lshift) + (seed >> rshift);
+        seed ^= static_cast<std::size_t>(key.encoded_move) + phi
+            + (seed << lshift) + (seed >> rshift);
         return seed;
     }
 };
@@ -53,6 +53,7 @@ struct continuation_key_hash
 struct continuation_aggregate
 {
     std::uint16_t encoded_move {};
+    std::uint64_t result_hash {};
     std::uint32_t frequency {};
     std::uint32_t white_wins {};
     std::uint32_t draws {};
@@ -158,6 +159,7 @@ auto replay_position(motif::db::game_context const& context,
 namespace motif::search::opening_stats
 {
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 auto query(motif::db::database_manager const& database,
            std::uint64_t const zobrist_hash) -> result<stats>
 {
@@ -176,9 +178,8 @@ auto query(motif::db::database_manager const& database,
         game_ids.push_back(move_row.game_id);
     }
     std::ranges::sort(game_ids);
-    // NOLINTNEXTLINE(boost-use-ranges, modernize-use-ranges): std::unique erase-remove not yet in std::ranges
-    game_ids.erase(std::unique(game_ids.begin(), game_ids.end()),
-                   game_ids.end());
+    auto const unique_end = std::ranges::unique(game_ids);
+    game_ids.erase(unique_end.begin(), unique_end.end());
 
     auto contexts = database.store().get_game_contexts(game_ids);
     if (!contexts) {
@@ -192,7 +193,9 @@ auto query(motif::db::database_manager const& database,
         if (ctx_it == contexts->end()) {
             continue;
         }
-        if (static_cast<std::size_t>(move_row.ply) >= ctx_it->second.moves.size()) {
+        if (static_cast<std::size_t>(move_row.ply)
+            >= ctx_it->second.moves.size())
+        {
             continue;
         }
         auto replayed = replay_position(ctx_it->second, move_row.ply);
@@ -209,7 +212,8 @@ auto query(motif::db::database_manager const& database,
 
     auto grouped = std::map<std::uint16_t, continuation_aggregate> {};
     auto eco_lookup = std::map<std::string, std::string, std::less<>> {};
-    auto seen = std::unordered_map<continuation_key, bool, continuation_key_hash> {};
+    auto seen =
+        std::unordered_map<continuation_key, bool, continuation_key_hash> {};
 
     for (auto const& move_row : *opening_moves) {
         auto const ctx_it = contexts->find(move_row.game_id);
@@ -225,8 +229,8 @@ auto query(motif::db::database_manager const& database,
         auto const encoded_continuation =
             context.moves[static_cast<std::size_t>(move_row.ply)];
 
-        auto const key = continuation_key {.game_id = move_row.game_id,
-                                           .encoded_move = encoded_continuation};
+        auto const key = continuation_key {
+            .game_id = move_row.game_id, .encoded_move = encoded_continuation};
         if (seen.contains(key)) {
             continue;
         }
@@ -236,6 +240,13 @@ auto query(motif::db::database_manager const& database,
             grouped.try_emplace(encoded_continuation, continuation_aggregate {})
                 .first->second;
         aggregate.encoded_move = encoded_continuation;
+        if (aggregate.frequency == 0U) {
+            auto const cont_move =
+                chesslib::codec::decode(encoded_continuation);
+            auto child_board = position;
+            chesslib::move_maker {child_board, cont_move}.make();
+            aggregate.result_hash = child_board.hash();
+        }
         ++aggregate.frequency;
         note_result(aggregate, move_row.result);
         note_elo(aggregate, move_row.white_elo, move_row.black_elo);
@@ -271,6 +282,7 @@ auto query(motif::db::database_manager const& database,
 
         output.continuations.push_back(continuation {
             .san = san,
+            .result_hash = aggregate.result_hash,
             .frequency = aggregate.frequency,
             .white_wins = aggregate.white_wins,
             .draws = aggregate.draws,
