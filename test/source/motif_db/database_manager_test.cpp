@@ -46,29 +46,42 @@ constexpr auto select_position_hashes_sql = R"sql(
     FROM position
 )sql";
 
+struct duckdb_handle_guard
+{
+    duckdb_database db {};
+    duckdb_connection con {};
+    duckdb_result res {};
+
+    duckdb_handle_guard() = default;
+    duckdb_handle_guard(duckdb_handle_guard const&) = delete;
+    auto operator=(duckdb_handle_guard const&) -> duckdb_handle_guard& = delete;
+    duckdb_handle_guard(duckdb_handle_guard&&) = delete;
+    auto operator=(duckdb_handle_guard&&) -> duckdb_handle_guard& = delete;
+
+    ~duckdb_handle_guard()
+    {
+        duckdb_destroy_result(&res);
+        duckdb_disconnect(&con);
+        duckdb_close(&db);
+    }
+};
+
 auto read_position_hashes(std::filesystem::path const& duckdb_path)
     -> std::vector<std::uint64_t>
 {
-    duckdb_database db {};
-    REQUIRE(duckdb_open(duckdb_path.c_str(), &db) == DuckDBSuccess);
-
-    duckdb_connection con {};
-    REQUIRE(duckdb_connect(db, &con) == DuckDBSuccess);
-
-    duckdb_result res {};
-    REQUIRE(duckdb_query(con, select_position_hashes_sql, &res)
+    auto handles = duckdb_handle_guard {};
+    REQUIRE(duckdb_open(duckdb_path.c_str(), &handles.db) == DuckDBSuccess);
+    REQUIRE(duckdb_connect(handles.db, &handles.con) == DuckDBSuccess);
+    REQUIRE(duckdb_query(handles.con, select_position_hashes_sql, &handles.res)
             == DuckDBSuccess);
 
-    auto const row_count = duckdb_row_count(&res);
+    auto const row_count = duckdb_row_count(&handles.res);
     std::vector<std::uint64_t> hashes;
     hashes.reserve(static_cast<std::size_t>(row_count));
-    for (std::int64_t i = 0; i < row_count; ++i) {
-        hashes.push_back(duckdb_value_uint64(&res, 0, i));
+    for (idx_t row_idx = 0; row_idx < row_count; ++row_idx) {
+        hashes.push_back(duckdb_value_uint64(&handles.res, 0, row_idx));
     }
 
-    duckdb_destroy_result(&res);
-    duckdb_disconnect(&con);
-    duckdb_close(&db);
     return hashes;
 }
 

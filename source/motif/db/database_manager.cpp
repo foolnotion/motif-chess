@@ -5,8 +5,6 @@
 #include <limits>
 #include <memory>
 #include <optional>
-#include <span>
-#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -38,64 +36,6 @@ namespace motif::db
 namespace
 {
 constexpr std::size_t rebuild_batch_rows = 50'000;
-
-auto exec_duckdb(duckdb_connection con, char const* sql) -> result<void>
-{
-    duckdb_result res {};
-    auto const ret = duckdb_query(con, sql, &res);
-    duckdb_destroy_result(&res);
-    if (ret == DuckDBError) {
-        return tl::unexpected {error_code::io_failure};
-    }
-    return {};
-}
-
-auto append_position_rows_to(duckdb_connection con,
-                             std::string const& table_name,
-                             std::span<position_row const> rows) -> result<void>
-{
-    duckdb_appender appender {};
-    if (duckdb_appender_create(con, nullptr, table_name.c_str(), &appender)
-        == DuckDBError)
-    {
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    for (auto const& row : rows) {
-        duckdb_appender_begin_row(appender);
-        duckdb_append_uint64(appender, row.zobrist_hash);
-        duckdb_append_uint32(appender, row.game_id);
-        duckdb_append_uint16(appender, row.ply);
-        duckdb_append_int8(appender, row.result);
-        if (row.white_elo.has_value()) {
-            duckdb_append_int16(appender, *row.white_elo);
-        } else {
-            duckdb_append_null(appender);
-        }
-        if (row.black_elo.has_value()) {
-            duckdb_append_int16(appender, *row.black_elo);
-        } else {
-            duckdb_append_null(appender);
-        }
-        if (duckdb_appender_end_row(appender) == DuckDBError) {
-            duckdb_appender_destroy(&appender);
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    auto const flush_ret = duckdb_appender_flush(appender);
-    duckdb_appender_destroy(&appender);
-    if (flush_ret == DuckDBError) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    return {};
-}
-
-auto partition_table_name(std::uint32_t partition_id) -> std::string
-{
-    return "position_part_" + std::to_string(partition_id);
-}
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto open_sqlite(std::filesystem::path const& db_path) -> result<sqlite3*>
@@ -636,130 +576,6 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
     }
     duckdb_destroy_result(&commit_res);
     log_rss("after_commit");
-
-    return {};
-}
-
-auto database_manager::rebuild_partitioned_position_store(
-    std::uint32_t const game_id_span) -> result<void>
-{
-    if (duck_con_ == nullptr || !positions_ || game_id_span == 0) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    auto log = spdlog::get("motif.db");
-    auto log_rss = [&](char const* const phase) -> void
-    {
-        if (log == nullptr) {
-            return;
-        }
-        log->info("rebuild_partitioned_position_store rss {}: {} bytes",
-                  phase,
-                  gtl::GetProcessMemoryUsed());
-    };
-
-    log_rss("start");
-
-    if (auto del_res = exec_duckdb(duck_con_, "DELETE FROM position"); !del_res)
-    {
-        return tl::unexpected {del_res.error()};
-    }
-
-    sqlite3_stmt* raw = nullptr;
-    if (sqlite3_prepare_v2(
-            conn_, "SELECT id FROM game ORDER BY id", -1, &raw, nullptr)
-        != SQLITE_OK)
-    {
-        return tl::unexpected {error_code::io_failure};
-    }
-    auto const stmt_guard =
-        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {
-            raw, sqlite3_finalize};
-
-    std::vector<std::uint32_t> game_ids;
-    int step_result = sqlite3_step(stmt_guard.get());
-    while (step_result == SQLITE_ROW) {
-        game_ids.push_back(static_cast<std::uint32_t>(
-            sqlite3_column_int(stmt_guard.get(), 0)));
-        step_result = sqlite3_step(stmt_guard.get());
-    }
-    if (step_result != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
-    }
-    log_rss("after_collect_game_ids");
-
-    std::vector<position_row> pending_rows;
-    pending_rows.reserve(rebuild_batch_rows);
-    std::optional<std::uint32_t> current_partition_id;
-
-    auto flush_partition_rows = [&](std::uint32_t partition_id) -> result<void>
-    {
-        if (pending_rows.empty()) {
-            return {};
-        }
-        auto const table_name = partition_table_name(partition_id);
-        auto ins_res =
-            append_position_rows_to(duck_con_, table_name, pending_rows);
-        pending_rows.clear();
-        if (!ins_res) {
-            return tl::unexpected {ins_res.error()};
-        }
-        log_rss("after_partition_flush");
-        return {};
-    };
-
-    for (auto const game_id : game_ids) {
-        auto const partition_id = (game_id - 1U) / game_id_span;
-        if (!current_partition_id.has_value()
-            || *current_partition_id != partition_id)
-        {
-            if (current_partition_id.has_value()) {
-                auto flush_res = flush_partition_rows(*current_partition_id);
-                if (!flush_res) {
-                    return tl::unexpected {flush_res.error()};
-                }
-            }
-
-            auto const table_name = partition_table_name(partition_id);
-            std::ostringstream create_sql;
-            create_sql << "CREATE TABLE IF NOT EXISTS " << table_name
-                       << " (zobrist_hash UBIGINT NOT NULL, game_id UINTEGER NOT NULL, "
-                          "ply USMALLINT NOT NULL, result TINYINT NOT NULL, "
-                          "white_elo SMALLINT, black_elo SMALLINT)";
-            auto create_res = exec_duckdb(duck_con_, create_sql.str().c_str());
-            if (!create_res) {
-                return tl::unexpected {create_res.error()};
-            }
-            current_partition_id = partition_id;
-        }
-
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) — store_ checked at function entry
-        auto game_res = store_->get(game_id);
-        if (!game_res) {
-            return tl::unexpected {game_res.error()};
-        }
-
-        auto const result_code = map_result(game_res->result);
-        auto batch = build_position_rows(*game_res, game_id, result_code);
-        if (!batch) {
-            return tl::unexpected {batch.error()};
-        }
-
-        pending_rows.insert(pending_rows.end(), batch->begin(), batch->end());
-        if (pending_rows.size() >= rebuild_batch_rows) {
-            auto flush_res = flush_partition_rows(*current_partition_id);
-            if (!flush_res) {
-                return tl::unexpected {flush_res.error()};
-            }
-        }
-    }
-
-    if (current_partition_id.has_value()) {
-        auto flush_res = flush_partition_rows(*current_partition_id);
-        if (!flush_res) {
-            return tl::unexpected {flush_res.error()};
-        }
-    }
 
     return {};
 }

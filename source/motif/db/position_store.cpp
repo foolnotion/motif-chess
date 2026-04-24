@@ -161,7 +161,7 @@ auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash) const
         }
         matches.push_back(position_match {
             .game_id = duckdb_value_uint32(&res, 0, row_idx),
-            .ply = static_cast<std::uint16_t>(duckdb_value_int16(&res, 1, row_idx)),
+            .ply = duckdb_value_uint16(&res, 1, row_idx),
             .result = duckdb_value_int8(&res, 2, row_idx),
             .white_elo = white_elo,
             .black_elo = black_elo,
@@ -203,7 +203,7 @@ auto position_store::query_opening_moves(std::uint64_t const zobrist_hash) const
         }
         stats.push_back(opening_move_stat {
             .game_id = duckdb_value_uint32(&res, 0, row_idx),
-            .ply = static_cast<std::uint16_t>(duckdb_value_int16(&res, 1, row_idx)),
+            .ply = duckdb_value_uint16(&res, 1, row_idx),
             .result = duckdb_value_int8(&res, 2, row_idx),
             .white_elo = white_elo,
             .black_elo = black_elo,

@@ -25,8 +25,12 @@
 #include "motif/import/import_pipeline.hpp"
 #include "motif/import/logger.hpp"
 
+#include "test_helpers.hpp"
+
 namespace
 {
+
+using test_helpers::is_sanitized_build;
 
 struct tmp_dir
 {
@@ -133,6 +137,7 @@ void insert_games_and_rebuild(motif::db::database_manager& manager,
 
 constexpr auto us_per_ms = 1000.0;
 constexpr auto perf_sample_hashes = std::size_t {100};
+constexpr auto perf_sample_seed = std::uint64_t {42};
 constexpr auto perf_p99_limit_us = 500000.0;
 constexpr auto white_elo_high = std::int32_t {2500};
 constexpr auto black_elo_high = std::int32_t {2400};
@@ -230,6 +235,14 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void run_opening_stats_perf_test()
 {
+    if (is_sanitized_build) {
+        SKIP("performance checks are skipped in sanitize builds");
+    }
+
+#ifndef NDEBUG
+    SKIP("performance checks run only in release builds");
+#endif
+
     // Perf fixture setup is intentionally end-to-end.
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
@@ -252,7 +265,8 @@ void run_opening_stats_perf_test()
     REQUIRE(summary->committed > 0);
 
     auto sample_hashes =
-        manager->positions().sample_zobrist_hashes(perf_sample_hashes, 42);
+        manager->positions().sample_zobrist_hashes(perf_sample_hashes,
+                                                   perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
@@ -270,14 +284,7 @@ void run_opening_stats_perf_test()
               << "  max:          " << result.max_us << " us\n"
               << "  total rows:   " << result.total_rows_returned << "\n";
 
-    #if !defined(NDEBUG)
-    WARN(
-        result.p99_us
-        << " us P99 on dev build (threshold is release-calibrated at "
-        << perf_p99_limit_us << " us)");
-#else
     CHECK(result.p99_us < perf_p99_limit_us);
-#endif
 
     auto const shutdown_result = motif::import::shutdown_logging();
     REQUIRE(shutdown_result.has_value());
@@ -419,6 +426,53 @@ TEST_CASE("opening_stats::query returns empty statistics for missing positions",
         *manager, hash_after_sans({"c4", "e5", "Nc3"}));
     REQUIRE(stats.has_value());
     CHECK(stats->continuations.empty());
+}
+
+TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats",
+          "[motif-search][opening_stats]")
+{
+    tmp_dir const tdir {"orphaned-row"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "search-db");
+    REQUIRE(manager.has_value());
+
+    auto orphaned_game_id = manager->store().insert(
+        make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                   .result = "1-0",
+                   .white_elo = white_elo_high,
+                   .black_elo = black_elo_high,
+                   .eco = std::string {"C40"},
+                   .opening_name = std::string {"King's Knight Opening"}}));
+    REQUIRE(orphaned_game_id.has_value());
+
+    auto surviving_game_id = manager->store().insert(
+        make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                   .result = "0-1",
+                   .white_elo = white_elo_low,
+                   .black_elo = black_elo_other,
+                   .eco = std::string {"C25"},
+                   .opening_name = std::string {"Vienna Game"}}));
+    REQUIRE(surviving_game_id.has_value());
+
+    auto rebuilt = manager->rebuild_position_store();
+    REQUIRE(rebuilt.has_value());
+
+    auto removed = manager->store().remove(*orphaned_game_id);
+    REQUIRE(removed.has_value());
+
+    auto stats = motif::search::opening_stats::query(
+        *manager, hash_after_sans({"e4", "e5"}));
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->continuations.size() == 1);
+
+    auto const& continuation = stats->continuations.front();
+    CHECK(continuation.san == "Nc3");
+    CHECK(continuation.frequency == 1);
+    CHECK(continuation.white_wins == 0);
+    CHECK(continuation.draws == 0);
+    CHECK(continuation.black_wins == 1);
+    CHECK(continuation.eco == std::optional<std::string> {"C25"});
+    CHECK(continuation.opening_name == std::optional<std::string> {"Vienna Game"});
 }
 
 TEST_CASE("opening_stats::query performance on sorted position store",

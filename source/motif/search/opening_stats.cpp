@@ -39,9 +39,14 @@ struct continuation_key_hash
 {
     auto operator()(continuation_key const& key) const noexcept -> std::size_t
     {
-        auto const h1 = std::hash<std::uint32_t> {}(key.game_id);
-        auto const h2 = std::hash<std::uint16_t> {}(key.encoded_move);
-        return h1 ^ (h2 << 1U);
+        // 64-bit Boost hash_combine: golden ratio constant + avalanche shifts
+        constexpr std::size_t phi = 0x9e3779b97f4a7c15ULL;
+        constexpr std::size_t lshift = 12U;
+        constexpr std::size_t rshift = 4U;
+        auto seed = std::hash<std::uint32_t> {}(key.game_id);
+        seed ^= static_cast<std::size_t>(key.encoded_move)
+                + phi + (seed << lshift) + (seed >> rshift);
+        return seed;
     }
 };
 
@@ -124,7 +129,8 @@ auto dominant_eco(continuation_aggregate const& aggregate)
             best = it;
         }
     }
-
+    // On count ties the first alphabetical ECO code wins (std::map order).
+    // Deterministic; arbitrary. Acceptable for display purposes.
     return best->first;
 }
 
@@ -170,6 +176,7 @@ auto query(motif::db::database_manager const& database,
         game_ids.push_back(move_row.game_id);
     }
     std::ranges::sort(game_ids);
+    // NOLINTNEXTLINE(boost-use-ranges, modernize-use-ranges): std::unique erase-remove not yet in std::ranges
     game_ids.erase(std::unique(game_ids.begin(), game_ids.end()),
                    game_ids.end());
 
@@ -190,7 +197,7 @@ auto query(motif::db::database_manager const& database,
         }
         auto replayed = replay_position(ctx_it->second, move_row.ply);
         if (replayed) {
-            position = std::move(*replayed);
+            position = *replayed;
             position_set = true;
             break;
         }
@@ -218,7 +225,8 @@ auto query(motif::db::database_manager const& database,
         auto const encoded_continuation =
             context.moves[static_cast<std::size_t>(move_row.ply)];
 
-        auto const key = continuation_key {move_row.game_id, encoded_continuation};
+        auto const key = continuation_key {.game_id = move_row.game_id,
+                                           .encoded_move = encoded_continuation};
         if (seen.contains(key)) {
             continue;
         }

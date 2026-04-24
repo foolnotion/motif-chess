@@ -10,6 +10,16 @@ project(
     LANGUAGES CXX
 )
 
+option(
+    motif_ENABLE_X86_64_V3
+    "Enable -march=x86-64-v3 for x86_64 builds"
+    OFF
+)
+
+if(motif_ENABLE_X86_64_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=x86-64-v3>)
+endif()
+
 include(cmake/project-is-top-level.cmake)
 include(cmake/variables.cmake)
 

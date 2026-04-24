@@ -153,6 +153,7 @@ been caught during planning. If official docs are unavailable, read the library'
 - Test naming: `TEST_CASE("game_store: insert deduplicates players", "[motif-db]")`.
 - Storage tests use real in-memory SQLite (`:memory:`) and DuckDB instances — **no mocks for the storage layer**.
 - Every public API function must have tests.
+- Never run performance tests in parallel with other performance tests or other heavy test workloads; serialized execution is required so measurements are not polluted and perf gates do not fail spuriously.
 - Sanitizer gate: `cmake --preset=dev-sanitize && ctest --test-dir build/dev-sanitize` must be clean before a story is marked done.
 
 ---

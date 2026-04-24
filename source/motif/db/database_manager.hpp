@@ -62,11 +62,6 @@ class database_manager
     // Drop and repopulate the DuckDB position table from all games in SQLite.
     auto rebuild_position_store(bool sort_by_zobrist = true) -> result<void>;
 
-    // Experimental: rebuild into partition tables serially to cap peak memory
-    // during large imports.
-    auto rebuild_partitioned_position_store(std::uint32_t game_id_span)
-        -> result<void>;
-
     // Release all connections and clear internal state.
     // Safe to call multiple times.
     void close() noexcept;
