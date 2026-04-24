@@ -60,6 +60,17 @@ struct opening_move_stat
     std::optional<std::int16_t> black_elo;
 };
 
+struct tree_position_row
+{
+    std::uint32_t game_id {};
+    std::uint16_t root_ply {};
+    std::uint16_t depth {};
+    std::uint64_t child_hash {};
+    std::int8_t result {};
+    std::optional<std::int16_t> white_elo;
+    std::optional<std::int16_t> black_elo;
+};
+
 struct game_context
 {
     std::optional<std::string> eco;

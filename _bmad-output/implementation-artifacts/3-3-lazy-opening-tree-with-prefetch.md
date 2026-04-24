@@ -1,6 +1,6 @@
 # Story 3.3: Lazy Opening Tree with Prefetch
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -36,22 +36,29 @@ so that I can click through the main line of an opening rapidly without per-move
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `position_store::query_tree_slice` to `motif_db` (AC: 1)
-  - [ ] Add `tree_position_row` struct to `source/motif/db/types.hpp`
-  - [ ] Add `query_tree_slice(uint64_t root_hash, uint16_t max_depth) -> result<vector<tree_position_row>>` to `position_store.hpp` and implement in `position_store.cpp`
-  - [ ] The single DuckDB query is a self-JOIN on `position`: games that contain `root_hash` at some ply P, joined to rows in `[P+1, P+max_depth]` from the same game
+- [x] Task 1: Add `position_store::query_tree_slice` to `motif_db` (AC: 1)
+  - [x] Add `tree_position_row` struct to `source/motif/db/types.hpp`
+  - [x] Add `query_tree_slice(uint64_t root_hash, uint16_t max_depth) -> result<vector<tree_position_row>>` to `position_store.hpp` and implement in `position_store.cpp`
+  - [x] The single DuckDB query is a self-JOIN on `position`: games that contain `root_hash` at some ply P, joined to rows in `[P+1, P+max_depth]` from the same game
 
-- [ ] Task 2: Add `opening_tree` API in `motif_search` (AC: 1, 2, 3, 4)
-  - [ ] Add `source/motif/search/opening_tree.hpp` with all public types and functions
-  - [ ] Add `source/motif/search/opening_tree.cpp` implementing `open` and `expand`
-  - [ ] Update `source/motif/search/CMakeLists.txt` to compile `opening_tree.cpp`
-  - [ ] `open`: call `query_tree_slice`, batch-fetch game contexts from `game_store`, build tree in-memory
-  - [ ] `expand`: call `opening_stats::query` for the node's hash, populate children, mark `is_expanded = true`
+- [x] Task 2: Add `opening_tree` API in `motif_search` (AC: 1, 2, 3, 4)
+  - [x] Add `source/motif/search/opening_tree.hpp` with all public types and functions
+  - [x] Add `source/motif/search/opening_tree.cpp` implementing `open` and `expand`
+  - [x] Update `source/motif/search/CMakeLists.txt` to compile `opening_tree.cpp`
+  - [x] `open`: call `query_tree_slice`, batch-fetch game contexts from `game_store`, build tree in-memory
+  - [x] `expand`: call `opening_stats::query` for the node's hash, populate children, mark `is_expanded = true`
 
-- [ ] Task 3: Tests (AC: 1, 2, 3, 4, 5)
-  - [ ] Add `test/source/motif_search/opening_tree_test.cpp`
-  - [ ] Update `test/CMakeLists.txt` to include `opening_tree_test.cpp` in `motif_search_test`
-  - [ ] Cover: open prefetches correct depth, no re-query on expand of prefetched node, custom prefetch_depth, on-demand expand beyond prefetch, empty root, performance
+- [x] Task 3: Tests (AC: 1, 2, 3, 4, 5)
+  - [x] Add `test/source/motif_search/opening_tree_test.cpp`
+  - [x] Update `test/CMakeLists.txt` to include `opening_tree_test.cpp` in `motif_search_test`
+  - [x] Cover: open prefetches correct depth, no re-query on expand of prefetched node, custom prefetch_depth, on-demand expand beyond prefetch, empty root, performance
+
+### Review Findings
+
+- [x] [Review][Patch] `open(..., 0)` returns an already-expanded empty root, so later `expand()` can never load any continuations and lazy loading is effectively disabled. [`source/motif/search/opening_tree.cpp:241`]
+- [x] [Review][Patch] `open()` does not satisfy the story's "one batched SQLite query" constraint for large result sets because `get_game_contexts()` splits requests into 500-id chunks and can issue multiple SQLite queries. The current tests also do not assert query counts, so this acceptance criterion can regress silently. [`source/motif/search/opening_tree.cpp:278`, `source/motif/db/game_store.cpp:851`]
+- [x] [Review][Patch] The prefetched tree builder collapses repeated occurrences of the same root position within one game by keying state only by `game_id` and deduplicating by `(game_id, encoded_move)`, which can attach descendants to the wrong parent or undercount frequencies when a game revisits the root position. [`source/motif/search/opening_tree.cpp:297`, `source/motif/search/opening_tree.cpp:393`]
+- [x] [Review][Patch] `prefetch_depth` is a `std::size_t` in the public API but is narrowed to `std::uint16_t` without validation, so large caller-supplied depths silently wrap to the wrong query depth. [`source/motif/search/opening_tree.cpp:251`]
 
 ## Dev Notes
 
@@ -385,17 +392,24 @@ claude-sonnet-4-6
 - opening_stats::continuation must have result_hash added — populate via chesslib replay at the aggregation step in opening_stats.cpp
 - expand() delegates to opening_stats::query — no duplicate aggregation logic
 - Tree never fully materializes: subtree = nullptr for unexpanded nodes; unique_ptr breaks the recursive struct cycle
-- All Story 3.2 carry-forwards explicitly documented to prevent regression
+- All Story 3.2 carry-forwards explicitly handled: dedup key, hash combiner, orphan handling, opening_name selection, ply uint16 accessor
+- All 123 tests pass (0 failures) under both dev and dev-sanitize builds
+- Zero warnings from clang-tidy and cppcheck
+- result_hash populated in opening_stats::query via chesslib board replay — computed once per unique encoded_move at first occurrence
 
 ### File List
 
-- `source/motif/db/types.hpp`
-- `source/motif/db/position_store.hpp`
-- `source/motif/db/position_store.cpp`
-- `source/motif/search/opening_stats.hpp`
-- `source/motif/search/opening_stats.cpp`
-- `source/motif/search/opening_tree.hpp`
-- `source/motif/search/opening_tree.cpp`
-- `source/motif/search/CMakeLists.txt`
-- `test/CMakeLists.txt`
-- `test/source/motif_search/opening_tree_test.cpp`
+- `source/motif/db/types.hpp` — added `tree_position_row` struct
+- `source/motif/db/position_store.hpp` — added `query_tree_slice` declaration
+- `source/motif/db/position_store.cpp` — implemented `query_tree_slice` with DuckDB self-JOIN
+- `source/motif/search/opening_stats.hpp` — added `result_hash` field to `continuation` struct
+- `source/motif/search/opening_stats.cpp` — populate `result_hash` during aggregation via chesslib replay
+- `source/motif/search/opening_tree.hpp` — new file: public API types (`node`, `node_continuation`, `tree`) and functions (`open`, `expand`)
+- `source/motif/search/opening_tree.cpp` — new file: implementation of `open` (prefetch tree via single DuckDB query) and `expand` (on-demand via opening_stats::query)
+- `source/motif/search/CMakeLists.txt` — added `opening_tree.cpp` to motif_search library
+- `test/CMakeLists.txt` — added `opening_tree_test.cpp` to motif_search_test executable
+- `test/source/motif_search/opening_tree_test.cpp` — new file: 9 test cases covering all acceptance criteria
+
+## Change Log
+
+- 2026-04-24: Implemented Story 3.3 — lazy opening tree with prefetch. Added `query_tree_slice` self-JOIN query, `opening_tree::open` with configurable prefetch depth, `opening_tree::expand` for on-demand loading, extended `opening_stats::continuation` with `result_hash`. All 123 tests pass, zero warnings, ASan+UBSan clean.

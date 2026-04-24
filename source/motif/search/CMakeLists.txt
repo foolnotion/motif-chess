@@ -4,6 +4,7 @@ find_package(tl-expected REQUIRED)
 add_library(motif_search STATIC
     motif_search.cpp
     opening_stats.cpp
+    opening_tree.cpp
     position_search.cpp
 )
 

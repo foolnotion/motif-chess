@@ -19,6 +19,7 @@ namespace motif::search::opening_stats
 struct continuation
 {
     std::string san;
+    std::uint64_t result_hash {};
     std::uint32_t frequency {};
     std::uint32_t white_wins {};
     std::uint32_t draws {};

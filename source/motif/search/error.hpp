@@ -12,6 +12,7 @@ namespace motif::search
 enum class error_code : std::uint8_t
 {
     ok,
+    invalid_argument,
     io_failure,
 };
 
@@ -24,6 +25,8 @@ using result = tl::expected<T, error_code>;
     switch (code) {
         case error_code::ok:
             return "ok";
+        case error_code::invalid_argument:
+            return "invalid_argument";
         case error_code::io_failure:
             return "io_failure";
     }
