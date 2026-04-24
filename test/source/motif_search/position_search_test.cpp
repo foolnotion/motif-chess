@@ -21,8 +21,12 @@
 #include "motif/import/logger.hpp"
 #include "motif/search/position_search.hpp"
 
+#include "test_helpers.hpp"
+
 namespace
 {
+
+using test_helpers::is_sanitized_build;
 
 struct tmp_dir
 {
@@ -59,6 +63,7 @@ auto hash_after_sans(std::initializer_list<char const*> sans) -> std::uint64_t
 
 constexpr auto us_per_ms = 1000.0;
 constexpr auto perf_sample_hashes = std::size_t {200};
+constexpr auto perf_sample_seed = std::uint64_t {42};
 constexpr auto perf_p99_limit_us = 100000.0;
 
 auto perf_pgn_path() -> std::filesystem::path
@@ -152,6 +157,14 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch assertions make the perf setup inherently branchy
 void run_position_search_perf_test()
 {
+    if (is_sanitized_build) {
+        SKIP("performance checks are skipped in sanitize builds");
+    }
+
+#ifndef NDEBUG
+    SKIP("performance checks run only in release builds");
+#endif
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("PGN corpus not available");
@@ -173,7 +186,8 @@ void run_position_search_perf_test()
     REQUIRE(summary->committed > 0);
 
     auto sample_hashes =
-        manager->positions().sample_zobrist_hashes(perf_sample_hashes, 42);
+        manager->positions().sample_zobrist_hashes(perf_sample_hashes,
+                                                   perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 

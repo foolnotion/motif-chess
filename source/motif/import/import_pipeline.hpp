@@ -21,7 +21,6 @@ struct import_config
 
     std::size_t num_workers {default_num_workers};
     std::size_t num_lines {default_lines};
-    bool write_positions {false};
     bool rebuild_positions_after_import {true};
     bool sort_positions_by_zobrist_after_rebuild {true};
     std::size_t batch_size {default_batch_size};

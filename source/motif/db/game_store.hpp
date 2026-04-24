@@ -53,6 +53,8 @@ class game_store
     auto get_opening_context(std::uint32_t game_id) -> result<opening_context>;
     auto get_opening_context(std::uint32_t game_id) const
         -> result<opening_context>;
+    // Precondition: game_ids contains no duplicates (duplicate entries are
+    // silently dropped by the unordered_map; deduplicate before calling).
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids)
         -> result<std::unordered_map<std::uint32_t, game_context>>;
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const

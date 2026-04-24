@@ -14,6 +14,7 @@
 
 #include "motif/import/import_pipeline.hpp"
 
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <pgnlib/types.hpp>
 #include <tl/expected.hpp>
@@ -24,8 +25,12 @@
 #include "motif/import/logger.hpp"
 #include "motif/import/pgn_helpers.hpp"
 
+#include "test_helpers.hpp"
+
 namespace
 {
+
+using test_helpers::is_sanitized_build;
 
 constexpr auto k_three_game_pgn = R"pgn(
 [Event "Test"]
@@ -156,6 +161,7 @@ constexpr motif::import::import_config k_single_worker {
     .num_lines = 4,
     .batch_size = 2,
 };
+constexpr auto import_perf_limit_ms = std::int64_t {120'000};
 
 auto perf_pgn_path() -> std::filesystem::path
 {
@@ -264,26 +270,20 @@ void print_duration_result(std::string_view const label,
               << "  elapsed:      " << elapsed.count() << " ms\n";
 }
 
-auto serial_perf_config() -> motif::import::import_config
+void check_release_calibrated_perf(std::int64_t const elapsed_ms)
 {
-    return motif::import::import_config {
-        .num_workers = 1,
-        .num_lines = 1,
-        .write_positions = true,
-        .rebuild_positions_after_import = false,
-        .batch_size = 10'000,
-    };
+    CHECK(elapsed_ms < import_perf_limit_ms);
 }
 
-auto pipeline_perf_config() -> motif::import::import_config
+void skip_perf_unless_release_build()
 {
-    return motif::import::import_config {
-        .num_workers = std::max(1U, std::thread::hardware_concurrency()),
-        .num_lines = 64,
-        .write_positions = true,
-        .rebuild_positions_after_import = false,
-        .batch_size = 10'000,
-    };
+    if (is_sanitized_build) {
+        SKIP("performance checks are skipped in sanitize builds");
+    }
+
+#ifndef NDEBUG
+    SKIP("performance checks run only in release builds");
+#endif
 }
 
 auto serial_fast_path_candidate_config() -> motif::import::import_config
@@ -291,7 +291,6 @@ auto serial_fast_path_candidate_config() -> motif::import::import_config
     return motif::import::import_config {
         .num_workers = 1,
         .num_lines = 1,
-        .write_positions = false,
         .rebuild_positions_after_import = true,
         .sort_positions_by_zobrist_after_rebuild = true,
         .batch_size = motif::import::import_config::default_batch_size,
@@ -303,18 +302,6 @@ auto sqlite_only_serial_perf_config() -> motif::import::import_config
     return motif::import::import_config {
         .num_workers = 1,
         .num_lines = 1,
-        .write_positions = false,
-        .rebuild_positions_after_import = false,
-        .batch_size = 10'000,
-    };
-}
-
-auto no_index_serial_perf_config() -> motif::import::import_config
-{
-    return motif::import::import_config {
-        .num_workers = 1,
-        .num_lines = 1,
-        .write_positions = true,
         .rebuild_positions_after_import = false,
         .batch_size = 10'000,
     };
@@ -325,7 +312,6 @@ auto sqlite_rebuild_no_index_perf_config() -> motif::import::import_config
     return motif::import::import_config {
         .num_workers = 1,
         .num_lines = 1,
-        .write_positions = false,
         .rebuild_positions_after_import = true,
         .sort_positions_by_zobrist_after_rebuild = false,
         .batch_size = 10'000,
@@ -338,7 +324,6 @@ auto sqlite_rebuild_sorted_no_index_perf_config()
     return motif::import::import_config {
         .num_workers = 1,
         .num_lines = 1,
-        .write_positions = false,
         .rebuild_positions_after_import = true,
         .sort_positions_by_zobrist_after_rebuild = true,
         .batch_size = 10'000,
@@ -456,63 +441,6 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
         std::filesystem::remove_all(tmp);
     }
     return rebuild_elapsed;
-}
-
-auto run_sqlite_then_partitioned_rebuild_perf(std::uint32_t const game_id_span)
-    -> motif::import::result<std::chrono::milliseconds>
-{
-    auto const pgn_file = perf_pgn_path();
-    if (!std::filesystem::exists(pgn_file)) {
-        return tl::unexpected {motif::import::error_code::io_failure};
-    }
-
-    auto const tmp = std::filesystem::temp_directory_path() / "ipl_perf";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
-
-    auto mgr = motif::db::database_manager::create(tmp / "db", "perf");
-    if (!mgr.has_value()) {
-        std::filesystem::remove_all(tmp);
-        return tl::unexpected {motif::import::error_code::io_failure};
-    }
-
-    std::filesystem::remove_all(perf_log_dir());
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = perf_log_dir()});
-    if (!init_log) {
-        mgr->close();
-        std::filesystem::remove_all(tmp);
-        return tl::unexpected {motif::import::error_code::io_failure};
-    }
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto import_summary =
-        pipeline.run(pgn_file, sqlite_only_serial_perf_config());
-    if (!import_summary.has_value()) {
-        auto const _ = motif::import::shutdown_logging();
-        mgr->close();
-        std::filesystem::remove_all(tmp);
-        return tl::unexpected {import_summary.error()};
-    }
-
-    auto const rebuild_start = std::chrono::steady_clock::now();
-    auto rebuild_res = mgr->rebuild_partitioned_position_store(game_id_span);
-    auto const rebuild_elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - rebuild_start);
-    if (!rebuild_res.has_value()) {
-        auto const _ = motif::import::shutdown_logging();
-        mgr->close();
-        std::filesystem::remove_all(tmp);
-        return tl::unexpected {motif::import::error_code::io_failure};
-    }
-
-    auto const _ = motif::import::shutdown_logging();
-    mgr->close();
-    if (!keep_perf_bundle()) {
-        std::filesystem::remove_all(tmp);
-    }
-    return import_summary->elapsed + rebuild_elapsed;
 }
 
 }  // namespace
@@ -983,7 +911,7 @@ TEST_CASE("import_pipeline: zero num_lines is rejected", "[motif-import]")
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: write_positions=false skips position rows",
+TEST_CASE("import_pipeline: rebuild_positions_after_import=false leaves position store empty",
           "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_no_pos_rows";
@@ -1002,7 +930,6 @@ TEST_CASE("import_pipeline: write_positions=false skips position rows",
     motif::import::import_config const no_pos_config {
         .num_workers = 1,
         .num_lines = 4,
-        .write_positions = false,
         .rebuild_positions_after_import = false,
         .batch_size = 2,
     };
@@ -1054,7 +981,6 @@ TEST_CASE("import_config defaults preserve measured fast path",
 
     CHECK(config.num_workers == 4);
     CHECK(config.num_lines == 64);
-    CHECK_FALSE(config.write_positions);
     CHECK(config.rebuild_positions_after_import);
     CHECK(config.sort_positions_by_zobrist_after_rebuild);
     CHECK(config.batch_size
@@ -1063,35 +989,11 @@ TEST_CASE("import_config defaults preserve measured fast path",
           == motif::import::import_config::default_num_workers);
 }
 
-TEST_CASE("import_pipeline: pipeline mode perf", "[performance][motif-import]")
-{
-    auto const pgn_file = perf_pgn_path();
-    if (!std::filesystem::exists(pgn_file)) {
-        SKIP("1M-game PGN not available");
-    }
-
-    auto summary = run_perf_import(pipeline_perf_config());
-    REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: pipeline mode perf", *summary);
-    CHECK(summary->elapsed.count() < 120'000);
-}
-
-TEST_CASE("import_pipeline: serial mode perf", "[performance][motif-import]")
-{
-    auto const pgn_file = perf_pgn_path();
-    if (!std::filesystem::exists(pgn_file)) {
-        SKIP("1M-game PGN not available");
-    }
-
-    auto summary = run_perf_import(serial_perf_config());
-    REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: serial mode perf", *summary);
-    CHECK(summary->elapsed.count() < 120'000);
-}
-
 TEST_CASE("import_pipeline: default fast path perf",
           "[performance][motif-import]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("1M-game PGN not available");
@@ -1101,12 +1003,14 @@ TEST_CASE("import_pipeline: default fast path perf",
     REQUIRE(summary.has_value());
     print_import_perf_summary("import_pipeline: default fast path perf",
                               *summary);
-    CHECK(summary->elapsed.count() < 120'000);
+    check_release_calibrated_perf(summary->elapsed.count());
 }
 
 TEST_CASE("import_pipeline: serial fast path candidate perf",
           "[performance][motif-import]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("1M-game PGN not available");
@@ -1116,12 +1020,14 @@ TEST_CASE("import_pipeline: serial fast path candidate perf",
     REQUIRE(summary.has_value());
     print_import_perf_summary(
         "import_pipeline: serial fast path candidate perf", *summary);
-    CHECK(summary->elapsed.count() < 120'000);
+    check_release_calibrated_perf(summary->elapsed.count());
 }
 
 TEST_CASE("import_pipeline: sqlite-only serial perf",
           "[performance][motif-import]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("1M-game PGN not available");
@@ -1131,27 +1037,14 @@ TEST_CASE("import_pipeline: sqlite-only serial perf",
     REQUIRE(summary.has_value());
     print_import_perf_summary("import_pipeline: sqlite-only serial perf",
                               *summary);
-    CHECK(summary->elapsed.count() < 120'000);
-}
-
-TEST_CASE("import_pipeline: duckdb-no-index serial perf",
-          "[performance][motif-import]")
-{
-    auto const pgn_file = perf_pgn_path();
-    if (!std::filesystem::exists(pgn_file)) {
-        SKIP("1M-game PGN not available");
-    }
-
-    auto summary = run_perf_import(no_index_serial_perf_config());
-    REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: duckdb-no-index serial perf",
-                              *summary);
-    CHECK(summary->elapsed.count() < 120'000);
+    check_release_calibrated_perf(summary->elapsed.count());
 }
 
 TEST_CASE("import_pipeline: sqlite-import plus rebuild perf",
           "[performance][motif-import]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("1M-game PGN not available");
@@ -1161,11 +1054,13 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf",
     REQUIRE(total_elapsed.has_value());
     print_duration_result("import_pipeline: sqlite-import plus rebuild perf",
                           *total_elapsed);
-    CHECK(total_elapsed->count() < 120'000);
+    check_release_calibrated_perf(total_elapsed->count());
 }
 
 TEST_CASE("import_pipeline: rebuild-only perf", "[performance][motif-import]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("1M-game PGN not available");
@@ -1175,12 +1070,14 @@ TEST_CASE("import_pipeline: rebuild-only perf", "[performance][motif-import]")
     REQUIRE(rebuild_elapsed.has_value());
     print_duration_result("import_pipeline: rebuild-only perf",
                           *rebuild_elapsed);
-    CHECK(rebuild_elapsed->count() < 120'000);
+    check_release_calibrated_perf(rebuild_elapsed->count());
 }
 
 TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (no index)",
           "[performance][motif-import]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("1M-game PGN not available");
@@ -1191,12 +1088,14 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (no index)",
     print_import_perf_summary(
         "import_pipeline: sqlite-import plus rebuild perf (no index)",
         *summary);
-    CHECK(summary->elapsed.count() < 120'000);
+    check_release_calibrated_perf(summary->elapsed.count());
 }
 
 TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (sorted no index)",
           "[performance][motif-import]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("1M-game PGN not available");
@@ -1208,23 +1107,7 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (sorted no index)",
     print_import_perf_summary(
         "import_pipeline: sqlite-import plus rebuild perf (sorted no index)",
         *summary);
-    CHECK(summary->elapsed.count() < 120'000);
-}
-
-TEST_CASE("import_pipeline: sqlite-import plus partitioned rebuild perf",
-          "[performance][motif-import]")
-{
-    auto const pgn_file = perf_pgn_path();
-    if (!std::filesystem::exists(pgn_file)) {
-        SKIP("1M-game PGN not available");
-    }
-
-    auto total_elapsed = run_sqlite_then_partitioned_rebuild_perf(100'000);
-    REQUIRE(total_elapsed.has_value());
-    print_duration_result(
-        "import_pipeline: sqlite-import plus partitioned rebuild perf",
-        *total_elapsed);
-    CHECK(total_elapsed->count() < 120'000);
+    check_release_calibrated_perf(summary->elapsed.count());
 }
 
 TEST_CASE("import_pipeline: 10k diagnostic summary",
@@ -1325,6 +1208,8 @@ auto measure_query_latencies(motif::db::database_manager& mgr,
 TEST_CASE("query_latency: unsorted vs sorted by zobrist",
           "[performance][query-latency]")
 {
+    skip_perf_unless_release_build();
+
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("PGN corpus not available");
@@ -1346,7 +1231,6 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist",
     motif::import::import_config const sqlite_only_config {
         .num_workers = 1,
         .num_lines = 1,
-        .write_positions = false,
         .rebuild_positions_after_import = false,
         .batch_size = 10'000,
     };

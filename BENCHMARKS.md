@@ -4,6 +4,24 @@ Performance results recorded on each meaningful change. All timings taken on the
 
 ---
 
+## 2026-04-24 — Import Strategy Decision
+
+**Machine:** Linux, Clang 21, perf-release build (`-O3 -DNDEBUG -march=x86-64-v3`)
+
+### Import Pipeline — 3.41M games (`bench/data/twic-all.pgn`)
+
+| Benchmark | Attempted | Committed | Skipped | Errors | Import elapsed | Wall | User (s) | Sys (s) | CPU% | Peak RSS |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Default fast path (`write_positions=false`, sorted rebuild) | 3,411,924 | 3,381,047 | 30,877 | 9,134 | 303,384 ms | 5:04.62 | 448.63 | 145.80 | 195% | 17,983,084 KB |
+
+### Decision
+
+- Direct position writes were removed: they were dramatically slower and did not provide enough practical value over deferred rebuild.
+- Partitioned rebuild was evaluated as a replacement candidate, but after making it preserve the normal final `position` table semantics it was still slower than the default path and no longer showed a convincing memory advantage.
+- **Default fast path remains the only supported import strategy.**
+
+---
+
 ## 2026-04-22 — Story 2.11 post-review (num_workers=4 fixed default, idempotent sort_by_zobrist)
 
 **Machine:** Linux, Clang 21, release build

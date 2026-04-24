@@ -110,7 +110,6 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
 struct prepared_game
 {
     motif::db::game game_row;
-    std::vector<motif::db::position_row> position_rows;
 };
 
 enum class slot_state : std::uint8_t
@@ -131,15 +130,13 @@ struct pipeline_slot
 };
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto prepare_game(pgn::game const& pgn_game, bool write_positions)
+auto prepare_game(pgn::game const& pgn_game)
     -> result<prepared_game>
 {
     auto const& tags = pgn_game.tags;
 
     auto const white_elo_opt = parse_elo(find_tag(tags, "WhiteElo"));
     auto const black_elo_opt = parse_elo(find_tag(tags, "BlackElo"));
-    auto const result_int = pgn_result_to_int8(pgn_game.result);
-
     auto const white_title_raw = find_tag(tags, "WhiteTitle");
     auto const black_title_raw = find_tag(tags, "BlackTitle");
     auto const event_name = find_tag(tags, "Event");
@@ -182,17 +179,13 @@ auto prepare_game(pgn::game const& pgn_game, bool write_positions)
         eco_raw.empty() ? std::nullopt : std::optional<std::string> {eco_raw};
     game_row.result = pgn_result_to_string(pgn_game.result);
 
-    if (pgn_game.moves.size() >= std::numeric_limits<std::uint16_t>::max()) {
+    if (pgn_game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
         return tl::unexpected {error_code::parse_error};
     }
 
     auto board = chesslib::board {};
     std::vector<std::uint16_t> encoded_moves;
     encoded_moves.reserve(pgn_game.moves.size());
-    std::vector<motif::db::position_row> position_rows;
-    if (write_positions) {
-        position_rows.reserve(pgn_game.moves.size());
-    }
 
     for (auto const& node : pgn_game.moves) {
         auto move_result = chesslib::san::from_string(board, node.san);
@@ -202,21 +195,10 @@ auto prepare_game(pgn::game const& pgn_game, bool write_positions)
         encoded_moves.push_back(chesslib::codec::encode(*move_result));
         chesslib::move_maker mmaker {board, *move_result};
         mmaker.make();
-        if (write_positions) {
-            position_rows.push_back(motif::db::position_row {
-                .zobrist_hash = board.hash(),
-                .game_id = 0,
-                .ply = static_cast<std::uint16_t>(encoded_moves.size()),
-                .result = result_int,
-                .white_elo = white_elo_opt,
-                .black_elo = black_elo_opt,
-            });
-        }
     }
 
     game_row.moves = std::move(encoded_moves);
-    return prepared_game {.game_row = std::move(game_row),
-                          .position_rows = std::move(position_rows)};
+    return prepared_game {.game_row = std::move(game_row)};
 }
 
 }  // namespace
@@ -399,7 +381,7 @@ auto import_pipeline::run_from(
         if (slot.state != slot_state::ready) {
             return;
         }
-        auto prep = prepare_game(slot.pgn_game, config.write_positions);
+        auto prep = prepare_game(slot.pgn_game);
         if (!prep) {
             slot.state = slot_state::parse_error;
             slot.error = prep.error();
@@ -475,21 +457,6 @@ auto import_pipeline::run_from(
         }
 
         auto const game_id = *ins;
-        for (auto& row : prep.position_rows) {
-            row.game_id = game_id;
-        }
-
-        if (config.write_positions && !prep.position_rows.empty()) {
-            if (auto pos_res = db_.positions().insert_batch(prep.position_rows);
-                !pos_res)
-            {
-                if (log) {
-                    log->error("DuckDB insert_batch failed for game_id {}; "
-                               "run rebuild_position_store to recover",
-                               game_id);
-                }
-            }
-        }
 
         last_game_id = static_cast<std::int64_t>(game_id);
         committed++;
@@ -562,7 +529,7 @@ auto import_pipeline::run_from(
         return tl::unexpected {error_code::io_failure};
     }
 
-    if (!config.write_positions && config.rebuild_positions_after_import) {
+    if (config.rebuild_positions_after_import) {
         if (auto rebuild_res = db_.rebuild_position_store(
                 config.sort_positions_by_zobrist_after_rebuild);
             !rebuild_res)
