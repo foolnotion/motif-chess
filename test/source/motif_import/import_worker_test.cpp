@@ -33,8 +33,7 @@ struct tmp_dir
     explicit tmp_dir(std::string const& suffix)
     {
         auto const base = std::filesystem::temp_directory_path();
-        auto const tick =
-            std::chrono::steady_clock::now().time_since_epoch().count();
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
         path = base / ("motif_iw_test_" + suffix + "_" + std::to_string(tick));
         std::filesystem::create_directories(path);
     }
@@ -135,14 +134,11 @@ auto open_sqlite(std::filesystem::path const& path) -> unique_sqlite
     return unique_sqlite {database};
 }
 
-auto count_rows(std::filesystem::path const& path, char const* sql)
-    -> std::int64_t
+auto count_rows(std::filesystem::path const& path, char const* sql) -> std::int64_t
 {
     auto database = open_sqlite(path);
     sqlite3_stmt* stmt_raw {nullptr};
-    if (sqlite3_prepare_v2(database.get(), sql, -1, &stmt_raw, nullptr)
-        != SQLITE_OK)
-    {
+    if (sqlite3_prepare_v2(database.get(), sql, -1, &stmt_raw, nullptr) != SQLITE_OK) {
         throw std::runtime_error {"failed to prepare sqlite query"};
     }
     auto stmt = unique_sqlite_stmt {stmt_raw};
@@ -152,15 +148,13 @@ auto count_rows(std::filesystem::path const& path, char const* sql)
     return sqlite3_column_int64(stmt.get(), 0);
 }
 
-auto load_position_rows(std::filesystem::path const& path)
-    -> std::vector<stored_position_row>
+auto load_position_rows(std::filesystem::path const& path) -> std::vector<stored_position_row>
 {
     duck_reader const reader {path};
     duckdb_result query_result {};
-    if (duckdb_query(
-            reader.con,
-            "SELECT zobrist_hash, game_id, ply, result, white_elo, " "black_" "elo FROM " "position " "ORDER BY " "ply",
-            &query_result)
+    if (duckdb_query(reader.con,
+                     "SELECT zobrist_hash, game_id, ply, result, white_elo, " "black_" "elo FROM " "position " "ORDER BY " "ply",
+                     &query_result)
         != DuckDBSuccess)
     {
         throw std::runtime_error {"failed to load stored positions"};
@@ -171,24 +165,16 @@ auto load_position_rows(std::filesystem::path const& path)
     rows.reserve(static_cast<std::size_t>(row_count));
     for (idx_t row_index = 0; row_index < row_count; ++row_index) {
         rows.push_back(stored_position_row {
-            .zobrist_hash = duckdb_value_uint64(
-                &query_result, position_col::zobrist_hash, row_index),
-            .game_id = duckdb_value_uint32(
-                &query_result, position_col::game_id, row_index),
-            .ply = duckdb_value_uint16(
-                &query_result, position_col::ply, row_index),
-            .result = static_cast<std::int8_t>(duckdb_value_int8(
-                &query_result, position_col::result, row_index)),
-            .white_elo = duckdb_value_is_null(
-                             &query_result, position_col::white_elo, row_index)
+            .zobrist_hash = duckdb_value_uint64(&query_result, position_col::zobrist_hash, row_index),
+            .game_id = duckdb_value_uint32(&query_result, position_col::game_id, row_index),
+            .ply = duckdb_value_uint16(&query_result, position_col::ply, row_index),
+            .result = static_cast<std::int8_t>(duckdb_value_int8(&query_result, position_col::result, row_index)),
+            .white_elo = duckdb_value_is_null(&query_result, position_col::white_elo, row_index)
                 ? std::nullopt
-                : std::optional<std::int16_t> {duckdb_value_int16(
-                      &query_result, position_col::white_elo, row_index)},
-            .black_elo = duckdb_value_is_null(
-                             &query_result, position_col::black_elo, row_index)
+                : std::optional<std::int16_t> {duckdb_value_int16(&query_result, position_col::white_elo, row_index)},
+            .black_elo = duckdb_value_is_null(&query_result, position_col::black_elo, row_index)
                 ? std::nullopt
-                : std::optional<std::int16_t> {duckdb_value_int16(
-                      &query_result, position_col::black_elo, row_index)},
+                : std::optional<std::int16_t> {duckdb_value_int16(&query_result, position_col::black_elo, row_index)},
         });
     }
 
@@ -196,8 +182,7 @@ auto load_position_rows(std::filesystem::path const& path)
     return rows;
 }
 
-auto expected_hashes(std::vector<pgn::move_node> const& moves)
-    -> std::vector<std::uint64_t>
+auto expected_hashes(std::vector<pgn::move_node> const& moves) -> std::vector<std::uint64_t>
 {
     auto board = chesslib::board {};
     auto hashes = std::vector<std::uint64_t> {};
@@ -223,71 +208,44 @@ auto require_test(bool condition, std::string_view message) -> void
     }
 }
 
-auto check_stored_game(motif::db::game const& stored_game,
-                       std::size_t move_count) -> void
+auto check_stored_game(motif::db::game const& stored_game, std::size_t move_count) -> void
 {
-    require_test(stored_game.white.name == "White Player",
-                 "white player name mismatch");
-    require_test(stored_game.white.elo
-                     == std::optional<std::int32_t> {expected_white_elo},
-                 "white elo mismatch");
-    require_test(stored_game.white.title == std::optional<std::string> {"GM"},
-                 "white title mismatch");
-    require_test(stored_game.black.name == "Black Player",
-                 "black player name mismatch");
-    require_test(stored_game.black.elo
-                     == std::optional<std::int32_t> {expected_black_elo},
-                 "black elo mismatch");
-    require_test(stored_game.black.title == std::optional<std::string> {"IM"},
-                 "black title mismatch");
+    require_test(stored_game.white.name == "White Player", "white player name mismatch");
+    require_test(stored_game.white.elo == std::optional<std::int32_t> {expected_white_elo}, "white elo mismatch");
+    require_test(stored_game.white.title == std::optional<std::string> {"GM"}, "white title mismatch");
+    require_test(stored_game.black.name == "Black Player", "black player name mismatch");
+    require_test(stored_game.black.elo == std::optional<std::int32_t> {expected_black_elo}, "black elo mismatch");
+    require_test(stored_game.black.title == std::optional<std::string> {"IM"}, "black title mismatch");
     if (!stored_game.event_details.has_value()) {
         throw std::runtime_error {"missing stored event details"};
     }
 
     auto const& event_details = *stored_game.event_details;
     require_test(event_details.name == "Unit Test Open", "event name mismatch");
-    require_test(event_details.site == std::optional<std::string> {"Testville"},
-                 "event site mismatch");
-    require_test(
-        event_details.date == std::optional<std::string> {"2026.04.19"},
-        "event date mismatch");
-    require_test(stored_game.date == std::optional<std::string> {"2026.04.19"},
-                 "game date mismatch");
-    require_test(stored_game.eco == std::optional<std::string> {"C60"},
-                 "eco mismatch");
+    require_test(event_details.site == std::optional<std::string> {"Testville"}, "event site mismatch");
+    require_test(event_details.date == std::optional<std::string> {"2026.04.19"}, "event date mismatch");
+    require_test(stored_game.date == std::optional<std::string> {"2026.04.19"}, "game date mismatch");
+    require_test(stored_game.eco == std::optional<std::string> {"C60"}, "eco mismatch");
     require_test(stored_game.result == "1/2-1/2", "result mismatch");
     require_test(stored_game.moves.size() == move_count, "move count mismatch");
-    require_test(stored_game.extra_tags.size() == 1,
-                 "extra tag count mismatch");
-    require_test(stored_game.extra_tags[0]
-                     == std::pair<std::string, std::string> {"Round", "1"},
-                 "extra tag mismatch");
+    require_test(stored_game.extra_tags.size() == 1, "extra tag count mismatch");
+    require_test(stored_game.extra_tags[0] == std::pair<std::string, std::string> {"Round", "1"}, "extra tag mismatch");
 }
 
 auto check_stored_positions(std::vector<stored_position_row> const& positions,
                             std::vector<std::uint64_t> const& hashes,
                             std::uint32_t game_id) -> void
 {
-    require_test(positions.size() == hashes.size(),
-                 "stored position count mismatch");
+    require_test(positions.size() == hashes.size(), "stored position count mismatch");
     for (std::size_t index = 0; index < positions.size(); ++index) {
-        require_test(positions[index].zobrist_hash == hashes[index],
-                     "zobrist hash mismatch");
+        require_test(positions[index].zobrist_hash == hashes[index], "zobrist hash mismatch");
         require_test(positions[index].game_id == game_id, "game id mismatch");
-        require_test(
-            positions[index].ply == static_cast<std::uint16_t>(index + 1),
-            "ply mismatch");
+        require_test(positions[index].ply == static_cast<std::uint16_t>(index + 1), "ply mismatch");
         require_test(positions[index].result == 0, "result mismatch");
-        require_test(
-            positions[index].white_elo
-                == std::optional<std::int16_t> {static_cast<std::int16_t>(
-                    expected_white_elo)},
-            "white elo mismatch");
-        require_test(
-            positions[index].black_elo
-                == std::optional<std::int16_t> {static_cast<std::int16_t>(
-                    expected_black_elo)},
-            "black elo mismatch");
+        require_test(positions[index].white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_white_elo)},
+                     "white elo mismatch");
+        require_test(positions[index].black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_black_elo)},
+                     "black elo mismatch");
     }
 }
 
@@ -302,10 +260,7 @@ auto make_move(int number, std::string san) -> pgn::move_node
     };
 }
 
-auto make_game(std::string white,
-               std::string black,
-               pgn::result result,
-               std::vector<pgn::move_node> moves) -> pgn::game
+auto make_game(std::string white, std::string black, pgn::result result, std::vector<pgn::move_node> moves) -> pgn::game
 {
     return pgn::game {
         .tags = {{"White", std::move(white)}, {"Black", std::move(black)}},
@@ -318,12 +273,10 @@ auto make_game(std::string white,
 
 // ── AC1: valid game is stored with correct positions ─────────────────────────
 
-TEST_CASE("import_worker: valid 5-move game stores metadata and position rows",
-          "[motif-import]")
+TEST_CASE("import_worker: valid 5-move game stores metadata and position rows", "[motif-import]")
 {
     tmp_dir const tdir {"valid_game"};
-    auto mgr = motif::db::database_manager::create(tdir.path, "test")
-                   .value();  // NOLINT(bugprone-unchecked-optional-access)
+    auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
     motif::import::import_worker worker {mgr.store(), mgr.positions()};
 
@@ -352,11 +305,9 @@ TEST_CASE("import_worker: valid 5-move game stores metadata and position rows",
 
     auto res = worker.process(game);
     REQUIRE(res.has_value());  // NOLINT(bugprone-unchecked-optional-access)
-    CHECK(res->positions_inserted
-          == 5);  // NOLINT(bugprone-unchecked-optional-access)
+    CHECK(res->positions_inserted == 5);  // NOLINT(bugprone-unchecked-optional-access)
 
-    auto stored_game = mgr.store().get(
-        res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
+    auto stored_game = mgr.store().get(res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
     REQUIRE(stored_game.has_value());
     check_stored_game(*stored_game, moves.size());
 
@@ -364,8 +315,7 @@ TEST_CASE("import_worker: valid 5-move game stores metadata and position rows",
     REQUIRE(count.has_value());
     CHECK(*count == 5);  // NOLINT(bugprone-unchecked-optional-access)
 
-    auto const game_id =
-        res->game_id;  // NOLINT(bugprone-unchecked-optional-access)
+    auto const game_id = res->game_id;  // NOLINT(bugprone-unchecked-optional-access)
     mgr.close();
 
     auto const positions = load_position_rows(tdir.path / "positions.duckdb");
@@ -375,35 +325,28 @@ TEST_CASE("import_worker: valid 5-move game stores metadata and position rows",
 
 // ── AC2: existing player is reused — no duplicates ───────────────────────────
 
-TEST_CASE("import_worker: second game with same player reuses player row",
-          "[motif-import]")
+TEST_CASE("import_worker: second game with same player reuses player row", "[motif-import]")
 {
     tmp_dir const tdir {"player_reuse"};
-    auto mgr = motif::db::database_manager::create(tdir.path, "test")
-                   .value();  // NOLINT(bugprone-unchecked-optional-access)
+    auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
     motif::import::import_worker worker {mgr.store(), mgr.positions()};
 
-    auto moves1 =
-        std::vector<pgn::move_node> {make_move(1, "e4"), make_move(1, "e5")};
+    auto moves1 = std::vector<pgn::move_node> {make_move(1, "e4"), make_move(1, "e5")};
     auto game1 = make_game("Kasparov", "Karpov", pgn::result::white, moves1);
 
     pgn::game const game2 {
-        .tags = {{"White", "Kasparov"},
-                 {"Black", "Karpov"},
-                 {"Date", "2000.01.01"}},
+        .tags = {{"White", "Kasparov"}, {"Black", "Karpov"}, {"Date", "2000.01.01"}},
         .moves = {make_move(1, "d4"), make_move(1, "d5")},
         .result = pgn::result::black,
     };
 
     REQUIRE(worker.process(game1).has_value());
-    auto const player_count_after_first =
-        count_rows(tdir.path / "games.db", "SELECT count(*) FROM player");
+    auto const player_count_after_first = count_rows(tdir.path / "games.db", "SELECT count(*) FROM player");
     CHECK(player_count_after_first == 2);
 
     REQUIRE(worker.process(game2).has_value());
-    auto const player_count_after_second =
-        count_rows(tdir.path / "games.db", "SELECT count(*) FROM player");
+    auto const player_count_after_second = count_rows(tdir.path / "games.db", "SELECT count(*) FROM player");
     CHECK(player_count_after_second == player_count_after_first);
 
     // Verify two distinct games are stored
@@ -421,17 +364,14 @@ TEST_CASE("import_worker: second game with same player reuses player row",
 
 // ── AC3: duplicate game returns error_code::duplicate ────────────────────────
 
-TEST_CASE("import_worker: duplicate game returns error_code::duplicate",
-          "[motif-import]")
+TEST_CASE("import_worker: duplicate game returns error_code::duplicate", "[motif-import]")
 {
     tmp_dir const tdir {"duplicate"};
-    auto mgr = motif::db::database_manager::create(tdir.path, "test")
-                   .value();  // NOLINT(bugprone-unchecked-optional-access)
+    auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
     motif::import::import_worker worker {mgr.store(), mgr.positions()};
 
-    auto moves =
-        std::vector<pgn::move_node> {make_move(1, "e4"), make_move(1, "e5")};
+    auto moves = std::vector<pgn::move_node> {make_move(1, "e4"), make_move(1, "e5")};
     auto game = make_game("Player A", "Player B", pgn::result::draw, moves);
 
     REQUIRE(worker.process(game).has_value());
@@ -449,12 +389,10 @@ TEST_CASE("import_worker: duplicate game returns error_code::duplicate",
 
 // ── AC4: %clk comment is silently ignored ────────────────────────────────────
 
-TEST_CASE("import_worker: %clk annotation is silently ignored",
-          "[motif-import]")
+TEST_CASE("import_worker: %clk annotation is silently ignored", "[motif-import]")
 {
     tmp_dir const tdir {"clk_comment"};
-    auto mgr = motif::db::database_manager::create(tdir.path, "test")
-                   .value();  // NOLINT(bugprone-unchecked-optional-access)
+    auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
     motif::import::import_worker worker {mgr.store(), mgr.positions()};
 
@@ -480,12 +418,10 @@ TEST_CASE("import_worker: %clk annotation is silently ignored",
 
 // ── SAN parse failure ────────────────────────────────────────────────────────
 
-TEST_CASE("import_worker: illegal SAN returns parse_error, no row inserted",
-          "[motif-import]")
+TEST_CASE("import_worker: illegal SAN returns parse_error, no row inserted", "[motif-import]")
 {
     tmp_dir const tdir {"san_fail"};
-    auto mgr = motif::db::database_manager::create(tdir.path, "test")
-                   .value();  // NOLINT(bugprone-unchecked-optional-access)
+    auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
     motif::import::import_worker worker {mgr.store(), mgr.positions()};
 
@@ -505,18 +441,15 @@ TEST_CASE("import_worker: illegal SAN returns parse_error, no row inserted",
 
 // ── No Elo tags → null elo in position rows ──────────────────────────────────
 
-TEST_CASE("import_worker: game without Elo tags stores null elo",
-          "[motif-import]")
+TEST_CASE("import_worker: game without Elo tags stores null elo", "[motif-import]")
 {
     tmp_dir const tdir {"no_elo"};
-    auto mgr = motif::db::database_manager::create(tdir.path, "test")
-                   .value();  // NOLINT(bugprone-unchecked-optional-access)
+    auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
     motif::import::import_worker worker {mgr.store(), mgr.positions()};
 
     auto moves = std::vector<pgn::move_node> {make_move(1, "d4")};
-    auto game =
-        make_game("NoElo White", "NoElo Black", pgn::result::unknown, moves);
+    auto game = make_game("NoElo White", "NoElo Black", pgn::result::unknown, moves);
 
     auto res = worker.process(game);
     REQUIRE(res.has_value());
@@ -537,26 +470,21 @@ TEST_CASE("import_worker: game without Elo tags stores null elo",
 
 // ── Zero-move game ───────────────────────────────────────────────────────────
 
-TEST_CASE(
-    "import_worker: header-only game inserts game row, zero position rows",
-    "[motif-import]")
+TEST_CASE("import_worker: header-only game inserts game row, zero position rows", "[motif-import]")
 {
     tmp_dir const tdir {"zero_moves"};
-    auto mgr = motif::db::database_manager::create(tdir.path, "test")
-                   .value();  // NOLINT(bugprone-unchecked-optional-access)
+    auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
     motif::import::import_worker worker {mgr.store(), mgr.positions()};
 
-    auto game =
-        make_game("Header White", "Header Black", pgn::result::unknown, {});
+    auto game = make_game("Header White", "Header Black", pgn::result::unknown, {});
 
     auto res = worker.process(game);
     REQUIRE(res.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(res->positions_inserted == 0);
 
-    auto game_row = mgr.store().get(
-        res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
+    auto game_row = mgr.store().get(res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
     REQUIRE(game_row.has_value());
 
     auto count = mgr.positions().row_count();

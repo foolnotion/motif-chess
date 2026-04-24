@@ -27,7 +27,6 @@
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
-#include "motif/db/position_store.hpp"
 #include "motif/db/types.hpp"
 #include "motif/import/checkpoint.hpp"
 #include "motif/import/error.hpp"
@@ -42,9 +41,7 @@ namespace
 
 auto current_time_ns() noexcept -> std::int64_t
 {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 constexpr std::string_view event_marker = "[Event \"";
@@ -70,8 +67,7 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
 
     while (true) {
         // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-        file.read(buf.data() + static_cast<std::ptrdiff_t>(carry),
-                  static_cast<std::streamsize>(buf_size));
+        file.read(buf.data() + static_cast<std::ptrdiff_t>(carry), static_cast<std::streamsize>(buf_size));
         auto const read_len = static_cast<std::size_t>(file.gcount());
         if (read_len == 0 && carry == 0) {
             break;
@@ -84,8 +80,7 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
 
         auto const* pos = data;
         while (pos < end) {
-            pos =
-                std::search(pos, end, event_marker.begin(), event_marker.end());
+            pos = std::search(pos, end, event_marker.begin(), event_marker.end());
             if (pos == end) {
                 break;
             }
@@ -130,8 +125,7 @@ struct pipeline_slot
 };
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto prepare_game(pgn::game const& pgn_game)
-    -> result<prepared_game>
+auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
 {
     auto const& tags = pgn_game.tags;
 
@@ -144,39 +138,27 @@ auto prepare_game(pgn::game const& pgn_game)
     auto const date_raw = find_tag(tags, "Date");
     auto const eco_raw = find_tag(tags, "ECO");
 
-    auto const valid_date = (!date_raw.empty() && date_raw != "????.??.??")
-        ? std::optional<std::string> {date_raw}
-        : std::nullopt;
+    auto const valid_date = (!date_raw.empty() && date_raw != "????.??.??") ? std::optional<std::string> {date_raw} : std::nullopt;
 
     motif::db::game game_row;
     game_row.white.name = find_tag(tags, "White");
-    game_row.white.elo = white_elo_opt
-        ? std::optional<std::int32_t> {*white_elo_opt}
-        : std::nullopt;
-    game_row.white.title = white_title_raw.empty()
-        ? std::nullopt
-        : std::optional<std::string> {white_title_raw};
+    game_row.white.elo = white_elo_opt ? std::optional<std::int32_t> {*white_elo_opt} : std::nullopt;
+    game_row.white.title = white_title_raw.empty() ? std::nullopt : std::optional<std::string> {white_title_raw};
 
     game_row.black.name = find_tag(tags, "Black");
-    game_row.black.elo = black_elo_opt
-        ? std::optional<std::int32_t> {*black_elo_opt}
-        : std::nullopt;
-    game_row.black.title = black_title_raw.empty()
-        ? std::nullopt
-        : std::optional<std::string> {black_title_raw};
+    game_row.black.elo = black_elo_opt ? std::optional<std::int32_t> {*black_elo_opt} : std::nullopt;
+    game_row.black.title = black_title_raw.empty() ? std::nullopt : std::optional<std::string> {black_title_raw};
 
     if (!event_name.empty()) {
         game_row.event_details = motif::db::event {
             .name = event_name,
-            .site = site_raw.empty() ? std::nullopt
-                                     : std::optional<std::string> {site_raw},
+            .site = site_raw.empty() ? std::nullopt : std::optional<std::string> {site_raw},
             .date = valid_date,
         };
     }
 
     game_row.date = valid_date;
-    game_row.eco =
-        eco_raw.empty() ? std::nullopt : std::optional<std::string> {eco_raw};
+    game_row.eco = eco_raw.empty() ? std::nullopt : std::optional<std::string> {eco_raw};
     game_row.result = pgn_result_to_string(pgn_game.result);
 
     if (pgn_game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
@@ -214,8 +196,7 @@ auto import_pipeline::progress() const noexcept -> import_progress
     auto elapsed = std::chrono::milliseconds {0};
     if (start_time_ns != 0) {
         auto const now_ns = current_time_ns();
-        elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::nanoseconds {now_ns - start_time_ns});
+        elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::nanoseconds {now_ns - start_time_ns});
     }
 
     return import_progress {
@@ -228,53 +209,39 @@ auto import_pipeline::progress() const noexcept -> import_progress
     };
 }
 
-auto import_pipeline::run(std::filesystem::path const& pgn_path,
-                          import_config const& config) -> result<import_summary>
+auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
     return run_from(pgn_path, 0, 0, 0, config);
 }
 
-auto import_pipeline::resume(std::filesystem::path const& pgn_path,
-                             import_config const& config)
-    -> result<import_summary>
+auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
     auto chk = read_checkpoint(db_.dir());
     if (!chk) {
         return tl::unexpected {error_code::io_failure};
     }
 
-    auto const checkpoint_source =
-        std::filesystem::absolute(std::filesystem::path {chk->source_path})
-            .lexically_normal();
-    auto const requested_source =
-        std::filesystem::absolute(pgn_path).lexically_normal();
+    auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {chk->source_path}).lexically_normal();
+    auto const requested_source = std::filesystem::absolute(pgn_path).lexically_normal();
     if (checkpoint_source != requested_source) {
         return tl::unexpected {error_code::invalid_state};
     }
 
-    return run_from(pgn_path,
-                    chk->byte_offset,
-                    chk->games_committed,
-                    chk->last_game_id,
-                    config);
+    return run_from(pgn_path, chk->byte_offset, chk->games_committed, chk->last_game_id, config);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto import_pipeline::run_from(
-    std::filesystem::path const& pgn_path,
-    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    std::size_t start_offset,
-    std::int64_t pre_committed,
-    std::int64_t pre_last_game_id,
-    import_config const& config) -> result<import_summary>
+auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
+                               // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+                               std::size_t start_offset,
+                               std::int64_t pre_committed,
+                               std::int64_t pre_last_game_id,
+                               import_config const& config) -> result<import_summary>
 {
     if (config.num_workers == 0 || config.num_lines == 0) {
         auto log = spdlog::get("motif.import");
         if (log) {
-            log->error(
-                "import_config validation failed: num_workers={} num_lines={}",
-                config.num_workers,
-                config.num_lines);
+            log->error("import_config validation failed: num_workers={} num_lines={}", config.num_workers, config.num_lines);
         }
         return tl::unexpected {error_code::invalid_state};
     }
@@ -400,26 +367,21 @@ auto import_pipeline::run_from(
             games_skipped_.fetch_add(1, std::memory_order_relaxed);
             games_errored_.fetch_add(1, std::memory_order_relaxed);
             if (log) {
-                auto const error_desc =
-                    slot.error ? to_string(*slot.error) : "pgn read error";
+                auto const error_desc = slot.error ? to_string(*slot.error) : "pgn read error";
                 auto const tags_available = !slot.pgn_game.tags.empty();
                 if (tags_available) {
                     auto const white = find_tag(slot.pgn_game.tags, "White");
                     auto const black = find_tag(slot.pgn_game.tags, "Black");
                     auto const event = find_tag(slot.pgn_game.tags, "Event");
                     log->warn(
-                        "Skipped game at offset {}: {}. White: \"{}\", "
-                        "Black: \"{}\", Event: \"{}\"",
+                        "Skipped game at offset {}: {}. White: \"{}\", " "Black: \"{}\", Event: \"{}\"",
                         slot.game_start_offset,
                         error_desc,
                         white.empty() ? "N/A" : white,
                         black.empty() ? "N/A" : black,
                         event.empty() ? "N/A" : event);
                 } else {
-                    log->warn(
-                        "Skipped game at offset {}: {} (headers unavailable)",
-                        slot.game_start_offset,
-                        error_desc);
+                    log->warn("Skipped game at offset {}: {} (headers unavailable)", slot.game_start_offset, error_desc);
                 }
             }
             slot.state = slot_state::empty;
@@ -437,8 +399,7 @@ auto import_pipeline::run_from(
             if (ins.error() == motif::db::error_code::duplicate) {
                 games_skipped_.fetch_add(1, std::memory_order_relaxed);
                 if (log) {
-                    log->warn("duplicate game skipped at offset {}",
-                              slot.game_start_offset);
+                    log->warn("duplicate game skipped at offset {}", slot.game_start_offset);
                 }
             } else {
                 games_errored_.fetch_add(1, std::memory_order_relaxed);
@@ -447,8 +408,7 @@ auto import_pipeline::run_from(
                 eof_reached = true;
                 pflow.stop();
                 if (log) {
-                    log->error("SQLite insert failed at offset {}",
-                               slot.game_start_offset);
+                    log->error("SQLite insert failed at offset {}", slot.game_start_offset);
                 }
             }
             slot.prepared.reset();
@@ -530,10 +490,7 @@ auto import_pipeline::run_from(
     }
 
     if (config.rebuild_positions_after_import) {
-        if (auto rebuild_res = db_.rebuild_position_store(
-                config.sort_positions_by_zobrist_after_rebuild);
-            !rebuild_res)
-        {
+        if (auto rebuild_res = db_.rebuild_position_store(config.sort_positions_by_zobrist_after_rebuild); !rebuild_res) {
             return tl::unexpected {error_code::io_failure};
         }
     }
@@ -541,9 +498,7 @@ auto import_pipeline::run_from(
     delete_checkpoint(db_.dir());
 
     auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::nanoseconds {
-            current_time_ns()
-            - start_time_ns_.load(std::memory_order_relaxed)});
+        std::chrono::nanoseconds {current_time_ns() - start_time_ns_.load(std::memory_order_relaxed)});
 
     return import_summary {
         .total_attempted = games_processed_.load(std::memory_order_relaxed),

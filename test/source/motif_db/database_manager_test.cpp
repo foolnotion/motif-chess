@@ -27,10 +27,8 @@ struct tmp_dir
     explicit tmp_dir(std::string const& suffix)
     {
         auto const base = std::filesystem::temp_directory_path();
-        auto const tick =
-            std::chrono::steady_clock::now().time_since_epoch().count();
-        path =
-            base / ("motif_dbmgr_test_" + suffix + "_" + std::to_string(tick));
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = base / ("motif_dbmgr_test_" + suffix + "_" + std::to_string(tick));
     }
 
     ~tmp_dir() { std::filesystem::remove_all(path); }
@@ -66,14 +64,12 @@ struct duckdb_handle_guard
     }
 };
 
-auto read_position_hashes(std::filesystem::path const& duckdb_path)
-    -> std::vector<std::uint64_t>
+auto read_position_hashes(std::filesystem::path const& duckdb_path) -> std::vector<std::uint64_t>
 {
     auto handles = duckdb_handle_guard {};
     REQUIRE(duckdb_open(duckdb_path.c_str(), &handles.db) == DuckDBSuccess);
     REQUIRE(duckdb_connect(handles.db, &handles.con) == DuckDBSuccess);
-    REQUIRE(duckdb_query(handles.con, select_position_hashes_sql, &handles.res)
-            == DuckDBSuccess);
+    REQUIRE(duckdb_query(handles.con, select_position_hashes_sql, &handles.res) == DuckDBSuccess);
 
     auto const row_count = duckdb_row_count(&handles.res);
     std::vector<std::uint64_t> hashes;
@@ -90,8 +86,7 @@ auto read_position_hashes(std::filesystem::path const& duckdb_path)
 // ── AC1: create
 // ───────────────────────────────────────────────────────────────
 
-TEST_CASE("database_manager::create produces games.db and manifest.json",
-          "[motif-db][database_manager]")
+TEST_CASE("database_manager::create produces games.db and manifest.json", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"create"};
 
@@ -102,8 +97,7 @@ TEST_CASE("database_manager::create produces games.db and manifest.json",
     CHECK(std::filesystem::exists(tdir.path / "manifest.json"));
 }
 
-TEST_CASE("database_manager::create sets manifest name and schema_version",
-          "[motif-db][database_manager]")
+TEST_CASE("database_manager::create sets manifest name and schema_version", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"create_mf"};
 
@@ -118,8 +112,7 @@ TEST_CASE("database_manager::create sets manifest name and schema_version",
     CHECK_FALSE(manifest.created_at.empty());
 }
 
-TEST_CASE("database_manager::create fails if bundle already exists",
-          "[motif-db][database_manager]")
+TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"create_dup"};
 
@@ -132,9 +125,7 @@ TEST_CASE("database_manager::create fails if bundle already exists",
     CHECK(second.error() == motif::db::error_code::io_failure);
 }
 
-TEST_CASE(
-    "database_manager::create initialises SQLite with correct schema version",
-    "[motif-db][database_manager]")
+TEST_CASE("database_manager::create initialises SQLite with correct schema version", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"schema_ver"};
 
@@ -146,21 +137,18 @@ TEST_CASE(
     auto reopen = motif::db::database_manager::open(tdir.path);
     REQUIRE(reopen.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(reopen->manifest().schema_version
-          == motif::db::schema::current_version);
+    CHECK(reopen->manifest().schema_version == motif::db::schema::current_version);
 }
 
 // ── AC2: open
 // ─────────────────────────────────────────────────────────────────
 
-TEST_CASE("database_manager::open succeeds on an existing bundle",
-          "[motif-db][database_manager]")
+TEST_CASE("database_manager::open succeeds on an existing bundle", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"open"};
 
     {
-        auto created =
-            motif::db::database_manager::create(tdir.path, "open-db");
+        auto created = motif::db::database_manager::create(tdir.path, "open-db");
         REQUIRE(created.has_value());
     }  // closed here
 
@@ -170,18 +158,15 @@ TEST_CASE("database_manager::open succeeds on an existing bundle",
     CHECK(opened->manifest().name == "open-db");
 }
 
-TEST_CASE("database_manager::open returns not_found for missing bundle",
-          "[motif-db][database_manager]")
+TEST_CASE("database_manager::open returns not_found for missing bundle", "[motif-db][database_manager]")
 {
-    auto const missing =
-        std::filesystem::temp_directory_path() / "motif_dbmgr_missing_xyzzy";
+    auto const missing = std::filesystem::temp_directory_path() / "motif_dbmgr_missing_xyzzy";
     auto res = motif::db::database_manager::open(missing);
     REQUIRE_FALSE(res.has_value());
     CHECK(res.error() == motif::db::error_code::not_found);
 }
 
-TEST_CASE("database_manager::open does not recreate tables (idempotent open)",
-          "[motif-db][database_manager]")
+TEST_CASE("database_manager::open does not recreate tables (idempotent open)", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"idempotent_open"};
 
@@ -189,8 +174,7 @@ TEST_CASE("database_manager::open does not recreate tables (idempotent open)",
     motif::db::game const inserted_game {
         .white = {.name = "Carlsen", .elo = {}, .title = {}, .country = {}},
         .black = {.name = "Caruana", .elo = {}, .title = {}, .country = {}},
-        .event_details =
-            motif::db::event {.name = "WCC 2018", .site = {}, .date = {}},
+        .event_details = motif::db::event {.name = "WCC 2018", .site = {}, .date = {}},
         .date = {},
         .result = "1/2-1/2",
         .eco = {},
@@ -221,9 +205,7 @@ TEST_CASE("database_manager::open does not recreate tables (idempotent open)",
 // ── AC3: portability
 // ──────────────────────────────────────────────────────────
 
-TEST_CASE(
-    "database_manager: bundle copied to another directory opens successfully",
-    "[motif-db][database_manager]")
+TEST_CASE("database_manager: bundle copied to another directory opens successfully", "[motif-db][database_manager]")
 {
     tmp_dir const src_dir {"portable_src"};
     tmp_dir const dst_dir {"portable_dst"};
@@ -241,8 +223,7 @@ TEST_CASE(
 
     std::uint32_t game_id {};
     {
-        auto mgr =
-            motif::db::database_manager::create(src_dir.path, "portable-db");
+        auto mgr = motif::db::database_manager::create(src_dir.path, "portable-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         auto insert_res = mgr->store().insert(test_game);
@@ -253,10 +234,7 @@ TEST_CASE(
 
     // Copy entire bundle directory to dst.
     std::filesystem::copy(
-        src_dir.path,
-        dst_dir.path,
-        std::filesystem::copy_options::recursive
-            | std::filesystem::copy_options::overwrite_existing);
+        src_dir.path, dst_dir.path, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
 
     auto opened = motif::db::database_manager::open(dst_dir.path);
     REQUIRE(opened.has_value());
@@ -272,9 +250,7 @@ TEST_CASE(
 
 // ── AC2 error path: schema mismatch ──────────────────────────────────────────
 
-TEST_CASE(
-    "database_manager::open returns schema_mismatch when user_version differs",
-    "[motif-db][database_manager]")
+TEST_CASE("database_manager::open returns schema_mismatch when user_version differs", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"schema_mismatch"};
 
@@ -287,8 +263,7 @@ TEST_CASE(
     // Overwrite user_version to a bogus value.
     sqlite3* raw_conn = nullptr;
     sqlite3_open((tdir.path / "games.db").c_str(), &raw_conn);
-    sqlite3_exec(
-        raw_conn, "PRAGMA user_version = 999;", nullptr, nullptr, nullptr);
+    sqlite3_exec(raw_conn, "PRAGMA user_version = 999;", nullptr, nullptr, nullptr);
     sqlite3_close(raw_conn);
 
     auto res = motif::db::database_manager::open(tdir.path);
@@ -299,8 +274,7 @@ TEST_CASE(
 // ── DuckDB: positions.duckdb
 // ──────────────────────────────────────────────────
 
-TEST_CASE("database_manager::create produces positions.duckdb in bundle dir",
-          "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::create produces positions.duckdb in bundle dir", "[motif-db][database_manager][duckdb]")
 {
     tmp_dir const tdir {"duckdb_create"};
 
@@ -310,8 +284,7 @@ TEST_CASE("database_manager::create produces positions.duckdb in bundle dir",
     CHECK(std::filesystem::exists(tdir.path / "positions.duckdb"));
 }
 
-TEST_CASE("database_manager::rebuild_position_store on empty DB returns 0 rows",
-          "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_store on empty DB returns 0 rows", "[motif-db][database_manager][duckdb]")
 {
     tmp_dir const tdir {"duckdb_rebuild_empty"};
 
@@ -329,9 +302,7 @@ TEST_CASE("database_manager::rebuild_position_store on empty DB returns 0 rows",
     CHECK(*count == 0);
 }
 
-TEST_CASE(
-    "database_manager::rebuild_position_store after N-move game returns N rows",
-    "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_store after N-move game returns N rows", "[motif-db][database_manager][duckdb]")
 {
     tmp_dir const tdir {"duckdb_rebuild_nmove"};
 
@@ -378,8 +349,7 @@ TEST_CASE(
     CHECK(*count == std::ssize(moves));
 }
 
-TEST_CASE("database_manager::rebuild_position_store is idempotent",
-          "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_store is idempotent", "[motif-db][database_manager][duckdb]")
 {
     tmp_dir const tdir {"duckdb_rebuild_idem"};
 
@@ -416,8 +386,7 @@ TEST_CASE("database_manager::rebuild_position_store is idempotent",
     CHECK(*count == 1);
 }
 
-TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo",
-          "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo", "[motif-db][database_manager][duckdb]")
 {
     tmp_dir const tdir {"duckdb_rebuild_elo_range"};
 
@@ -448,9 +417,7 @@ TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo",
     CHECK(rebuild_res.error() == motif::db::error_code::io_failure);
 }
 
-TEST_CASE(
-    "database_manager::rebuild_position_store defaults to sorted-by-zobrist",
-    "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_store defaults to sorted-by-zobrist", "[motif-db][database_manager][duckdb]")
 {
     tmp_dir const tdir {"duckdb_rebuild_sorted_default"};
 
@@ -486,8 +453,7 @@ TEST_CASE(
         .extra_tags = {},
     };
 
-    auto mgr =
-        motif::db::database_manager::create(tdir.path, "sorted-default-db");
+    auto mgr = motif::db::database_manager::create(tdir.path, "sorted-default-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->store().insert(test_game_a).has_value());

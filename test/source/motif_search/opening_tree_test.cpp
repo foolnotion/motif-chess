@@ -38,11 +38,8 @@ struct tmp_dir
     explicit tmp_dir(std::string const& suffix)
     {
         auto const base = std::filesystem::temp_directory_path();
-        auto const tick =
-            std::chrono::steady_clock::now().time_since_epoch().count();
-        path = base
-            / ("motif_opening_tree_test_" + suffix + "_"
-               + std::to_string(tick));
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = base / ("motif_opening_tree_test_" + suffix + "_" + std::to_string(tick));
     }
 
     ~tmp_dir() { std::filesystem::remove_all(path); }
@@ -65,8 +62,7 @@ auto hash_after_sans(std::initializer_list<char const*> sans) -> std::uint64_t
     return board.hash();
 }
 
-auto encode_moves(std::initializer_list<char const*> sans)
-    -> std::vector<std::uint16_t>
+auto encode_moves(std::initializer_list<char const*> sans) -> std::vector<std::uint16_t>
 {
     auto board = chesslib::board {};
     auto moves = std::vector<std::uint16_t> {};
@@ -122,8 +118,7 @@ auto make_game(game_spec const& spec) -> motif::db::game
     return game;
 }
 
-void insert_games_and_rebuild(motif::db::database_manager& manager,
-                              std::initializer_list<motif::db::game> games)
+void insert_games_and_rebuild(motif::db::database_manager& manager, std::initializer_list<motif::db::game> games)
 {
     for (auto const& game : games) {
         auto inserted = manager.store().insert(game);
@@ -152,14 +147,12 @@ auto perf_pgn_path() -> std::filesystem::path
         return std::filesystem::path {perf_pgn};
     }
 
-    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-bench.pgn";
+    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-bench.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
 
-    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-1m.pgn";
+    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-1m.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
@@ -169,9 +162,7 @@ auto perf_pgn_path() -> std::filesystem::path
 
 }  // namespace
 
-TEST_CASE(
-    "opening_tree::open returns root with correct continuations at depth 1",
-    "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open returns root with correct continuations at depth 1", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"depth1"};
 
@@ -180,25 +171,23 @@ TEST_CASE(
 
     auto const root_hash = hash_after_sans({"e4", "e5"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight Opening"}}),
-            make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
-                       .result = "0-1",
-                       .white_elo = white_elo_low,
-                       .black_elo = black_elo_other,
-                       .eco = std::string {"C25"},
-                       .opening_name = std::string {"Vienna Game"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight Opening"}}),
+                                 make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                                            .result = "0-1",
+                                            .white_elo = white_elo_low,
+                                            .black_elo = black_elo_other,
+                                            .eco = std::string {"C25"},
+                                            .opening_name = std::string {"Vienna Game"}}),
+                             });
 
-    auto tree_res = motif::search::opening_tree::open(
-        *manager, root_hash, default_prefetch_depth);
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth);
     REQUIRE(tree_res.has_value());
 
     auto const& root = tree_res->root;
@@ -209,18 +198,15 @@ TEST_CASE(
     CHECK(root.continuations[0].san == "Nc3");
     CHECK(root.continuations[0].frequency == 1);
     CHECK(root.continuations[0].black_wins == 1);
-    CHECK(root.continuations[0].result_hash
-          == hash_after_sans({"e4", "e5", "Nc3"}));
+    CHECK(root.continuations[0].result_hash == hash_after_sans({"e4", "e5", "Nc3"}));
 
     CHECK(root.continuations[1].san == "Nf3");
     CHECK(root.continuations[1].frequency == 1);
     CHECK(root.continuations[1].white_wins == 1);
-    CHECK(root.continuations[1].result_hash
-          == hash_after_sans({"e4", "e5", "Nf3"}));
+    CHECK(root.continuations[1].result_hash == hash_after_sans({"e4", "e5", "Nf3"}));
 }
 
-TEST_CASE("opening_tree::open prefetches to configured depth",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open prefetches to configured depth", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"prefetch"};
 
@@ -231,16 +217,15 @@ TEST_CASE("opening_tree::open prefetches to configured depth",
     // position table (stored at ply=1).
     auto const root_hash = hash_after_sans({"e4"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6", "Bb5"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C60"},
-                       .opening_name = std::string {"Ruy Lopez"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6", "Bb5"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C60"},
+                                            .opening_name = std::string {"Ruy Lopez"}}),
+                             });
 
     // prefetch_depth=4: expand e5(depth1), Nf3(depth2), Nc6(depth3)
     // Bb5 is at depth4 = boundary → not expanded
@@ -273,8 +258,7 @@ TEST_CASE("opening_tree::open prefetches to configured depth",
     CHECK_FALSE(bb5_cont.subtree->is_expanded);
 }
 
-TEST_CASE("opening_tree::open leaves boundary nodes unexpanded",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open leaves boundary nodes unexpanded", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"boundary"};
 
@@ -283,16 +267,15 @@ TEST_CASE("opening_tree::open leaves boundary nodes unexpanded",
 
     auto const root_hash = hash_after_sans({"e4"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight"}}),
+                             });
 
     // prefetch_depth=2: e5 at depth1 is expanded; Nf3 at depth2 is
     // the boundary → its subtree is not expanded
@@ -310,8 +293,7 @@ TEST_CASE("opening_tree::open leaves boundary nodes unexpanded",
     CHECK_FALSE(nf3.subtree->is_expanded);
 }
 
-TEST_CASE("opening_tree::expand populates children for unexpanded node",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::expand populates children for unexpanded node", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"expand"};
 
@@ -320,16 +302,15 @@ TEST_CASE("opening_tree::expand populates children for unexpanded node",
 
     auto const root_hash = hash_after_sans({"e4"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6", "Bb5"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C60"},
-                       .opening_name = std::string {"Ruy Lopez"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6", "Bb5"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C60"},
+                                            .opening_name = std::string {"Ruy Lopez"}}),
+                             });
 
     auto tree_res = motif::search::opening_tree::open(*manager, root_hash, 2);
     REQUIRE(tree_res.has_value());
@@ -341,16 +322,14 @@ TEST_CASE("opening_tree::expand populates children for unexpanded node",
     auto& nf3 = e5_continuation.subtree->continuations[0];
     CHECK_FALSE(nf3.subtree->is_expanded);
 
-    auto expand_res =
-        motif::search::opening_tree::expand(*manager, *nf3.subtree);
+    auto expand_res = motif::search::opening_tree::expand(*manager, *nf3.subtree);
     REQUIRE(expand_res.has_value());
     CHECK(nf3.subtree->is_expanded);
     REQUIRE_FALSE(nf3.subtree->continuations.empty());
     CHECK(nf3.subtree->continuations[0].san == "Nc6");
 }
 
-TEST_CASE("opening_tree::expand is no-op on already expanded node",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::expand is no-op on already expanded node", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"noop"};
 
@@ -359,19 +338,17 @@ TEST_CASE("opening_tree::expand is no-op on already expanded node",
 
     auto const root_hash = hash_after_sans({"e4", "e5"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight"}}),
+                             });
 
-    auto tree_res = motif::search::opening_tree::open(
-        *manager, root_hash, default_prefetch_depth);
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth);
     REQUIRE(tree_res.has_value());
 
     auto& root = tree_res->root;
@@ -381,43 +358,38 @@ TEST_CASE("opening_tree::expand is no-op on already expanded node",
 
     auto cont_count_before = nf3_cont.subtree->continuations.size();
 
-    auto expand_res =
-        motif::search::opening_tree::expand(*manager, *nf3_cont.subtree);
+    auto expand_res = motif::search::opening_tree::expand(*manager, *nf3_cont.subtree);
     REQUIRE(expand_res.has_value());
 
     CHECK(nf3_cont.subtree->is_expanded);
     CHECK(nf3_cont.subtree->continuations.size() == cont_count_before);
 }
 
-TEST_CASE("opening_tree::open with empty root returns empty tree",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open with empty root returns empty tree", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"empty"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "tree-db");
     REQUIRE(manager.has_value());
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"d4", "Nf6"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"A06"},
-                       .opening_name = std::string {"Queen's Pawn"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"d4", "Nf6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"A06"},
+                                            .opening_name = std::string {"Queen's Pawn"}}),
+                             });
 
     auto const missing_hash = hash_after_sans({"c4", "e5", "Nc3"});
-    auto tree_res = motif::search::opening_tree::open(
-        *manager, missing_hash, default_prefetch_depth);
+    auto tree_res = motif::search::opening_tree::open(*manager, missing_hash, default_prefetch_depth);
     REQUIRE(tree_res.has_value());
     CHECK(tree_res->root.continuations.empty());
     CHECK(tree_res->root.is_expanded);
 }
 
-TEST_CASE("opening_tree::open with custom prefetch_depth",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open with custom prefetch_depth", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"custom_depth"};
 
@@ -426,16 +398,15 @@ TEST_CASE("opening_tree::open with custom prefetch_depth",
 
     auto const root_hash = hash_after_sans({"e4"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight"}}),
+                             });
 
     // prefetch_depth=2: e5 at depth1 is expanded with continuations;
     // Nf3 at depth2 is boundary (not expanded)
@@ -454,8 +425,7 @@ TEST_CASE("opening_tree::open with custom prefetch_depth",
     CHECK_FALSE(nf3.subtree->is_expanded);
 }
 
-TEST_CASE("opening_tree::open with zero prefetch leaves root lazy",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open with zero prefetch leaves root lazy", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"zero_prefetch"};
 
@@ -464,16 +434,15 @@ TEST_CASE("opening_tree::open with zero prefetch leaves root lazy",
 
     auto const root_hash = hash_after_sans({"e4", "e5"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight"}}),
+                             });
 
     auto tree_res = motif::search::opening_tree::open(*manager, root_hash, 0);
     REQUIRE(tree_res.has_value());
@@ -481,16 +450,14 @@ TEST_CASE("opening_tree::open with zero prefetch leaves root lazy",
     CHECK_FALSE(tree_res->root.is_expanded);
     CHECK(tree_res->root.continuations.empty());
 
-    auto expand_res =
-        motif::search::opening_tree::expand(*manager, tree_res->root);
+    auto expand_res = motif::search::opening_tree::expand(*manager, tree_res->root);
     REQUIRE(expand_res.has_value());
     CHECK(tree_res->root.is_expanded);
     REQUIRE(tree_res->root.continuations.size() == 1);
     CHECK(tree_res->root.continuations[0].san == "Nf3");
 }
 
-TEST_CASE("opening_tree::open counts repeated root occurrences in one game",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open counts repeated root occurrences in one game", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"repeated_root"};
 
@@ -499,18 +466,15 @@ TEST_CASE("opening_tree::open counts repeated root occurrences in one game",
 
     auto const root_hash = hash_after_sans({"Nf3", "Nf6"});
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game(
-                {.sans =
-                     {"Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1", "Nc6"},
-                 .result = "1-0",
-                 .white_elo = white_elo_high,
-                 .black_elo = black_elo_high,
-                 .eco = std::string {"C40"},
-                 .opening_name = std::string {"King's Knight"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight"}}),
+                             });
 
     auto tree_res = motif::search::opening_tree::open(*manager, root_hash, 2);
     REQUIRE(tree_res.has_value());
@@ -527,8 +491,7 @@ TEST_CASE("opening_tree::open counts repeated root occurrences in one game",
     CHECK(root.continuations[0].subtree->continuations[1].frequency == 1);
 }
 
-TEST_CASE("opening_tree::open rejects oversized prefetch_depth",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open rejects oversized prefetch_depth", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"oversized_prefetch"};
 
@@ -536,38 +499,32 @@ TEST_CASE("opening_tree::open rejects oversized prefetch_depth",
     REQUIRE(manager.has_value());
 
     auto const root_hash = hash_after_sans({"e4"});
-    auto const oversized_depth =
-        static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max())
-        + 1U;
+    auto const oversized_depth = static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()) + 1U;
 
-    auto tree_res =
-        motif::search::opening_tree::open(*manager, root_hash, oversized_depth);
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, oversized_depth);
     REQUIRE_FALSE(tree_res.has_value());
     CHECK(tree_res.error() == motif::search::error_code::invalid_argument);
 }
 
-TEST_CASE("opening_tree::open result_hash matches expected zobrist hash",
-          "[motif-search][opening_tree]")
+TEST_CASE("opening_tree::open result_hash matches expected zobrist hash", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"result_hash"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "tree-db");
     REQUIRE(manager.has_value());
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight"}}),
+                             });
 
     auto const root_hash = hash_after_sans({"e4", "e5"});
-    auto tree_res = motif::search::opening_tree::open(
-        *manager, root_hash, default_prefetch_depth);
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth);
     REQUIRE(tree_res.has_value());
 
     auto const& root = tree_res->root;
@@ -580,8 +537,7 @@ TEST_CASE("opening_tree::open result_hash matches expected zobrist hash",
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("opening_tree::open performance on sorted position store",
-          "[performance][motif-search][opening_tree]")
+TEST_CASE("opening_tree::open performance on sorted position store", "[performance][motif-search][opening_tree]")
 {
     if (is_sanitized_build) {
         SKIP("performance checks are skipped in sanitize builds");
@@ -598,12 +554,10 @@ TEST_CASE("opening_tree::open performance on sorted position store",
 
     tmp_dir const tdir {"perf"};
 
-    auto manager = motif::db::database_manager::create(tdir.path / "db",
-                                                       "opening-tree-perf");
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "opening-tree-perf");
     REQUIRE(manager.has_value());
 
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
+    auto init_log = motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
     REQUIRE(init_log.has_value());
 
     motif::import::import_pipeline pipeline {*manager};
@@ -611,8 +565,7 @@ TEST_CASE("opening_tree::open performance on sorted position store",
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes = manager->positions().sample_zobrist_hashes(
-        perf_sample_hashes, perf_sample_seed);
+    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
@@ -621,13 +574,11 @@ TEST_CASE("opening_tree::open performance on sorted position store",
 
     for (auto const hash : *sample_hashes) {
         auto const start = std::chrono::steady_clock::now();
-        auto result = motif::search::opening_tree::open(
-            *manager, hash, default_prefetch_depth);
+        auto result = motif::search::opening_tree::open(*manager, hash, default_prefetch_depth);
         auto const stop = std::chrono::steady_clock::now();
 
         REQUIRE(result.has_value());
-        latencies_us.push_back(
-            std::chrono::duration<double, std::micro>(stop - start).count());
+        latencies_us.push_back(std::chrono::duration<double, std::micro>(stop - start).count());
     }
 
     std::ranges::sort(latencies_us);
@@ -639,8 +590,7 @@ TEST_CASE("opening_tree::open performance on sorted position store",
     }
     total_ms /= us_per_ms;
 
-    auto const p99_idx = std::min(
-        count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
+    auto const p99_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
     auto const p99_us = count > 0 ? latencies_us[p99_idx] : 0.0;
 
     std::cout << "\n=== opening_tree::open performance ===\n"

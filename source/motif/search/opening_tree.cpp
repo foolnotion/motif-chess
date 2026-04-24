@@ -33,10 +33,7 @@ struct occurrence_key
     std::uint32_t game_id;
     std::uint16_t root_ply;
 
-    auto operator==(occurrence_key const& other) const -> bool
-    {
-        return game_id == other.game_id && root_ply == other.root_ply;
-    }
+    auto operator==(occurrence_key const& other) const -> bool { return game_id == other.game_id && root_ply == other.root_ply; }
 };
 
 struct occurrence_key_hash
@@ -47,8 +44,7 @@ struct occurrence_key_hash
         constexpr std::size_t lshift = 12U;
         constexpr std::size_t rshift = 4U;
         auto seed = std::hash<std::uint32_t> {}(key.game_id);
-        seed ^= static_cast<std::size_t>(key.root_ply) + phi + (seed << lshift)
-            + (seed >> rshift);
+        seed ^= static_cast<std::size_t>(key.root_ply) + phi + (seed << lshift) + (seed >> rshift);
         return seed;
     }
 };
@@ -58,10 +54,7 @@ struct node_key
     std::uint16_t depth;
     std::uint64_t parent_hash;
 
-    auto operator==(node_key const& other) const -> bool
-    {
-        return depth == other.depth && parent_hash == other.parent_hash;
-    }
+    auto operator==(node_key const& other) const -> bool { return depth == other.depth && parent_hash == other.parent_hash; }
 };
 
 struct node_key_hash
@@ -72,8 +65,7 @@ struct node_key_hash
         constexpr std::size_t lshift = 12U;
         constexpr std::size_t rshift = 4U;
         auto seed = std::hash<std::uint64_t> {}(key.parent_hash);
-        seed ^= static_cast<std::size_t>(key.depth) + phi + (seed << lshift)
-            + (seed >> rshift);
+        seed ^= static_cast<std::size_t>(key.depth) + phi + (seed << lshift) + (seed >> rshift);
         return seed;
     }
 };
@@ -93,8 +85,7 @@ struct tree_continuation_aggregate
     std::map<std::string, std::uint32_t, std::less<>> eco_counts;
 };
 
-auto average_elo(std::int64_t const sum, std::uint32_t const count)
-    -> std::optional<double>
+auto average_elo(std::int64_t const sum, std::uint32_t const count) -> std::optional<double>
 {
     if (count == 0U) {
         return std::nullopt;
@@ -103,8 +94,7 @@ auto average_elo(std::int64_t const sum, std::uint32_t const count)
     return static_cast<double>(sum) / static_cast<double>(count);
 }
 
-void note_result(tree_continuation_aggregate& aggregate,
-                 std::int8_t const result)
+void note_result(tree_continuation_aggregate& aggregate, std::int8_t const result)
 {
     if (result > 0) {
         ++aggregate.white_wins;
@@ -132,10 +122,7 @@ void note_elo(tree_continuation_aggregate& aggregate,
     }
 }
 
-void note_opening_name(
-    std::map<std::string, std::string, std::less<>>& eco_lookup,
-    std::string const& eco,
-    std::string const& opening_name)
+void note_opening_name(std::map<std::string, std::string, std::less<>>& eco_lookup, std::string const& eco, std::string const& opening_name)
 {
     auto const [lookup_it, inserted] = eco_lookup.emplace(eco, opening_name);
     if (!inserted && opening_name.size() > lookup_it->second.size()) {
@@ -143,18 +130,14 @@ void note_opening_name(
     }
 }
 
-auto dominant_eco(tree_continuation_aggregate const& aggregate)
-    -> std::optional<std::string>
+auto dominant_eco(tree_continuation_aggregate const& aggregate) -> std::optional<std::string>
 {
     if (aggregate.eco_counts.empty()) {
         return std::nullopt;
     }
 
     auto best = aggregate.eco_counts.begin();
-    for (auto it = std::next(aggregate.eco_counts.begin());
-         it != aggregate.eco_counts.end();
-         ++it)
-    {
+    for (auto it = std::next(aggregate.eco_counts.begin()); it != aggregate.eco_counts.end(); ++it) {
         if (it->second > best->second) {
             best = it;
         }
@@ -163,9 +146,7 @@ auto dominant_eco(tree_continuation_aggregate const& aggregate)
     return best->first;
 }
 
-auto replay_position(motif::db::game_context const& context,
-                     std::uint16_t const ply)
-    -> motif::search::result<chesslib::board>
+auto replay_position(motif::db::game_context const& context, std::uint16_t const ply) -> motif::search::result<chesslib::board>
 {
     auto board = chesslib::board {};
 
@@ -191,20 +172,16 @@ struct node_aggregate
     bool has_sample {false};
 };
 
-auto build_continuation(
-    tree_continuation_aggregate const& aggregate,
-    std::map<std::string, std::string, std::less<>> const& eco_lookup,
-    chesslib::board const& position,
-    bool const is_expanded,
-    std::uint64_t const child_hash)
-    -> motif::search::opening_tree::node_continuation
+auto build_continuation(tree_continuation_aggregate const& aggregate,
+                        std::map<std::string, std::string, std::less<>> const& eco_lookup,
+                        chesslib::board const& position,
+                        bool const is_expanded,
+                        std::uint64_t const child_hash) -> motif::search::opening_tree::node_continuation
 {
     auto eco = dominant_eco(aggregate);
     auto opening_name = std::optional<std::string> {};
     if (eco.has_value()) {
-        if (auto lookup_it = eco_lookup.find(*eco);
-            lookup_it != eco_lookup.end())
-        {
+        if (auto lookup_it = eco_lookup.find(*eco); lookup_it != eco_lookup.end()) {
             opening_name = lookup_it->second;
         }
     }
@@ -212,12 +189,11 @@ auto build_continuation(
     auto const cont_move = chesslib::codec::decode(aggregate.encoded_move);
     auto san = chesslib::san::to_string(position, cont_move);
 
-    auto child_node = std::make_unique<motif::search::opening_tree::node>(
-        motif::search::opening_tree::node {
-            .zobrist_hash = child_hash,
-            .continuations = {},
-            .is_expanded = is_expanded,
-        });
+    auto child_node = std::make_unique<motif::search::opening_tree::node>(motif::search::opening_tree::node {
+        .zobrist_hash = child_hash,
+        .continuations = {},
+        .is_expanded = is_expanded,
+    });
 
     return motif::search::opening_tree::node_continuation {
         .san = std::move(san),
@@ -226,23 +202,19 @@ auto build_continuation(
         .white_wins = aggregate.white_wins,
         .draws = aggregate.draws,
         .black_wins = aggregate.black_wins,
-        .average_white_elo =
-            average_elo(aggregate.white_elo_sum, aggregate.white_elo_count),
-        .average_black_elo =
-            average_elo(aggregate.black_elo_sum, aggregate.black_elo_count),
+        .average_white_elo = average_elo(aggregate.white_elo_sum, aggregate.white_elo_count),
+        .average_black_elo = average_elo(aggregate.black_elo_sum, aggregate.black_elo_count),
         .eco = std::move(eco),
         .opening_name = std::move(opening_name),
         .subtree = std::move(child_node),
     };
 }
 
-void sort_continuations(
-    std::vector<motif::search::opening_tree::node_continuation>& conts)
+void sort_continuations(std::vector<motif::search::opening_tree::node_continuation>& conts)
 {
     std::ranges::sort(
         conts,
-        [](motif::search::opening_tree::node_continuation const& left,
-           motif::search::opening_tree::node_continuation const& right) -> bool
+        [](motif::search::opening_tree::node_continuation const& left, motif::search::opening_tree::node_continuation const& right) -> bool
         {
             if (left.frequency != right.frequency) {
                 return left.frequency > right.frequency;
@@ -258,22 +230,16 @@ namespace motif::search::opening_tree
 {
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto open(motif::db::database_manager const& database,
-          std::uint64_t const root_hash,
-          std::size_t const prefetch_depth) -> result<tree>
+auto open(motif::db::database_manager const& database, std::uint64_t const root_hash, std::size_t const prefetch_depth) -> result<tree>
 {
     if (prefetch_depth == 0U) {
         return tree {
-            .root = node {.zobrist_hash = root_hash,
-                          .continuations = {},
-                          .is_expanded = false},
+            .root = node {.zobrist_hash = root_hash, .continuations = {}, .is_expanded = false},
             .prefetch_depth = prefetch_depth,
         };
     }
 
-    if (prefetch_depth
-        > static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()))
-    {
+    if (prefetch_depth > static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max())) {
         return tl::unexpected {error_code::invalid_argument};
     }
 
@@ -286,9 +252,7 @@ auto open(motif::db::database_manager const& database,
 
     if (rows_res->empty()) {
         return tree {
-            .root = node {.zobrist_hash = root_hash,
-                          .continuations = {},
-                          .is_expanded = true},
+            .root = node {.zobrist_hash = root_hash, .continuations = {}, .is_expanded = true},
             .prefetch_depth = prefetch_depth,
         };
     }
@@ -308,10 +272,7 @@ auto open(motif::db::database_manager const& database,
     }
     auto const& contexts = *contexts_res;
 
-    auto rows_by_occurrence =
-        std::unordered_map<occurrence_key,
-                           std::vector<motif::db::tree_position_row>,
-                           occurrence_key_hash> {};
+    auto rows_by_occurrence = std::unordered_map<occurrence_key, std::vector<motif::db::tree_position_row>, occurrence_key_hash> {};
     for (auto const& row : *rows_res) {
         rows_by_occurrence[occurrence_key {
                                .game_id = row.game_id,
@@ -320,16 +281,14 @@ auto open(motif::db::database_manager const& database,
             .push_back(row);
     }
 
-    auto node_aggregates =
-        std::unordered_map<node_key, node_aggregate, node_key_hash> {};
+    auto node_aggregates = std::unordered_map<node_key, node_aggregate, node_key_hash> {};
 
     // Process each root occurrence independently so repeated visits to the
     // same root position inside one game contribute separate counts and build
     // the correct descendant chain.
     for (auto& [occurrence, occurrence_rows] : rows_by_occurrence) {
         std::ranges::sort(occurrence_rows,
-                          [](motif::db::tree_position_row const& left,
-                             motif::db::tree_position_row const& right) -> bool
+                          [](motif::db::tree_position_row const& left, motif::db::tree_position_row const& right) -> bool
                           { return left.depth < right.depth; });
 
         auto const ctx_it = contexts.find(occurrence.game_id);
@@ -345,27 +304,21 @@ auto open(motif::db::database_manager const& database,
 
         auto parent_hash = root_hash;
         for (auto const& row : occurrence_rows) {
-            auto const move_ply =
-                static_cast<std::size_t>(occurrence.root_ply + row.depth - 1U);
+            auto const move_ply = static_cast<std::size_t>(occurrence.root_ply + row.depth - 1U);
             if (move_ply >= context.moves.size()) {
                 return tl::unexpected {error_code::io_failure};
             }
 
             auto const encoded_move = context.moves[move_ply];
-            auto const nkey =
-                node_key {.depth = row.depth, .parent_hash = parent_hash};
-            auto& nag = node_aggregates.try_emplace(nkey, node_aggregate {})
-                            .first->second;
+            auto const nkey = node_key {.depth = row.depth, .parent_hash = parent_hash};
+            auto& nag = node_aggregates.try_emplace(nkey, node_aggregate {}).first->second;
             if (!nag.has_sample) {
                 nag.sample_game_id = occurrence.game_id;
                 nag.sample_root_ply = occurrence.root_ply;
                 nag.has_sample = true;
             }
 
-            auto& aggregate =
-                nag.continuations
-                    .try_emplace(encoded_move, tree_continuation_aggregate {})
-                    .first->second;
+            auto& aggregate = nag.continuations.try_emplace(encoded_move, tree_continuation_aggregate {}).first->second;
             aggregate.encoded_move = encoded_move;
             if (aggregate.frequency == 0U) {
                 aggregate.result_hash = row.child_hash;
@@ -384,9 +337,7 @@ auto open(motif::db::database_manager const& database,
                 }
             }
 
-            auto replayed = replay_position(
-                context,
-                static_cast<std::uint16_t>(occurrence.root_ply + row.depth));
+            auto replayed = replay_position(context, static_cast<std::uint16_t>(occurrence.root_ply + row.depth));
             if (!replayed || replayed->hash() != row.child_hash) {
                 return tl::unexpected {error_code::io_failure};
             }
@@ -419,8 +370,7 @@ auto open(motif::db::database_manager const& database,
                       });
 
     // Map from (depth, parent_hash) → built node
-    auto built_nodes =
-        std::unordered_map<node_key, std::unique_ptr<node>, node_key_hash> {};
+    auto built_nodes = std::unordered_map<node_key, std::unique_ptr<node>, node_key_hash> {};
 
     // Build nodes bottom-up (from max_depth to 1)
     for (auto const& nkey : all_keys | std::views::reverse) {
@@ -435,29 +385,19 @@ auto open(motif::db::database_manager const& database,
             return tl::unexpected {error_code::io_failure};
         }
 
-        auto const parent_ply =
-            static_cast<std::uint16_t>(nag.sample_root_ply + nkey.depth - 1U);
+        auto const parent_ply = static_cast<std::uint16_t>(nag.sample_root_ply + nkey.depth - 1U);
         auto parent_board = replay_position(ctx_it->second, parent_ply);
         if (!parent_board || parent_board->hash() != nkey.parent_hash) {
             return tl::unexpected {error_code::io_failure};
         }
 
-        auto current_node =
-            std::make_unique<node>(node {.zobrist_hash = nkey.parent_hash,
-                                         .continuations = {},
-                                         .is_expanded = true});
+        auto current_node = std::make_unique<node>(node {.zobrist_hash = nkey.parent_hash, .continuations = {}, .is_expanded = true});
 
         for (auto const& [encoded_move, aggregate] : nag.continuations) {
-            auto const child_key =
-                node_key {.depth = static_cast<std::uint16_t>(nkey.depth + 1U),
-                          .parent_hash = aggregate.result_hash};
+            auto const child_key = node_key {.depth = static_cast<std::uint16_t>(nkey.depth + 1U), .parent_hash = aggregate.result_hash};
             auto child_it = built_nodes.find(child_key);
             auto const is_boundary = nkey.depth >= max_depth;
-            auto cont = build_continuation(aggregate,
-                                           nag.eco_lookup,
-                                           *parent_board,
-                                           !is_boundary,
-                                           aggregate.result_hash);
+            auto cont = build_continuation(aggregate, nag.eco_lookup, *parent_board, !is_boundary, aggregate.result_hash);
 
             if (child_it != built_nodes.end()) {
                 // Attach pre-built child subtree
@@ -495,8 +435,7 @@ auto open(motif::db::database_manager const& database,
     return result_tree;
 }
 
-auto expand(motif::db::database_manager const& database, node& n)
-    -> result<void>
+auto expand(motif::db::database_manager const& database, node& n) -> result<void>
 {
     if (n.is_expanded) {
         return {};

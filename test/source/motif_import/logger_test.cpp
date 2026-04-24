@@ -21,23 +21,18 @@ auto make_temp_log_dir() -> fs::path
     static std::atomic_uint64_t counter {0};
 
     const auto suffix =
-        std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count())
-        + "_" + std::to_string(counter.fetch_add(1));
-    const auto log_path =
-        fs::temp_directory_path() / ("motif_logger_test_" + suffix);
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(counter.fetch_add(1));
+    const auto log_path = fs::temp_directory_path() / ("motif_logger_test_" + suffix);
     fs::create_directories(log_path);
     return log_path;
 }
 
 }  // namespace
 
-TEST_CASE("logger: named loggers are registered after initialize_logging",
-          "[motif-import]")
+TEST_CASE("logger: named loggers are registered after initialize_logging", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
-    const auto init_result = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = false});
+    const auto init_result = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = false});
     REQUIRE(init_result.has_value());
 
     REQUIRE(spdlog::get("motif.db") != nullptr);
@@ -52,8 +47,7 @@ TEST_CASE("logger: named loggers are registered after initialize_logging",
 TEST_CASE("logger: emitting at all levels does not crash", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
-    const auto init_result = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = false});
+    const auto init_result = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = false});
     REQUIRE(init_result.has_value());
 
     const auto logger = spdlog::get("motif.import");
@@ -76,8 +70,7 @@ TEST_CASE("logger: emitting at all levels does not crash", "[motif-import]")
 TEST_CASE("logger: json_sink creates two sinks per logger", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
-    const auto init_result = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = true});
+    const auto init_result = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = true});
     REQUIRE(init_result.has_value());
 
     const auto logger = spdlog::get("motif.import");
@@ -94,12 +87,10 @@ TEST_CASE("logger: initialize_logging is idempotent", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
 
-    const auto first_init = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = false});
+    const auto first_init = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = false});
     REQUIRE(first_init.has_value());
 
-    const auto second_init = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = false});
+    const auto second_init = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = false});
     REQUIRE(second_init.has_value());
 
     const auto logger = spdlog::get("motif.import");
@@ -111,17 +102,14 @@ TEST_CASE("logger: initialize_logging is idempotent", "[motif-import]")
     fs::remove_all(log_dir);
 }
 
-TEST_CASE("logger: initialize_logging rejects incompatible reconfiguration",
-          "[motif-import]")
+TEST_CASE("logger: initialize_logging rejects incompatible reconfiguration", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
 
-    const auto first_init = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = false});
+    const auto first_init = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = false});
     REQUIRE(first_init.has_value());
 
-    const auto second_init = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = true});
+    const auto second_init = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = true});
     REQUIRE_FALSE(second_init.has_value());
     REQUIRE(second_init.error() == motif::import::error_code::invalid_state);
 
@@ -134,19 +122,16 @@ TEST_CASE("logger: initialize_logging rejects incompatible reconfiguration",
     fs::remove_all(log_dir);
 }
 
-TEST_CASE("logger: initialize_logging rejects partial logger state",
-          "[motif-import]")
+TEST_CASE("logger: initialize_logging rejects partial logger state", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
 
-    const auto init_result = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = false});
+    const auto init_result = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = false});
     REQUIRE(init_result.has_value());
 
     spdlog::drop("motif.search");
 
-    const auto second_init = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = false});
+    const auto second_init = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = false});
     REQUIRE_FALSE(second_init.has_value());
     REQUIRE(second_init.error() == motif::import::error_code::invalid_state);
 
@@ -155,8 +140,7 @@ TEST_CASE("logger: initialize_logging rejects partial logger state",
     fs::remove_all(log_dir);
 }
 
-TEST_CASE("logger: initialize_logging returns io_failure for bad log path",
-          "[motif-import]")
+TEST_CASE("logger: initialize_logging returns io_failure for bad log path", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
     const auto blocking_file = log_dir / "not_a_directory";
@@ -167,8 +151,7 @@ TEST_CASE("logger: initialize_logging returns io_failure for bad log path",
         output << "blocking file";
     }
 
-    const auto init_result = motif::import::initialize_logging(
-        {.log_dir = blocking_file, .json_sink = false});
+    const auto init_result = motif::import::initialize_logging({.log_dir = blocking_file, .json_sink = false});
     REQUIRE_FALSE(init_result.has_value());
     REQUIRE(init_result.error() == motif::import::error_code::io_failure);
 
@@ -181,22 +164,18 @@ TEST_CASE("logger: initialize_logging returns io_failure for bad log path",
     fs::remove_all(log_dir);
 }
 
-TEST_CASE("logger: json_sink escapes messages as valid json text",
-          "[motif-import]")
+TEST_CASE("logger: json_sink escapes messages as valid json text", "[motif-import]")
 {
     const auto log_dir = make_temp_log_dir();
 
-    const auto init_result = motif::import::initialize_logging(
-        {.log_dir = log_dir, .json_sink = true});
+    const auto init_result = motif::import::initialize_logging({.log_dir = log_dir, .json_sink = true});
     REQUIRE(init_result.has_value());
 
     const auto logger = spdlog::get("motif.import");
     REQUIRE(logger != nullptr);
 
-    logger->info(std::string {"quote \" slash \\ newline\n tab\t nul "}
-                 + std::string(1, '\0') + std::string {" bell "}
-                 + std::string(1, '\b') + std::string {" formfeed "}
-                 + std::string(1, '\f'));
+    logger->info(std::string {"quote \" slash \\ newline\n tab\t nul "} + std::string(1, '\0') + std::string {" bell "}
+                 + std::string(1, '\b') + std::string {" formfeed "} + std::string(1, '\f'));
     logger->flush();
 
     const auto shutdown_result = motif::import::shutdown_logging();

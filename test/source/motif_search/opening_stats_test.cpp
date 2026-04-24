@@ -24,7 +24,6 @@
 #include "motif/db/types.hpp"
 #include "motif/import/import_pipeline.hpp"
 #include "motif/import/logger.hpp"
-
 #include "test_helpers.hpp"
 
 namespace
@@ -39,11 +38,8 @@ struct tmp_dir
     explicit tmp_dir(std::string const& suffix)
     {
         auto const base = std::filesystem::temp_directory_path();
-        auto const tick =
-            std::chrono::steady_clock::now().time_since_epoch().count();
-        path = base
-            / ("motif_opening_stats_test_" + suffix + "_"
-               + std::to_string(tick));
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = base / ("motif_opening_stats_test_" + suffix + "_" + std::to_string(tick));
     }
 
     ~tmp_dir() { std::filesystem::remove_all(path); }
@@ -66,8 +62,7 @@ auto hash_after_sans(std::initializer_list<char const*> sans) -> std::uint64_t
     return board.hash();
 }
 
-auto encode_moves(std::initializer_list<char const*> sans)
-    -> std::vector<std::uint16_t>
+auto encode_moves(std::initializer_list<char const*> sans) -> std::vector<std::uint16_t>
 {
     auto board = chesslib::board {};
     auto moves = std::vector<std::uint16_t> {};
@@ -123,8 +118,7 @@ auto make_game(game_spec const& spec) -> motif::db::game
     return game;
 }
 
-void insert_games_and_rebuild(motif::db::database_manager& manager,
-                              std::initializer_list<motif::db::game> games)
+void insert_games_and_rebuild(motif::db::database_manager& manager, std::initializer_list<motif::db::game> games)
 {
     for (auto const& game : games) {
         auto inserted = manager.store().insert(game);
@@ -158,14 +152,12 @@ auto perf_pgn_path() -> std::filesystem::path
         return std::filesystem::path {perf_pgn};
     }
 
-    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-bench.pgn";
+    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-bench.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
 
-    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-1m.pgn";
+    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-1m.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
@@ -187,8 +179,7 @@ struct query_latency_result
 
 auto measure_query_latencies(motif::db::database_manager const& manager,
                              std::vector<std::uint64_t> const& sample_hashes,
-                             std::string_view const variant_name)
-    -> query_latency_result
+                             std::string_view const variant_name) -> query_latency_result
 {
     std::vector<double> latencies_us;
     latencies_us.reserve(sample_hashes.size());
@@ -202,8 +193,7 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
         REQUIRE(results.has_value());
 
         total_rows += results->continuations.size();
-        latencies_us.push_back(
-            std::chrono::duration<double, std::micro>(stop - start).count());
+        latencies_us.push_back(std::chrono::duration<double, std::micro>(stop - start).count());
     }
 
     std::ranges::sort(latencies_us);
@@ -215,10 +205,8 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
     }
     total_ms /= us_per_ms;
 
-    auto const p50_idx = std::min(
-        count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.50));
-    auto const p99_idx = std::min(
-        count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
+    auto const p50_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.50));
+    auto const p99_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
 
     return query_latency_result {
         .variant_name = std::string {variant_name},
@@ -251,12 +239,10 @@ void run_opening_stats_perf_test()
 
     tmp_dir const tdir {"perf"};
 
-    auto manager = motif::db::database_manager::create(tdir.path / "db",
-                                                       "opening-stats-perf");
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "opening-stats-perf");
     REQUIRE(manager.has_value());
 
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
+    auto init_log = motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
     REQUIRE(init_log.has_value());
 
     motif::import::import_pipeline pipeline {*manager};
@@ -264,16 +250,11 @@ void run_opening_stats_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes =
-        manager->positions().sample_zobrist_hashes(perf_sample_hashes,
-                                                   perf_sample_seed);
+    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
-    auto const result = measure_query_latencies(
-        *manager,
-        *sample_hashes,
-        "opening_stats::query on sorted position store");
+    auto const result = measure_query_latencies(*manager, *sample_hashes, "opening_stats::query on sorted position store");
 
     std::cout << "\n=== " << result.variant_name << " ===\n"
               << "  queries:      " << result.num_queries << "\n"
@@ -292,39 +273,36 @@ void run_opening_stats_perf_test()
 
 }  // namespace
 
-TEST_CASE("opening_stats::query aggregates continuation statistics",
-          "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query aggregates continuation statistics", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"aggregate"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "search-db");
     REQUIRE(manager.has_value());
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                       .result = "1-0",
-                       .white_elo = white_elo_high,
-                       .black_elo = black_elo_high,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight Opening"}}),
-            make_game({.sans = {"e4", "e5", "Nf3", "d6"},
-                       .result = "1/2-1/2",
-                       .white_elo = white_elo_mid,
-                       .black_elo = std::nullopt,
-                       .eco = std::string {"C40"},
-                       .opening_name = std::string {"King's Knight Opening"}}),
-            make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
-                       .result = "0-1",
-                       .white_elo = std::nullopt,
-                       .black_elo = black_elo_other,
-                       .eco = std::string {"C25"},
-                       .opening_name = std::string {"Vienna Game"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight Opening"}}),
+                                 make_game({.sans = {"e4", "e5", "Nf3", "d6"},
+                                            .result = "1/2-1/2",
+                                            .white_elo = white_elo_mid,
+                                            .black_elo = std::nullopt,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight Opening"}}),
+                                 make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                                            .result = "0-1",
+                                            .white_elo = std::nullopt,
+                                            .black_elo = black_elo_other,
+                                            .eco = std::string {"C25"},
+                                            .opening_name = std::string {"Vienna Game"}}),
+                             });
 
-    auto stats = motif::search::opening_stats::query(
-        *manager, hash_after_sans({"e4", "e5"}));
+    auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
     REQUIRE(stats.has_value());
     REQUIRE(stats->continuations.size() == 2);
 
@@ -338,15 +316,12 @@ TEST_CASE("opening_stats::query aggregates continuation statistics",
     CHECK(first.black_wins == 0);
     REQUIRE(first.average_white_elo.has_value());
     auto const first_average_white_elo = first.average_white_elo.value_or(0.0);
-    CHECK_THAT(first_average_white_elo,
-               Catch::Matchers::WithinRel(elo_average_high));
+    CHECK_THAT(first_average_white_elo, Catch::Matchers::WithinRel(elo_average_high));
     REQUIRE(first.average_black_elo.has_value());
     auto const first_average_black_elo = first.average_black_elo.value_or(0.0);
-    CHECK_THAT(first_average_black_elo,
-               Catch::Matchers::WithinRel(elo_average_high));
+    CHECK_THAT(first_average_black_elo, Catch::Matchers::WithinRel(elo_average_high));
     CHECK(first.eco == std::optional<std::string> {"C40"});
-    CHECK(first.opening_name
-          == std::optional<std::string> {"King's Knight Opening"});
+    CHECK(first.opening_name == std::optional<std::string> {"King's Knight Opening"});
 
     CHECK(second.san == "Nc3");
     CHECK(second.frequency == 1);
@@ -355,103 +330,90 @@ TEST_CASE("opening_stats::query aggregates continuation statistics",
     CHECK(second.black_wins == 1);
     CHECK_FALSE(second.average_white_elo.has_value());
     REQUIRE(second.average_black_elo.has_value());
-    auto const second_average_black_elo =
-        second.average_black_elo.value_or(0.0);
-    CHECK_THAT(second_average_black_elo,
-               Catch::Matchers::WithinRel(elo_average_other));
+    auto const second_average_black_elo = second.average_black_elo.value_or(0.0);
+    CHECK_THAT(second_average_black_elo, Catch::Matchers::WithinRel(elo_average_other));
     CHECK(second.eco == std::optional<std::string> {"C25"});
     CHECK(second.opening_name == std::optional<std::string> {"Vienna Game"});
 }
 
-TEST_CASE("opening_stats::query ignores null Elo values in averages",
-          "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query ignores null Elo values in averages", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"elo"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "search-db");
     REQUIRE(manager.has_value());
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"d4", "Nf6", "c4"},
-                       .result = "1-0",
-                       .white_elo = white_elo_low,
-                       .black_elo = std::nullopt,
-                       .eco = std::string {"A46"},
-                       .opening_name = std::string {"Queen's Pawn Game"}}),
-            make_game({.sans = {"d4", "Nf6", "c4"},
-                       .result = "1/2-1/2",
-                       .white_elo = std::nullopt,
-                       .black_elo = std::nullopt,
-                       .eco = std::string {"A46"},
-                       .opening_name = std::string {"Queen's Pawn Game"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"d4", "Nf6", "c4"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_low,
+                                            .black_elo = std::nullopt,
+                                            .eco = std::string {"A46"},
+                                            .opening_name = std::string {"Queen's Pawn Game"}}),
+                                 make_game({.sans = {"d4", "Nf6", "c4"},
+                                            .result = "1/2-1/2",
+                                            .white_elo = std::nullopt,
+                                            .black_elo = std::nullopt,
+                                            .eco = std::string {"A46"},
+                                            .opening_name = std::string {"Queen's Pawn Game"}}),
+                             });
 
-    auto stats = motif::search::opening_stats::query(
-        *manager, hash_after_sans({"d4", "Nf6"}));
+    auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"d4", "Nf6"}));
     REQUIRE(stats.has_value());
     REQUIRE(stats->continuations.size() == 1);
 
     auto const& continuation = stats->continuations.front();
     CHECK(continuation.san == "c4");
     REQUIRE(continuation.average_white_elo.has_value());
-    auto const continuation_average_white_elo =
-        continuation.average_white_elo.value_or(0.0);
-    CHECK_THAT(continuation_average_white_elo,
-               Catch::Matchers::WithinRel(elo_average_low));
+    auto const continuation_average_white_elo = continuation.average_white_elo.value_or(0.0);
+    CHECK_THAT(continuation_average_white_elo, Catch::Matchers::WithinRel(elo_average_low));
     CHECK_FALSE(continuation.average_black_elo.has_value());
 }
 
-TEST_CASE("opening_stats::query returns empty statistics for missing positions",
-          "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query returns empty statistics for missing positions", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"missing"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "search-db");
     REQUIRE(manager.has_value());
 
-    insert_games_and_rebuild(
-        *manager,
-        {
-            make_game({.sans = {"e4", "c5", "Nf3"},
-                       .result = "1-0",
-                       .white_elo = white_elo_sicilian,
-                       .black_elo = black_elo_sicilian,
-                       .eco = std::string {"B20"},
-                       .opening_name = std::string {"Sicilian Defense"}}),
-        });
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "c5", "Nf3"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_sicilian,
+                                            .black_elo = black_elo_sicilian,
+                                            .eco = std::string {"B20"},
+                                            .opening_name = std::string {"Sicilian Defense"}}),
+                             });
 
-    auto stats = motif::search::opening_stats::query(
-        *manager, hash_after_sans({"c4", "e5", "Nc3"}));
+    auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"c4", "e5", "Nc3"}));
     REQUIRE(stats.has_value());
     CHECK(stats->continuations.empty());
 }
 
-TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats",
-          "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"orphaned-row"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "search-db");
     REQUIRE(manager.has_value());
 
-    auto orphaned_game_id = manager->store().insert(
-        make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                   .result = "1-0",
-                   .white_elo = white_elo_high,
-                   .black_elo = black_elo_high,
-                   .eco = std::string {"C40"},
-                   .opening_name = std::string {"King's Knight Opening"}}));
+    auto orphaned_game_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                                               .result = "1-0",
+                                                               .white_elo = white_elo_high,
+                                                               .black_elo = black_elo_high,
+                                                               .eco = std::string {"C40"},
+                                                               .opening_name = std::string {"King's Knight Opening"}}));
     REQUIRE(orphaned_game_id.has_value());
 
-    auto surviving_game_id = manager->store().insert(
-        make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
-                   .result = "0-1",
-                   .white_elo = white_elo_low,
-                   .black_elo = black_elo_other,
-                   .eco = std::string {"C25"},
-                   .opening_name = std::string {"Vienna Game"}}));
+    auto surviving_game_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                                                                .result = "0-1",
+                                                                .white_elo = white_elo_low,
+                                                                .black_elo = black_elo_other,
+                                                                .eco = std::string {"C25"},
+                                                                .opening_name = std::string {"Vienna Game"}}));
     REQUIRE(surviving_game_id.has_value());
 
     auto rebuilt = manager->rebuild_position_store();
@@ -460,8 +422,7 @@ TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats"
     auto removed = manager->store().remove(*orphaned_game_id);
     REQUIRE(removed.has_value());
 
-    auto stats = motif::search::opening_stats::query(
-        *manager, hash_after_sans({"e4", "e5"}));
+    auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
     REQUIRE(stats.has_value());
     REQUIRE(stats->continuations.size() == 1);
 
@@ -475,8 +436,7 @@ TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats"
     CHECK(continuation.opening_name == std::optional<std::string> {"Vienna Game"});
 }
 
-TEST_CASE("opening_stats::query performance on sorted position store",
-          "[performance][motif-search][opening_stats]")
+TEST_CASE("opening_stats::query performance on sorted position store", "[performance][motif-search][opening_stats]")
 {
     run_opening_stats_perf_test();
 }

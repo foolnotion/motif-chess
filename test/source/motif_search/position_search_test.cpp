@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
 #include <iostream>
@@ -10,8 +10,9 @@
 #include <string>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
+#include "motif/search/position_search.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <chesslib/board/board.hpp>
 #include <chesslib/util/san.hpp>
 
@@ -19,8 +20,6 @@
 #include "motif/db/types.hpp"
 #include "motif/import/import_pipeline.hpp"
 #include "motif/import/logger.hpp"
-#include "motif/search/position_search.hpp"
-
 #include "test_helpers.hpp"
 
 namespace
@@ -35,10 +34,8 @@ struct tmp_dir
     explicit tmp_dir(std::string const& suffix)
     {
         auto const base = std::filesystem::temp_directory_path();
-        auto const tick =
-            std::chrono::steady_clock::now().time_since_epoch().count();
-        path = base
-             / ("motif_search_test_" + suffix + "_" + std::to_string(tick));
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = base / ("motif_search_test_" + suffix + "_" + std::to_string(tick));
     }
 
     ~tmp_dir() { std::filesystem::remove_all(path); }
@@ -74,18 +71,12 @@ auto perf_pgn_path() -> std::filesystem::path
         return std::filesystem::path {perf_pgn};
     }
 
-    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR}
-                    / "bench"
-                    / "data"
-                    / "twic-bench.pgn";
+    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-bench.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
 
-    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR}
-               / "bench"
-               / "data"
-               / "twic-1m.pgn";
+    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-1m.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
@@ -107,8 +98,7 @@ struct query_latency_result
 
 auto measure_query_latencies(motif::db::database_manager const& manager,
                              std::vector<std::uint64_t> const& sample_hashes,
-                             std::string_view const variant_name)
-    -> query_latency_result
+                             std::string_view const variant_name) -> query_latency_result
 {
     std::vector<double> latencies_us;
     latencies_us.reserve(sample_hashes.size());
@@ -122,8 +112,7 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
         REQUIRE(results.has_value());
 
         total_rows += results->size();
-        latencies_us.push_back(
-            std::chrono::duration<double, std::micro>(stop - start).count());
+        latencies_us.push_back(std::chrono::duration<double, std::micro>(stop - start).count());
     }
 
     std::ranges::sort(latencies_us);
@@ -135,12 +124,8 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
     }
     total_ms /= us_per_ms;
 
-    auto const p50_idx = std::min(
-        count - 1,
-        static_cast<std::size_t>(static_cast<double>(count) * 0.50));
-    auto const p99_idx = std::min(
-        count - 1,
-        static_cast<std::size_t>(static_cast<double>(count) * 0.99));
+    auto const p50_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.50));
+    auto const p99_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
 
     return query_latency_result {
         .variant_name = std::string {variant_name},
@@ -172,12 +157,10 @@ void run_position_search_perf_test()
 
     tmp_dir const tdir {"perf"};
 
-    auto manager =
-        motif::db::database_manager::create(tdir.path / "db", "search-perf");
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "search-perf");
     REQUIRE(manager.has_value());
 
-    auto init_log = motif::import::initialize_logging(
-        {.log_dir = tdir.path / "logs"});
+    auto init_log = motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
     REQUIRE(init_log.has_value());
 
     motif::import::import_pipeline pipeline {*manager};
@@ -185,14 +168,11 @@ void run_position_search_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes =
-        manager->positions().sample_zobrist_hashes(perf_sample_hashes,
-                                                   perf_sample_seed);
+    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
-    auto const result = measure_query_latencies(
-        *manager, *sample_hashes, "position_search sorted by zobrist");
+    auto const result = measure_query_latencies(*manager, *sample_hashes, "position_search sorted by zobrist");
 
     std::cout << "\n=== " << result.variant_name << " ===\n"
               << "  queries:      " << result.num_queries << "\n"
@@ -211,8 +191,7 @@ void run_position_search_perf_test()
 
 }  // namespace
 
-TEST_CASE("position_search::find returns matching position rows",
-          "[motif-search][position_search]")
+TEST_CASE("position_search::find returns matching position rows", "[motif-search][position_search]")
 {
     tmp_dir const tdir {"find_hits"};
 
@@ -228,12 +207,7 @@ TEST_CASE("position_search::find returns matching position rows",
          .result = 1,
          .white_elo = std::int16_t {2700},
          .black_elo = std::int16_t {2650}},
-        {.zobrist_hash = target_hash,
-         .game_id = 42,
-         .ply = 2,
-         .result = 0,
-         .white_elo = std::int16_t {2500},
-         .black_elo = std::nullopt},
+        {.zobrist_hash = target_hash, .game_id = 42, .ply = 2, .result = 0, .white_elo = std::int16_t {2500}, .black_elo = std::nullopt},
         {.zobrist_hash = hash_after_sans({"d4"}),
          .game_id = 99,
          .ply = 1,
@@ -266,8 +240,7 @@ TEST_CASE("position_search::find returns matching position rows",
     CHECK_FALSE(second.black_elo.has_value());
 }
 
-TEST_CASE("position_search::find returns empty result for missing hash",
-          "[motif-search][position_search]")
+TEST_CASE("position_search::find returns empty result for missing hash", "[motif-search][position_search]")
 {
     tmp_dir const tdir {"find_miss"};
 
@@ -284,14 +257,12 @@ TEST_CASE("position_search::find returns empty result for missing hash",
     };
     REQUIRE(manager->positions().insert_batch(rows).has_value());
 
-    auto found = motif::search::position_search::find(
-        *manager, hash_after_sans({"c4", "e5", "Nc3"}));
+    auto found = motif::search::position_search::find(*manager, hash_after_sans({"c4", "e5", "Nc3"}));
     REQUIRE(found.has_value());
     CHECK(found->empty());
 }
 
-TEST_CASE("position_search::find performance on sorted position store",
-          "[performance][motif-search][position_search]")
+TEST_CASE("position_search::find performance on sorted position store", "[performance][motif-search][position_search]")
 {
     run_position_search_perf_test();
 }
