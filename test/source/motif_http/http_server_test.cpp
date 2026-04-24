@@ -38,10 +38,8 @@ struct tmp_dir
 
     explicit tmp_dir(std::string const& suffix)
     {
-        auto const tick =
-            std::chrono::steady_clock::now().time_since_epoch().count();
-        path = std::filesystem::temp_directory_path()
-            / ("motif_http_test_" + suffix + "_" + std::to_string(tick));
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = std::filesystem::temp_directory_path() / ("motif_http_test_" + suffix + "_" + std::to_string(tick));
     }
 
     ~tmp_dir() { std::filesystem::remove_all(path); }
@@ -62,9 +60,7 @@ auto wait_for_ready(motif::http::server const& srv) -> bool
 }
 
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
-auto seed_positions(motif::db::database_manager& dbmgr,
-                    std::uint64_t hash,
-                    std::size_t count) -> void
+auto seed_positions(motif::db::database_manager& dbmgr, std::uint64_t hash, std::size_t count) -> void
 // NOLINTEND(bugprone-easily-swappable-parameters)
 {
     constexpr std::uint16_t seed_ply {10};
@@ -89,9 +85,7 @@ auto seed_positions(motif::db::database_manager& dbmgr,
 auto count_game_ids(std::string const& body) -> std::size_t
 {
     std::size_t count = 0;
-    for (auto pos = body.find("\"game_id\""); pos != std::string::npos;
-         pos = body.find("\"game_id\"", pos + 1))
-    {
+    for (auto pos = body.find("\"game_id\""); pos != std::string::npos; pos = body.find("\"game_id\"", pos + 1)) {
         ++count;
     }
     return count;
@@ -105,14 +99,12 @@ auto perf_pgn_path() -> std::filesystem::path
         return std::filesystem::path {perf_pgn};
     }
 
-    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-bench.pgn";
+    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-bench.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
 
-    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-1m.pgn";
+    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-1m.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
@@ -154,12 +146,10 @@ void run_http_position_search_perf_test()
 
     tmp_dir const tdir {"http_perf"};
 
-    auto manager =
-        motif::db::database_manager::create(tdir.path / "db", "http-perf");
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "http-perf");
     REQUIRE(manager.has_value());
 
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
+    auto init_log = motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
     REQUIRE(init_log.has_value());
 
     motif::import::import_pipeline pipeline {*manager};
@@ -167,16 +157,13 @@ void run_http_position_search_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes = manager->positions().sample_zobrist_hashes(
-        perf_sample_hashes, perf_sample_seed);
+    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
     constexpr std::uint16_t test_port {18094};
     motif::http::server srv {*manager};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -184,8 +171,7 @@ void run_http_position_search_perf_test()
     latencies_us.reserve(sample_hashes->size());
 
     for (auto const hash : *sample_hashes) {
-        auto const path =
-            std::string {"/api/positions/"} + std::to_string(hash);
+        auto const path = std::string {"/api/positions/"} + std::to_string(hash);
         auto const start = std::chrono::steady_clock::now();
         auto const res = cli.Get(path);
         auto const stop = std::chrono::steady_clock::now();
@@ -193,8 +179,7 @@ void run_http_position_search_perf_test()
         REQUIRE(res != nullptr);
         REQUIRE(res->status == 200);
 
-        latencies_us.push_back(
-            std::chrono::duration<double, std::micro>(stop - start).count());
+        latencies_us.push_back(std::chrono::duration<double, std::micro>(stop - start).count());
     }
 
     srv.stop();
@@ -213,10 +198,8 @@ void run_http_position_search_perf_test()
     }
     total_ms /= us_per_ms;
 
-    auto const p50_idx = std::min(
-        count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.50));
-    auto const p99_idx = std::min(
-        count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
+    auto const p50_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.50));
+    auto const p99_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
 
     auto const result = query_latency_result {
         .num_queries = count,
@@ -251,9 +234,7 @@ TEST_CASE("server: health endpoint returns 200 with ok body", "[motif-http]")
     constexpr std::uint16_t test_port {18080};
     motif::http::server srv {*db_res};
 
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
 
     REQUIRE(wait_for_ready(srv));
 
@@ -277,9 +258,7 @@ TEST_CASE("server: CORS headers present on health response", "[motif-http]")
     constexpr std::uint16_t test_port {18081};
     motif::http::server srv {*db_res};
 
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
 
     REQUIRE(wait_for_ready(srv));
 
@@ -291,26 +270,20 @@ TEST_CASE("server: CORS headers present on health response", "[motif-http]")
 
     REQUIRE(res != nullptr);
     CHECK(res->get_header_value("Access-Control-Allow-Origin") == "*");
-    CHECK(res->get_header_value("Access-Control-Allow-Methods")
-          == "GET, POST, DELETE, OPTIONS");
-    CHECK(res->get_header_value("Access-Control-Allow-Headers")
-          == "Content-Type");
+    CHECK(res->get_header_value("Access-Control-Allow-Methods") == "GET, POST, DELETE, OPTIONS");
+    CHECK(res->get_header_value("Access-Control-Allow-Headers") == "Content-Type");
 }
 
-TEST_CASE("server: OPTIONS preflight returns 200 with CORS headers",
-          "[motif-http]")
+TEST_CASE("server: OPTIONS preflight returns 200 with CORS headers", "[motif-http]")
 {
     auto const tdir = tmp_dir {"preflight"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "preflight-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "preflight-db");
     REQUIRE(db_res.has_value());
 
     constexpr std::uint16_t test_port {18082};
     motif::http::server srv {*db_res};
 
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
 
     REQUIRE(wait_for_ready(srv));
 
@@ -325,19 +298,15 @@ TEST_CASE("server: OPTIONS preflight returns 200 with CORS headers",
     CHECK(res->get_header_value("Access-Control-Allow-Origin") == "*");
 }
 
-TEST_CASE("server: position search empty DB returns 200 with empty array",
-          "[motif-http]")
+TEST_CASE("server: position search empty DB returns 200 with empty array", "[motif-http]")
 {
     auto const tdir = tmp_dir {"pos_empty"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "pos-empty-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "pos-empty-db");
     REQUIRE(db_res.has_value());
 
     constexpr std::uint16_t test_port {18083};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -359,9 +328,7 @@ TEST_CASE("server: position search invalid hash returns 400", "[motif-http]")
 
     constexpr std::uint16_t test_port {18084};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -378,15 +345,12 @@ TEST_CASE("server: position search invalid hash returns 400", "[motif-http]")
 TEST_CASE("server: position search empty hash returns 400", "[motif-http]")
 {
     auto const tdir = tmp_dir {"pos_emptyhash"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "pos-emptyhash-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "pos-emptyhash-db");
     REQUIRE(db_res.has_value());
 
     constexpr std::uint16_t test_port {18088};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -402,9 +366,7 @@ TEST_CASE("server: position search empty hash returns 400", "[motif-http]")
 
 // NOLINTBEGIN(readability-function-cognitive-complexity) -- Catch2 CHECK
 // macros inflate complexity in this assertion-heavy test.
-TEST_CASE(
-    "server: position search populated DB returns 200 with correct fields",
-    "[motif-http]")
+TEST_CASE("server: position search populated DB returns 200 with correct fields", "[motif-http]")
 {
     constexpr std::uint64_t pop_hash {999};
 
@@ -415,9 +377,7 @@ TEST_CASE(
 
     constexpr std::uint16_t test_port {18085};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -451,9 +411,7 @@ TEST_CASE("server: position search honors limit parameter", "[motif-http]")
 
     constexpr std::uint16_t test_port {18086};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -477,9 +435,7 @@ TEST_CASE("server: position search invalid limit returns 400", "[motif-http]")
 
     constexpr std::uint16_t test_port {18087};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -499,16 +455,13 @@ TEST_CASE("server: position search defaults limit to 100", "[motif-http]")
     constexpr std::size_t page_total {150};
 
     auto const tdir = tmp_dir {"pos_default_limit"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "default-limit-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "default-limit-db");
     REQUIRE(db_res.has_value());
     seed_positions(*db_res, page_hash, page_total);
 
     constexpr std::uint16_t test_port {18089};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -528,16 +481,13 @@ TEST_CASE("server: position search clamps limit to 500", "[motif-http]")
     constexpr std::size_t page_total {600};
 
     auto const tdir = tmp_dir {"pos_limit_clamp"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "limit-clamp-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "limit-clamp-db");
     REQUIRE(db_res.has_value());
     seed_positions(*db_res, page_hash, page_total);
 
     constexpr std::uint16_t test_port {18090};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -551,23 +501,19 @@ TEST_CASE("server: position search clamps limit to 500", "[motif-http]")
     CHECK(count_game_ids(res->body) == 500);
 }
 
-TEST_CASE("server: position search limit zero returns empty array",
-          "[motif-http]")
+TEST_CASE("server: position search limit zero returns empty array", "[motif-http]")
 {
     constexpr std::uint64_t page_hash {45};
     constexpr std::size_t page_total {10};
 
     auto const tdir = tmp_dir {"pos_limit_zero"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "limit-zero-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "limit-zero-db");
     REQUIRE(db_res.has_value());
     seed_positions(*db_res, page_hash, page_total);
 
     constexpr std::uint16_t test_port {18091};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -584,15 +530,12 @@ TEST_CASE("server: position search limit zero returns empty array",
 TEST_CASE("server: position search invalid offset returns 400", "[motif-http]")
 {
     auto const tdir = tmp_dir {"pos_badoffset"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "badoffset-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "badoffset-db");
     REQUIRE(db_res.has_value());
 
     constexpr std::uint16_t test_port {18092};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -606,23 +549,19 @@ TEST_CASE("server: position search invalid offset returns 400", "[motif-http]")
     CHECK(res->body == R"({"error":"invalid pagination parameters"})");
 }
 
-TEST_CASE("server: position search offset beyond end returns empty array",
-          "[motif-http]")
+TEST_CASE("server: position search offset beyond end returns empty array", "[motif-http]")
 {
     constexpr std::uint64_t page_hash {46};
     constexpr std::size_t page_total {5};
 
     auto const tdir = tmp_dir {"pos_offset_end"};
-    auto db_res =
-        motif::db::database_manager::create(tdir.path, "offset-end-db");
+    auto db_res = motif::db::database_manager::create(tdir.path, "offset-end-db");
     REQUIRE(db_res.has_value());
     seed_positions(*db_res, page_hash, page_total);
 
     constexpr std::uint16_t test_port {18093};
     motif::http::server srv {*db_res};
-    std::thread server_thread {
-        [&]() -> void
-        { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -636,8 +575,7 @@ TEST_CASE("server: position search offset beyond end returns empty array",
     CHECK(res->body == "[]");
 }
 
-TEST_CASE("server: position search endpoint meets latency target",
-          "[performance][motif-http]")
+TEST_CASE("server: position search endpoint meets latency target", "[performance][motif-http]")
 {
     run_http_position_search_perf_test();
 }

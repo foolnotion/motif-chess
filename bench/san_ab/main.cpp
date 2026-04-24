@@ -24,7 +24,7 @@
 namespace
 {
 
-static constexpr auto corpus_magic = std::array<char, 8>{'S', 'A', 'N', 'C', 'O', 'R', 'P', '1'};
+static constexpr auto corpus_magic = std::array<char, 8> {'S', 'A', 'N', 'C', 'O', 'R', 'P', '1'};
 
 struct corpus_game
 {
@@ -54,8 +54,7 @@ struct run_stats
     std::chrono::nanoseconds elapsed {};
 };
 
-auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key)
-    -> std::optional<std::string>
+auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key) -> std::optional<std::string>
 {
     for (auto const& tag : tags) {
         if (tag.key == key) {
@@ -65,8 +64,7 @@ auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key)
     return std::nullopt;
 }
 
-auto load_corpus_from_pgn(std::string const& path, std::size_t max_games)
-    -> std::vector<corpus_game>
+auto load_corpus_from_pgn(std::string const& path, std::size_t max_games) -> std::vector<corpus_game>
 {
     auto corpus = std::vector<corpus_game> {};
     motif::import::pgn_reader reader {path};
@@ -103,8 +101,7 @@ auto load_corpus_from_pgn(std::string const& path, std::size_t max_games)
     return corpus;
 }
 
-auto dump_corpus(std::vector<corpus_game> const& corpus, std::string const& out_path)
-    -> bool
+auto dump_corpus(std::vector<corpus_game> const& corpus, std::string const& out_path) -> bool
 {
     std::uint64_t total_moves = 0;
     for (auto const& g : corpus) {
@@ -124,8 +121,7 @@ auto dump_corpus(std::vector<corpus_game> const& corpus, std::string const& out_
     out.write(reinterpret_cast<char const*>(&hdr), sizeof(hdr));
 
     for (auto const& game : corpus) {
-        auto const fen_len = static_cast<std::uint8_t>(
-            game.initial_fen.has_value() ? game.initial_fen->size() : 0);
+        auto const fen_len = static_cast<std::uint8_t>(game.initial_fen.has_value() ? game.initial_fen->size() : 0);
         auto const num_moves = static_cast<std::uint32_t>(game.sans.size());
 
         out.write(reinterpret_cast<char const*>(&fen_len), 1);
@@ -141,13 +137,11 @@ auto dump_corpus(std::vector<corpus_game> const& corpus, std::string const& out_
         }
     }
 
-    std::cout << "Dumped corpus: " << out_path << " (" << corpus.size()
-              << " games, " << total_moves << " moves)\n";
+    std::cout << "Dumped corpus: " << out_path << " (" << corpus.size() << " games, " << total_moves << " moves)\n";
     return true;
 }
 
-auto load_corpus_from_bin(std::string const& path)
-    -> std::optional<std::vector<corpus_game>>
+auto load_corpus_from_bin(std::string const& path) -> std::optional<std::vector<corpus_game>>
 {
     auto in = std::ifstream {path, std::ios::binary | std::ios::ate};
     if (!in) {
@@ -208,17 +202,14 @@ auto count_moves(std::vector<corpus_game> const& corpus) -> std::size_t
     return total;
 }
 
-auto run_chesslib(std::vector<corpus_game> const& corpus, std::size_t rounds)
-    -> run_stats
+auto run_chesslib(std::vector<corpus_game> const& corpus, std::size_t rounds) -> run_stats
 {
     auto stats = run_stats {};
     auto const started = std::chrono::steady_clock::now();
 
     for (std::size_t round = 0; round < rounds; ++round) {
         for (auto const& game : corpus) {
-            auto board = game.initial_fen.has_value()
-                ? chesslib::fen::read_or_throw(*game.initial_fen)
-                : chesslib::board {};
+            auto board = game.initial_fen.has_value() ? chesslib::fen::read_or_throw(*game.initial_fen) : chesslib::board {};
 
             ++stats.games;
             for (auto const& san : game.sans) {
@@ -240,17 +231,14 @@ auto run_chesslib(std::vector<corpus_game> const& corpus, std::size_t rounds)
     return stats;
 }
 
-auto run_chesslib_replay(std::vector<corpus_game> const& corpus, std::size_t rounds)
-    -> run_stats
+auto run_chesslib_replay(std::vector<corpus_game> const& corpus, std::size_t rounds) -> run_stats
 {
     auto stats = run_stats {};
     auto const started = std::chrono::steady_clock::now();
 
     for (std::size_t round = 0; round < rounds; ++round) {
         for (auto const& game : corpus) {
-            auto board = game.initial_fen.has_value()
-                ? chesslib::fen::read_or_throw(*game.initial_fen)
-                : chesslib::board {};
+            auto board = game.initial_fen.has_value() ? chesslib::fen::read_or_throw(*game.initial_fen) : chesslib::board {};
 
             chesslib::san::replayer replay {board};
 
@@ -271,17 +259,14 @@ auto run_chesslib_replay(std::vector<corpus_game> const& corpus, std::size_t rou
     return stats;
 }
 
-auto run_chess_library(std::vector<corpus_game> const& corpus, std::size_t rounds)
-    -> run_stats
+auto run_chess_library(std::vector<corpus_game> const& corpus, std::size_t rounds) -> run_stats
 {
     auto stats = run_stats {};
     auto const started = std::chrono::steady_clock::now();
 
     for (std::size_t round = 0; round < rounds; ++round) {
         for (auto const& game : corpus) {
-            auto board = game.initial_fen.has_value()
-                ? chess::Board {*game.initial_fen}
-                : chess::Board {};
+            auto board = game.initial_fen.has_value() ? chess::Board {*game.initial_fen} : chess::Board {};
 
             ++stats.games;
             for (auto const& san : game.sans) {
@@ -302,26 +287,21 @@ auto run_chess_library(std::vector<corpus_game> const& corpus, std::size_t round
     return stats;
 }
 
-auto verify_final_positions(std::vector<corpus_game> const& corpus)
-    -> std::optional<std::string>
+auto verify_final_positions(std::vector<corpus_game> const& corpus) -> std::optional<std::string>
 {
     for (std::size_t game_index = 0; game_index < corpus.size(); ++game_index) {
         auto const& game = corpus[game_index];
 
-        auto chesslib_board = game.initial_fen.has_value()
-            ? chesslib::fen::read_or_throw(*game.initial_fen)
-            : chesslib::board {};
-        auto chess_library_board = game.initial_fen.has_value()
-            ? chess::Board {*game.initial_fen}
-            : chess::Board {};
+        auto chesslib_board = game.initial_fen.has_value() ? chesslib::fen::read_or_throw(*game.initial_fen) : chesslib::board {};
+        auto chess_library_board = game.initial_fen.has_value() ? chess::Board {*game.initial_fen} : chess::Board {};
 
         for (std::size_t move_index = 0; move_index < game.sans.size(); ++move_index) {
             auto const& san = game.sans[move_index];
 
             auto move_res = chesslib::san::from_string(chesslib_board, san);
             if (!move_res) {
-                return "chesslib failed at game " + std::to_string(game_index + 1)
-                    + ", move " + std::to_string(move_index + 1) + ": " + san;
+                return "chesslib failed at game " + std::to_string(game_index + 1) + ", move " + std::to_string(move_index + 1) + ": "
+                    + san;
             }
 
             chesslib::move_maker maker {chesslib_board, *move_res};
@@ -331,10 +311,8 @@ auto verify_final_positions(std::vector<corpus_game> const& corpus)
                 auto move = chess::uci::parseSan(chess_library_board, san);
                 chess_library_board.makeMove(move);
             } catch (std::exception const& ex) {
-                return "chess-library failed at game "
-                    + std::to_string(game_index + 1) + ", move "
-                    + std::to_string(move_index + 1) + ": " + san + " ("
-                    + ex.what() + ")";
+                return "chess-library failed at game " + std::to_string(game_index + 1) + ", move " + std::to_string(move_index + 1) + ": "
+                    + san + " (" + ex.what() + ")";
             }
         }
 
@@ -363,12 +341,9 @@ auto verify_final_positions(std::vector<corpus_game> const& corpus)
             return normalized;
         };
 
-        if (normalize_fen_ignoring_ep(chesslib_fen)
-            != normalize_fen_ignoring_ep(chess_library_fen))
-        {
-            return "final FEN mismatch at game " + std::to_string(game_index + 1)
-                + "\nchesslib: " + chesslib_fen + "\nchess-library: "
-                + chess_library_fen;
+        if (normalize_fen_ignoring_ep(chesslib_fen) != normalize_fen_ignoring_ep(chess_library_fen)) {
+            return "final FEN mismatch at game " + std::to_string(game_index + 1) + "\nchesslib: " + chesslib_fen
+                + "\nchess-library: " + chess_library_fen;
         }
     }
 
@@ -377,17 +352,13 @@ auto verify_final_positions(std::vector<corpus_game> const& corpus)
 
 auto ns_per_move(run_stats const& stats) -> double
 {
-    return stats.moves == 0
-        ? 0.0
-        : static_cast<double>(stats.elapsed.count()) / static_cast<double>(stats.moves);
+    return stats.moves == 0 ? 0.0 : static_cast<double>(stats.elapsed.count()) / static_cast<double>(stats.moves);
 }
 
 auto moves_per_second(run_stats const& stats) -> double
 {
-    return stats.elapsed.count() == 0
-        ? 0.0
-        : (static_cast<double>(stats.moves) * 1'000'000'000.0)
-            / static_cast<double>(stats.elapsed.count());
+    return stats.elapsed.count() == 0 ? 0.0
+                                      : (static_cast<double>(stats.moves) * 1'000'000'000.0) / static_cast<double>(stats.elapsed.count());
 }
 
 enum class bench_target : std::uint8_t
@@ -470,15 +441,10 @@ auto parse_args(int argc, char** argv) -> std::optional<cli_args>
 
 auto print_stats(std::string_view label, run_stats const& stats) -> void
 {
-    std::cout << label << ": moves=" << stats.moves
-              << " failures=" << stats.failures
-              << " elapsed_ms="
-              << std::chrono::duration_cast<std::chrono::milliseconds>(
-                     stats.elapsed)
-                     .count()
-              << " ns_per_move=" << ns_per_move(stats)
-              << " moves_per_sec=" << moves_per_second(stats)
-              << " checksum=" << stats.checksum << '\n';
+    std::cout << label << ": moves=" << stats.moves << " failures=" << stats.failures
+              << " elapsed_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(stats.elapsed).count()
+              << " ns_per_move=" << ns_per_move(stats) << " moves_per_sec=" << moves_per_second(stats) << " checksum=" << stats.checksum
+              << '\n';
 }
 
 }  // namespace
@@ -517,9 +483,8 @@ auto main(int argc, char** argv) -> int
         return 1;
     }
 
-    std::cout << "Loaded corpus: games=" << corpus.size()
-              << " moves=" << count_moves(corpus)
-              << " (from " << (args.is_bin ? "bin" : "pgn") << ")\n";
+    std::cout << "Loaded corpus: games=" << corpus.size() << " moves=" << count_moves(corpus) << " (from " << (args.is_bin ? "bin" : "pgn")
+              << ")\n";
 
     if (!args.no_verify && args.target != bench_target::chess_library_only) {
         auto const verification_error = verify_final_positions(corpus);
@@ -553,12 +518,10 @@ auto main(int argc, char** argv) -> int
         print_stats("chesslib-replay", replay_stats);
     }
 
-    if (chesslib_stats.has_value() && chess_library_stats.has_value()
-        && chess_library_stats->elapsed.count() != 0) {
-        auto const speedup = static_cast<double>(chesslib_stats->elapsed.count())
-            / static_cast<double>(chess_library_stats->elapsed.count());
-        std::cout << "relative_speedup_chess_library_vs_chesslib=" << speedup
-                  << 'x' << '\n';
+    if (chesslib_stats.has_value() && chess_library_stats.has_value() && chess_library_stats->elapsed.count() != 0) {
+        auto const speedup =
+            static_cast<double>(chesslib_stats->elapsed.count()) / static_cast<double>(chess_library_stats->elapsed.count());
+        std::cout << "relative_speedup_chess_library_vs_chesslib=" << speedup << 'x' << '\n';
     }
 
     return 0;

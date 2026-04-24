@@ -12,8 +12,7 @@
 namespace motif::import
 {
 
-auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key)
-    -> std::string;
+auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key) -> std::string;
 
 auto parse_elo(std::string const& raw) -> std::optional<std::int16_t>;
 

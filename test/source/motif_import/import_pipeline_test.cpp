@@ -170,14 +170,12 @@ auto perf_pgn_path() -> std::filesystem::path
         return std::filesystem::path {perf_pgn};
     }
 
-    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-bench.pgn";
+    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-bench.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
 
-    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
-        / "data" / "twic-1m.pgn";
+    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench" / "data" / "twic-1m.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
@@ -200,17 +198,13 @@ auto make_temp_log_dir() -> std::filesystem::path
     static std::atomic_uint64_t counter {0};
 
     auto const suffix =
-        std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count())
-        + "_" + std::to_string(counter.fetch_add(1));
-    auto const dir = std::filesystem::temp_directory_path()
-        / ("motif-import-test-" + suffix);
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(counter.fetch_add(1));
+    auto const dir = std::filesystem::temp_directory_path() / ("motif-import-test-" + suffix);
     std::filesystem::create_directories(dir);
     return dir;
 }
 
-auto run_perf_import(motif::import::import_config const& config)
-    -> motif::import::result<motif::import::import_summary>
+auto run_perf_import(motif::import::import_config const& config) -> motif::import::result<motif::import::import_summary>
 {
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
@@ -228,8 +222,7 @@ auto run_perf_import(motif::import::import_config const& config)
     }
 
     std::filesystem::remove_all(perf_log_dir());
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = perf_log_dir()});
+    auto init_log = motif::import::initialize_logging({.log_dir = perf_log_dir()});
     if (!init_log) {
         mgr->close();
         std::filesystem::remove_all(tmp);
@@ -247,8 +240,7 @@ auto run_perf_import(motif::import::import_config const& config)
     return summary;
 }
 
-void print_import_perf_summary(std::string_view const label,
-                               motif::import::import_summary const& summary)
+void print_import_perf_summary(std::string_view const label, motif::import::import_summary const& summary)
 {
     std::cout << "\n=== " << label << " ===\n"
               << "  attempted:    " << summary.total_attempted << "\n"
@@ -258,8 +250,7 @@ void print_import_perf_summary(std::string_view const label,
               << "  elapsed:      " << summary.elapsed.count() << " ms\n";
 }
 
-void print_duration_result(std::string_view const label,
-                           std::chrono::milliseconds const elapsed)
+void print_duration_result(std::string_view const label, std::chrono::milliseconds const elapsed)
 {
     std::cout << "\n=== " << label << " ===\n"
               << "  elapsed:      " << elapsed.count() << " ms\n";
@@ -313,8 +304,7 @@ auto sqlite_rebuild_no_index_perf_config() -> motif::import::import_config
     };
 }
 
-auto sqlite_rebuild_sorted_no_index_perf_config()
-    -> motif::import::import_config
+auto sqlite_rebuild_sorted_no_index_perf_config() -> motif::import::import_config
 {
     return motif::import::import_config {
         .num_workers = 1,
@@ -325,8 +315,7 @@ auto sqlite_rebuild_sorted_no_index_perf_config()
     };
 }
 
-auto run_sqlite_then_rebuild_perf()
-    -> motif::import::result<std::chrono::milliseconds>
+auto run_sqlite_then_rebuild_perf() -> motif::import::result<std::chrono::milliseconds>
 {
     auto const pgn_file = perf_pgn_path();
     if (!std::filesystem::exists(pgn_file)) {
@@ -344,8 +333,7 @@ auto run_sqlite_then_rebuild_perf()
     }
 
     std::filesystem::remove_all(perf_log_dir());
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = perf_log_dir()});
+    auto init_log = motif::import::initialize_logging({.log_dir = perf_log_dir()});
     if (!init_log) {
         mgr->close();
         std::filesystem::remove_all(tmp);
@@ -353,8 +341,7 @@ auto run_sqlite_then_rebuild_perf()
     }
 
     motif::import::import_pipeline pipeline {*mgr};
-    auto import_summary =
-        pipeline.run(pgn_file, sqlite_only_serial_perf_config());
+    auto import_summary = pipeline.run(pgn_file, sqlite_only_serial_perf_config());
     if (!import_summary.has_value()) {
         auto const _ = motif::import::shutdown_logging();
         mgr->close();
@@ -364,9 +351,7 @@ auto run_sqlite_then_rebuild_perf()
 
     auto const rebuild_start = std::chrono::steady_clock::now();
     auto rebuild_res = mgr->rebuild_position_store();
-    auto const rebuild_elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - rebuild_start);
+    auto const rebuild_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rebuild_start);
     if (!rebuild_res.has_value()) {
         auto const _ = motif::import::shutdown_logging();
         mgr->close();
@@ -400,8 +385,7 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
     }
 
     std::filesystem::remove_all(perf_log_dir());
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = perf_log_dir()});
+    auto init_log = motif::import::initialize_logging({.log_dir = perf_log_dir()});
     if (!init_log) {
         mgr->close();
         std::filesystem::remove_all(tmp);
@@ -409,8 +393,7 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
     }
 
     motif::import::import_pipeline pipeline {*mgr};
-    auto import_summary =
-        pipeline.run(pgn_file, sqlite_only_serial_perf_config());
+    auto import_summary = pipeline.run(pgn_file, sqlite_only_serial_perf_config());
     if (!import_summary.has_value()) {
         auto const _ = motif::import::shutdown_logging();
         mgr->close();
@@ -420,9 +403,7 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
 
     auto const rebuild_start = std::chrono::steady_clock::now();
     auto rebuild_res = mgr->rebuild_position_store();
-    auto const rebuild_elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - rebuild_start);
+    auto const rebuild_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rebuild_start);
     if (!rebuild_res.has_value()) {
         auto const _ = motif::import::shutdown_logging();
         mgr->close();
@@ -440,9 +421,7 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
 
 }  // namespace
 
-TEST_CASE(
-    "import_pipeline: run imports games and deletes checkpoint on success",
-    "[motif-import]")
+TEST_CASE("import_pipeline: run imports games and deletes checkpoint on success", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_run";
     std::filesystem::remove_all(tmp);
@@ -462,8 +441,7 @@ TEST_CASE(
     REQUIRE(summary.has_value());
     CHECK(summary->committed == 3);
     CHECK(summary->skipped == 0);
-    CHECK_FALSE(
-        std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
     auto row_count = mgr->positions().row_count();
     REQUIRE(row_count.has_value());
     CHECK(*row_count == 13);
@@ -472,9 +450,7 @@ TEST_CASE(
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE(
-    "import_pipeline: resume skips already-committed games (duplicate policy)",
-    "[motif-import]")
+TEST_CASE("import_pipeline: resume skips already-committed games (duplicate policy)", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_resume";
     std::filesystem::remove_all(tmp);
@@ -520,9 +496,7 @@ TEST_CASE(
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE(
-    "import_pipeline: resume returns io_failure when no checkpoint exists",
-    "[motif-import]")
+TEST_CASE("import_pipeline: resume returns io_failure when no checkpoint exists", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_nochk";
     std::filesystem::remove_all(tmp);
@@ -546,12 +520,9 @@ TEST_CASE(
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE(
-    "import_pipeline: resume rejects checkpoints for a different source file",
-    "[motif-import]")
+TEST_CASE("import_pipeline: resume rejects checkpoints for a different source file", "[motif-import]")
 {
-    auto const tmp =
-        std::filesystem::temp_directory_path() / "ipl_wrong_source";
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_wrong_source";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -576,8 +547,7 @@ TEST_CASE(
         .games_committed = 0,
         .last_game_id = 0,
     };
-    REQUIRE(
-        motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
+    REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
 
     motif::import::import_pipeline pipeline {*mgr};
     auto result = pipeline.resume(second_pgn, k_single_worker);
@@ -588,8 +558,7 @@ TEST_CASE(
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: progress reflects committed count after run",
-          "[motif-import]")
+TEST_CASE("import_pipeline: progress reflects committed count after run", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_prog";
     std::filesystem::remove_all(tmp);
@@ -617,8 +586,7 @@ TEST_CASE("import_pipeline: progress reflects committed count after run",
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: progress is empty before the first run",
-          "[motif-import]")
+TEST_CASE("import_pipeline: progress is empty before the first run", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_prog_init";
     std::filesystem::remove_all(tmp);
@@ -640,8 +608,7 @@ TEST_CASE("import_pipeline: progress is empty before the first run",
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: parse errors count as one attempted game",
-          "[motif-import]")
+TEST_CASE("import_pipeline: parse errors count as one attempted game", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_parse_once";
     std::filesystem::remove_all(tmp);
@@ -668,11 +635,9 @@ TEST_CASE("import_pipeline: parse errors count as one attempted game",
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: malformed game is skipped and logged with headers",
-          "[motif-import]")
+TEST_CASE("import_pipeline: malformed game is skipped and logged with headers", "[motif-import]")
 {
-    auto const tmp =
-        std::filesystem::temp_directory_path() / "ipl_malformed_log";
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_malformed_log";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -720,11 +685,9 @@ TEST_CASE("import_pipeline: malformed game is skipped and logged with headers",
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: all malformed games produce zero committed",
-          "[motif-import]")
+TEST_CASE("import_pipeline: all malformed games produce zero committed", "[motif-import]")
 {
-    auto const tmp =
-        std::filesystem::temp_directory_path() / "ipl_all_malformed";
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_all_malformed";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -749,11 +712,9 @@ TEST_CASE("import_pipeline: all malformed games produce zero committed",
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: summary errors count malformed but not duplicates",
-          "[motif-import]")
+TEST_CASE("import_pipeline: summary errors count malformed but not duplicates", "[motif-import]")
 {
-    auto const tmp =
-        std::filesystem::temp_directory_path() / "ipl_summary_errors";
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_summary_errors";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -778,8 +739,7 @@ TEST_CASE("import_pipeline: summary errors count malformed but not duplicates",
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: failed runs preserve existing checkpoints",
-          "[motif-import]")
+TEST_CASE("import_pipeline: failed runs preserve existing checkpoints", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_preserve_cp";
     std::filesystem::remove_all(tmp);
@@ -794,8 +754,7 @@ TEST_CASE("import_pipeline: failed runs preserve existing checkpoints",
         .games_committed = 2,
         .last_game_id = 9,
     };
-    REQUIRE(
-        motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
+    REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
 
     motif::import::import_pipeline pipeline {*mgr};
     auto const missing_pgn = tmp / "missing.pgn";
@@ -816,8 +775,7 @@ TEST_CASE("import_pipeline: failed runs preserve existing checkpoints",
 
 TEST_CASE("import_pipeline: run can skip position writes", "[motif-import]")
 {
-    auto const tmp =
-        std::filesystem::temp_directory_path() / "ipl_no_positions";
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_no_positions";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -845,8 +803,7 @@ TEST_CASE("import_pipeline: run can skip position writes", "[motif-import]")
 
 TEST_CASE("import_pipeline: zero num_workers is rejected", "[motif-import]")
 {
-    auto const tmp =
-        std::filesystem::temp_directory_path() / "ipl_zero_workers";
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_zero_workers";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -906,10 +863,7 @@ TEST_CASE("import_pipeline: zero num_lines is rejected", "[motif-import]")
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE(
-    "import_pipeline: rebuild_positions_after_import=false leaves position "
-    "store empty",
-    "[motif-import]")
+TEST_CASE("import_pipeline: rebuild_positions_after_import=false leaves position " "store empty", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_no_pos_rows";
     std::filesystem::remove_all(tmp);
@@ -971,8 +925,7 @@ TEST_CASE("pgn_helpers preserve PGN helper behavior", "[motif-import]")
     CHECK(motif::import::pgn_result_to_int8(pgn::result::unknown) == 0);
 }
 
-TEST_CASE("import_config defaults preserve measured fast path",
-          "[motif-import]")
+TEST_CASE("import_config defaults preserve measured fast path", "[motif-import]")
 {
     auto const config = motif::import::import_config {};
 
@@ -980,14 +933,11 @@ TEST_CASE("import_config defaults preserve measured fast path",
     CHECK(config.num_lines == 64);
     CHECK(config.rebuild_positions_after_import);
     CHECK(config.sort_positions_by_zobrist_after_rebuild);
-    CHECK(config.batch_size
-          == motif::import::import_config::default_batch_size);
-    CHECK(config.num_workers
-          == motif::import::import_config::default_num_workers);
+    CHECK(config.batch_size == motif::import::import_config::default_batch_size);
+    CHECK(config.num_workers == motif::import::import_config::default_num_workers);
 }
 
-TEST_CASE("import_pipeline: default fast path perf",
-          "[performance][motif-import]")
+TEST_CASE("import_pipeline: default fast path perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -998,13 +948,11 @@ TEST_CASE("import_pipeline: default fast path perf",
 
     auto summary = run_perf_import(motif::import::import_config {});
     REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: default fast path perf",
-                              *summary);
+    print_import_perf_summary("import_pipeline: default fast path perf", *summary);
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
-TEST_CASE("import_pipeline: serial fast path candidate perf",
-          "[performance][motif-import]")
+TEST_CASE("import_pipeline: serial fast path candidate perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1015,13 +963,11 @@ TEST_CASE("import_pipeline: serial fast path candidate perf",
 
     auto summary = run_perf_import(serial_fast_path_candidate_config());
     REQUIRE(summary.has_value());
-    print_import_perf_summary(
-        "import_pipeline: serial fast path candidate perf", *summary);
+    print_import_perf_summary("import_pipeline: serial fast path candidate perf", *summary);
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
-TEST_CASE("import_pipeline: sqlite-only serial perf",
-          "[performance][motif-import]")
+TEST_CASE("import_pipeline: sqlite-only serial perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1032,13 +978,11 @@ TEST_CASE("import_pipeline: sqlite-only serial perf",
 
     auto summary = run_perf_import(sqlite_only_serial_perf_config());
     REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: sqlite-only serial perf",
-                              *summary);
+    print_import_perf_summary("import_pipeline: sqlite-only serial perf", *summary);
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
-TEST_CASE("import_pipeline: sqlite-import plus rebuild perf",
-          "[performance][motif-import]")
+TEST_CASE("import_pipeline: sqlite-import plus rebuild perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1049,8 +993,7 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf",
 
     auto total_elapsed = run_sqlite_then_rebuild_perf();
     REQUIRE(total_elapsed.has_value());
-    print_duration_result("import_pipeline: sqlite-import plus rebuild perf",
-                          *total_elapsed);
+    print_duration_result("import_pipeline: sqlite-import plus rebuild perf", *total_elapsed);
     check_release_calibrated_perf(total_elapsed->count());
 }
 
@@ -1065,13 +1008,11 @@ TEST_CASE("import_pipeline: rebuild-only perf", "[performance][motif-import]")
 
     auto rebuild_elapsed = run_rebuild_only_perf();
     REQUIRE(rebuild_elapsed.has_value());
-    print_duration_result("import_pipeline: rebuild-only perf",
-                          *rebuild_elapsed);
+    print_duration_result("import_pipeline: rebuild-only perf", *rebuild_elapsed);
     check_release_calibrated_perf(rebuild_elapsed->count());
 }
 
-TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (no index)",
-          "[performance][motif-import]")
+TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (no index)", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1082,14 +1023,11 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (no index)",
 
     auto summary = run_perf_import(sqlite_rebuild_no_index_perf_config());
     REQUIRE(summary.has_value());
-    print_import_perf_summary(
-        "import_pipeline: sqlite-import plus rebuild perf (no index)",
-        *summary);
+    print_import_perf_summary("import_pipeline: sqlite-import plus rebuild perf (no index)", *summary);
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
-TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (sorted no index)",
-          "[performance][motif-import]")
+TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (sorted no index)", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1098,20 +1036,15 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (sorted no index)",
         SKIP("1M-game PGN not available");
     }
 
-    auto summary =
-        run_perf_import(sqlite_rebuild_sorted_no_index_perf_config());
+    auto summary = run_perf_import(sqlite_rebuild_sorted_no_index_perf_config());
     REQUIRE(summary.has_value());
-    print_import_perf_summary(
-        "import_pipeline: sqlite-import plus rebuild perf (sorted no index)",
-        *summary);
+    print_import_perf_summary("import_pipeline: sqlite-import plus rebuild perf (sorted no index)", *summary);
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
-TEST_CASE("import_pipeline: 10k diagnostic summary",
-          "[motif-import][diagnostic]")
+TEST_CASE("import_pipeline: 10k diagnostic summary", "[motif-import][diagnostic]")
 {
-    auto const pgn_file =
-        std::filesystem::path {"/home/bogdb/scid/twic/10k_games.pgn"};
+    auto const pgn_file = std::filesystem::path {"/home/bogdb/scid/twic/10k_games.pgn"};
     if (!std::filesystem::exists(pgn_file)) {
         SKIP("10k-game PGN not available");
     }
@@ -1127,9 +1060,7 @@ TEST_CASE("import_pipeline: 10k diagnostic summary",
     auto summary = pipeline.run(pgn_file);
     REQUIRE(summary.has_value());
 
-    std::cout << "attempted=" << summary->total_attempted
-              << " committed=" << summary->committed
-              << " skipped=" << summary->skipped
+    std::cout << "attempted=" << summary->total_attempted << " committed=" << summary->committed << " skipped=" << summary->skipped
               << " errors=" << summary->errors << '\n';
 
     CHECK(summary->total_attempted == 10'000);
@@ -1152,9 +1083,7 @@ struct query_latency_result
     std::size_t total_rows_returned {};
 };
 
-auto measure_query_latencies(motif::db::database_manager& mgr,
-                             std::vector<std::uint64_t> const& hashes,
-                             std::string_view variant_name)
+auto measure_query_latencies(motif::db::database_manager& mgr, std::vector<std::uint64_t> const& hashes, std::string_view variant_name)
     -> query_latency_result
 {
     auto& positions = mgr.positions();
@@ -1167,8 +1096,7 @@ auto measure_query_latencies(motif::db::database_manager& mgr,
         auto res = positions.query_by_zobrist(hash);
         auto const end = std::chrono::steady_clock::now();
 
-        auto const elapsed_us =
-            std::chrono::duration<double, std::micro>(end - start).count();
+        auto const elapsed_us = std::chrono::duration<double, std::micro>(end - start).count();
         latencies_us.push_back(elapsed_us);
 
         if (res) {
@@ -1185,10 +1113,8 @@ auto measure_query_latencies(motif::db::database_manager& mgr,
     }
     total_ms /= 1000.0;
 
-    auto const p50_idx = std::min(
-        n - 1, static_cast<std::size_t>(static_cast<double>(n) * 0.50));
-    auto const p99_idx = std::min(
-        n - 1, static_cast<std::size_t>(static_cast<double>(n) * 0.99));
+    auto const p50_idx = std::min(n - 1, static_cast<std::size_t>(static_cast<double>(n) * 0.50));
+    auto const p99_idx = std::min(n - 1, static_cast<std::size_t>(static_cast<double>(n) * 0.99));
 
     return query_latency_result {
         .variant_name = std::string {variant_name},
@@ -1202,8 +1128,7 @@ auto measure_query_latencies(motif::db::database_manager& mgr,
     };
 }
 
-TEST_CASE("query_latency: unsorted vs sorted by zobrist",
-          "[performance][query-latency]")
+TEST_CASE("query_latency: unsorted vs sorted by zobrist", "[performance][query-latency]")
 {
     skip_perf_unless_release_build();
 
@@ -1212,8 +1137,7 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist",
         SKIP("PGN corpus not available");
     }
 
-    auto const tmp =
-        std::filesystem::temp_directory_path() / "query_latency_bench";
+    auto const tmp = std::filesystem::temp_directory_path() / "query_latency_bench";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -1221,8 +1145,7 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist",
     REQUIRE(mgr.has_value());
 
     std::filesystem::remove_all(perf_log_dir());
-    auto init_log =
-        motif::import::initialize_logging({.log_dir = perf_log_dir()});
+    auto init_log = motif::import::initialize_logging({.log_dir = perf_log_dir()});
     REQUIRE(init_log.has_value());
 
     motif::import::import_config const sqlite_only_config {
@@ -1283,8 +1206,7 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist",
         (void)dummy;
     }
 
-    auto r_sorted =
-        measure_query_latencies(*mgr, sample_hashes, "sorted by zobrist");
+    auto r_sorted = measure_query_latencies(*mgr, sample_hashes, "sorted by zobrist");
     print_result(r_sorted);
 
     auto const _ = motif::import::shutdown_logging();

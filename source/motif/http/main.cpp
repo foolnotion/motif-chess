@@ -32,8 +32,7 @@ auto parse_port(std::string_view text) -> std::optional<std::uint16_t>
 {
     std::uint32_t value {};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto const [ptr, ec] =
-        std::from_chars(text.data(), text.data() + text.size(), value);
+    auto const [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     if (ec != std::errc {} || ptr != text.data() + text.size()) {
         return std::nullopt;
@@ -103,8 +102,7 @@ auto main(int argc, char** argv) -> int
     auto const& args = *args_opt;
 
     if (args.db_path.empty()) {
-        std::cerr << "error: database path required; use --db <path> or set "
-                     "MOTIF_DB_PATH\n";
+        std::cerr << "error: database path required; use --db <path> or set " "MOTIF_DB_PATH\n";
         return EXIT_FAILURE;
     }
 
@@ -113,12 +111,10 @@ auto main(int argc, char** argv) -> int
 
     auto db_result = motif::db::database_manager::open(args.db_path);
     if (!db_result) {
-        db_result = motif::db::database_manager::create(
-            args.db_path, args.db_path.filename().string());
+        db_result = motif::db::database_manager::create(args.db_path, args.db_path.filename().string());
     }
     if (!db_result) {
-        logger->error("failed to open or create database at {}",
-                      args.db_path.string());
+        logger->error("failed to open or create database at {}", args.db_path.string());
         return EXIT_FAILURE;
     }
 

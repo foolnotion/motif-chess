@@ -20,17 +20,13 @@ struct import_checkpoint
 };
 
 // Path to <db_dir>/import.checkpoint.json
-[[nodiscard]] auto checkpoint_path(std::filesystem::path const& db_dir)
-    -> std::filesystem::path;
+[[nodiscard]] auto checkpoint_path(std::filesystem::path const& db_dir) -> std::filesystem::path;
 
 // Serialize cp to <db_dir>/import.checkpoint.json via glaze.
-[[nodiscard]] auto write_checkpoint(std::filesystem::path const& db_dir,
-                                    import_checkpoint const& checkpoint)
-    -> result<void>;
+[[nodiscard]] auto write_checkpoint(std::filesystem::path const& db_dir, import_checkpoint const& checkpoint) -> result<void>;
 
 // Read and deserialize checkpoint file. Returns not_found if absent.
-[[nodiscard]] auto read_checkpoint(std::filesystem::path const& db_dir)
-    -> result<import_checkpoint>;
+[[nodiscard]] auto read_checkpoint(std::filesystem::path const& db_dir) -> result<import_checkpoint>;
 
 // Remove checkpoint file. Silently succeeds if already absent.
 auto delete_checkpoint(std::filesystem::path const& db_dir) noexcept -> void;
