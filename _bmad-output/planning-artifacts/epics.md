@@ -469,6 +469,61 @@ So that I can trust the import was complete and can audit any data that was excl
 **Then** `import_summary.committed == 0` and `import_summary.skipped == N`
 **And** no crash, no ASan/UBSan violations (NFR10, NFR11)
 
+### Story 2.6: Adopt Upstream chesslib SAN Optimization
+
+As a developer,
+I want to adopt the upstream chesslib SAN resolution optimization,
+so that the import pipeline benefits from the reported large isolated gains in SAN parsing speed.
+
+### Story 2.7: Integrate pgnlib Import Stream into Import Pipeline
+
+As a developer,
+I want to integrate the upstream pgnlib `import_stream` API into the import pipeline,
+so that PGN parsing and materialization gains are realized in the hot path.
+
+### Story 2.8: Reprofile and Tune Remaining Import/Storage Path
+
+As a developer,
+I want to reprofile the import pipeline after the chesslib and pgnlib optimizations are adopted,
+so that remaining bottlenecks in the SQLite/DuckDB storage path are identified and addressed.
+
+### Story 2.9: Import Pipeline Performance Optimization
+
+As a developer,
+I want to optimize the import pipeline's performance to close the NFR03 gap,
+by addressing memory locality, pipeline batching friction, and allocation overhead
+identified through Story 2.8 profiling and cache miss analysis.
+
+**Acceptance Criteria:**
+
+**Given** the import pipeline memory hotspots are identified
+**When** optimization changes are implemented
+**Then** cache miss rate reduces by at least 15% (from 47% to ≤40%)
+**And** this reduction is verified through perf stat on 10k games fixture
+
+**Given** the taskflow pipeline batching friction is identified
+**When** optimization changes are implemented
+**Then** futex contention time reduces by at least 50% (from 8% to ≤4% of wall time)
+**And** this reduction is verified through perf stat on 10k games fixture
+
+**Given** the allocation pressure in hot paths is identified
+**When** optimization changes are implemented
+**Then** malloc/free rate in prepare_game and position generation reduces by at least 60%
+**And** this reduction is verified through perf stat on 10k games fixture
+
+**Given** all optimizations are implemented
+**When** benchmarked on 10k games fixture with deferred position index build
+**Then** wall time improves by at least 20% compared to post-2.8 baseline (13.5s)
+**Or** extrapolated time for 10M games reaches ≤25 minutes (down from 3.7 hours)
+
+**Given** any downstream tuning is applied
+**Then** all Epic 2 correctness guarantees remain intact: malformed inputs never crash (NFR10); resume behavior is correct (NFR08); structured summary and enriched logging are unchanged (FR14, AR06); all tests pass under `dev-sanitize` with zero ASan/UBSan violations (NFR11)
+
+**Given** the architectural boundary between import pipeline and storage is preserved
+**When** optimizations are implemented
+**Then** import pipeline continues to use motif_db::position_store public API only
+**And** no direct DuckDB C API calls bypass motif_db abstraction
+
 ---
 
 ## Epic 3: Position Search & Opening Statistics
@@ -529,7 +584,7 @@ So that I can click through the main line of an opening rapidly without per-move
 **Given** a user opens the opening tree from the starting position
 **When** `opening_tree::open` is called
 **Then** the first 5 levels of the tree are prefetched in a single DuckDB query and held in memory (AR10)
-**And** each node contains the statistics from Story 3.2 (move frequency, win/draw/loss, avg Elo)
+**And** each node contains the statistics from Story 3.2 (move frequency, win/draw/loss, avg Elo, ECO code, opening name)
 
 **Given** the user expands a node beyond depth 5
 **When** `opening_tree::expand` is called on that node

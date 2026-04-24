@@ -5,7 +5,7 @@ find_package(Taskflow REQUIRED)
 
 add_library(motif_import STATIC
     motif_import.cpp logger.cpp pgn_reader.cpp import_worker.cpp
-    checkpoint.cpp import_pipeline.cpp)
+    checkpoint.cpp import_pipeline.cpp pgn_helpers.cpp)
 
 target_include_directories(
     motif_import PUBLIC

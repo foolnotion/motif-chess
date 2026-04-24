@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 #include <fmt/chrono.h>  // NOLINT(misc-include-cleaner) — provides chrono format specialisations
 #include <fmt/format.h>

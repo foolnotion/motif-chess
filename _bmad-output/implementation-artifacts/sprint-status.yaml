@@ -35,67 +35,69 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-20  # updated: story 2-4 done after review fixes
+last_updated: 2026-04-24  # updated: Story 3.3 lazy opening tree → done
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
 
 development_status:
-
   # ─── Epic 1: Game Database Foundation ───────────────────────────────────────
   epic-1: done
   1-1-project-scaffold-restructure: done
   1-2-domain-types-move-encoding-error-contracts: done
   1-3-sqlite-game-store: done
   1-4-database-manager-schema-lifecycle-manifest: done
-  1-5-duckdb-position-schema-scratch-base-rebuild: done
+   1-5-duckdb-position-schema-scratch-base-rebuild: done
   epic-1-retrospective: done
 
-  # ─── Epic 2: PGN Import Pipeline ────────────────────────────────────────────
-  epic-2: in-progress
+  # ─── Epic 2: PGN Import Pipeline ───────────────────────────────────────────
+  epic-2: done
   2-1-spdlog-logger-infrastructure: done
   2-2-pgn-reader-pgnlib-adapter: done
   2-3-import-worker-game-processing-unit: done
   2-4-parallel-import-pipeline-with-checkpoint-resume: done
-  2-5-import-completion-summary-error-logging: backlog
-  epic-2-retrospective: optional
+  2-5-import-completion-summary-error-logging: done
+  2-6-adopt-upstream-chesslib-san-optimization: done
+  2-7-integrate-pgnlib-import-stream-into-import-pipeline: done
+  2-8-reprofile-and-tune-remaining-import-storage-path: done
+  2-9-import-pipeline-performance-optimization: done
+  2-10-apply-d009-sorted-zobrist-plus-deferred-cleanup: done
+  2-11-concurrency-exploration-for-serial-import: done
+  epic-2-retrospective: done
 
   # ─── Epic 3: Position Search & Opening Statistics ───────────────────────────
-  epic-3: backlog
-  3-1-position-search-by-zobrist-hash: backlog
-  3-2-opening-statistics-per-position: backlog
-  3-3-lazy-opening-tree-with-prefetch: backlog
-  epic-3-retrospective: optional
+  epic-3: in-progress
+  3-1-position-search-by-zobrist-hash: done
+  3-2-opening-statistics-per-position: done
+  3-3-lazy-opening-tree-with-prefetch: done
 
-  # ─── Epic 4: Desktop Application ────────────────────────────────────────────
+  # ─── Epic 4: Desktop Application ───────────────────────────────────
   epic-4: backlog
   4-1-application-shell-config-pgn-file-handler: backlog
   4-2-chessboard-widget-game-navigation: backlog
   4-3-game-list-browser: backlog
   4-4-pgn-import-dialog: backlog
   4-5-position-search-panel: backlog
-  epic-4-retrospective: optional
 
-  # ─── Epic 5: Engine Integration (Phase 2) ───────────────────────────────────
+  # ─── Epic 5: Engine Integration (Phase 2) ────────────────────────────
   epic-5: backlog
   5-1-engine-configuration-lifecycle: backlog
   5-2-real-time-engine-output-crash-isolation: backlog
-  epic-5-retrospective: optional
 
-  # ─── Epic 6: Statistical Analysis (Phase 2) ─────────────────────────────────
+  # ─── Epic 6: Statistical Analysis (Phase 2) ────────────────────────────
   epic-6: backlog
   6-1-performance-statistics-by-opening-color: backlog
   6-2-game-phase-time-management-statistics: backlog
   epic-6-retrospective: optional
 
-  # ─── Epic 7: Repertoire Management (Phase 2) ────────────────────────────────
+  # ─── Epic 7: Repertoire Management (Phase 2) ────────────────────────────
   epic-7: backlog
   7-1-build-save-annotated-repertoire-lines: backlog
   7-2-repertoire-drill-mode: backlog
   epic-7-retrospective: optional
 
-  # ─── Epic 8: AI Repertoire Construction (Phase 3) ───────────────────────────
+  # ─── Epic 8: AI Repertoire Construction (Phase 3) ────────────────────────────
   epic-8: backlog
   8-1-corpus-analysis-player-profiling: backlog
   8-2-personalized-repertoire-generation: backlog

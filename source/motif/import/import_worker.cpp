@@ -1,12 +1,10 @@
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -23,14 +21,13 @@
 #include "motif/db/position_store.hpp"
 #include "motif/db/types.hpp"
 #include "motif/import/error.hpp"
+#include "motif/import/pgn_helpers.hpp"
 
 namespace motif::import
 {
 
 namespace
 {
-
-constexpr std::int16_t max_elo_value = 32767;
 
 constexpr std::array<std::string_view, 11> known_tag_keys = {
     "White",
@@ -45,65 +42,6 @@ constexpr std::array<std::string_view, 11> known_tag_keys = {
     "Result",
     "ECO",
 };
-
-auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key)
-    -> std::string
-{
-    for (auto const& tag : tags) {
-        if (tag.key == key) {
-            return tag.value;
-        }
-    }
-    return {};
-}
-
-auto parse_elo(std::string const& raw) -> std::optional<std::int16_t>
-{
-    if (raw.empty() || raw == "?") {
-        return std::nullopt;
-    }
-
-    auto value = int {};
-    auto const* const begin = raw.data();
-    // std::from_chars requires a raw pointer range.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto const* const end = raw.data() + raw.size();
-    auto const parse = std::from_chars(begin, end, value);
-    if (parse.ec != std::errc {} || parse.ptr != end || value < 0
-        || value > max_elo_value)
-    {
-        return std::nullopt;
-    }
-
-    return static_cast<std::int16_t>(value);
-}
-
-auto pgn_result_to_string(pgn::result res) noexcept -> std::string
-{
-    switch (res) {
-        case pgn::result::white:
-            return "1-0";
-        case pgn::result::black:
-            return "0-1";
-        case pgn::result::draw:
-            return "1/2-1/2";
-        case pgn::result::unknown:
-            return "*";
-    }
-    return "*";
-}
-
-auto pgn_result_to_int8(pgn::result res) noexcept -> std::int8_t
-{
-    switch (res) {
-        case pgn::result::white:
-            return 1;
-        case pgn::result::black:
-            return -1;
-        default:
-            return 0;
-    }
-}
 
 auto is_known_tag(std::string_view key) noexcept -> bool
 {
@@ -204,7 +142,6 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
             return tl::unexpected(error_code::parse_error);
         }
         encoded_moves.push_back(chesslib::codec::encode(*move_res));
-
         chesslib::move_maker mmaker {board, *move_res};
         mmaker.make();
 
