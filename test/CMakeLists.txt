@@ -34,11 +34,23 @@ add_executable(motif_import_test
 )
 target_link_libraries(motif_import_test PRIVATE motif_import Catch2::Catch2WithMain)
 target_compile_features(motif_import_test PRIVATE cxx_std_23)
+target_include_directories(motif_import_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
+target_compile_definitions(
+    motif_import_test PRIVATE MOTIF_PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
 catch_discover_tests(motif_import_test)
 
-add_executable(motif_search_test source/motif_search/placeholder_test.cpp)
-target_link_libraries(motif_search_test PRIVATE motif_search Catch2::Catch2WithMain)
+add_executable(motif_search_test
+    source/motif_search/position_search_test.cpp
+    source/motif_search/opening_stats_test.cpp
+    source/motif_search/opening_tree_test.cpp
+)
+target_link_libraries(motif_search_test PRIVATE motif_search motif_import Catch2::Catch2WithMain)
 target_compile_features(motif_search_test PRIVATE cxx_std_23)
+target_include_directories(motif_search_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
+target_compile_definitions(
+    motif_search_test PRIVATE MOTIF_PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
 catch_discover_tests(motif_search_test)
 
 # ---- End-of-file commands ----

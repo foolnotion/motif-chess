@@ -119,6 +119,71 @@ the number of jobs to use, which should ideally be specified to the number of
 threads your CPU has. You may also want to add that to your preset using the
 `jobs` property, see the [presets documentation][1] for more details.
 
+### Benchmark corpora
+
+The import and search performance tests honor `MOTIF_IMPORT_PERF_PGN`.
+
+If you prefer a repo-local corpus instead of a machine-local path, use:
+
+```sh
+scripts/download_twic_pgns.sh --1m
+```
+
+That writes `bench/data/twic-1m.pgn`.
+
+`--1m` now targets approximately 1,000,000 games by counting games in the TWIC
+archives it selects; it is no longer based on a fixed number of recent issues.
+You can override the target with `--target-games <n>` if you want a larger or
+smaller repo-local corpus.
+
+For a faster local guardrail, derive a smaller benchmark subset from the 1M corpus:
+
+```sh
+scripts/extract_pgn_subset.sh
+```
+
+That writes `bench/data/twic-100k.pgn`.
+
+If you want the full TWIC corpus instead:
+
+```sh
+scripts/download_twic_pgns.sh --all
+```
+
+When `MOTIF_IMPORT_PERF_PGN` is unset, the performance tests look for
+`bench/data/twic-bench.pgn`, then `bench/data/twic-1m.pgn`, before falling back
+to the legacy `/data/chess/1m_games.pgn` path.
+
+### Performance workflow
+
+For a quick regression guard after a meaningful change, run:
+
+```sh
+scripts/run_perf_benchmarks.sh
+```
+
+That uses the 100k corpus and runs:
+- the production import fast-path perf test
+- the public `position_search` perf test
+- the public `opening_stats` perf test
+
+For the heavier 1M benchmark pass, run:
+
+```sh
+scripts/run_perf_benchmarks.sh --mode full
+```
+
+For all current performance-tagged tests on the 1M corpus, run:
+
+```sh
+scripts/run_perf_benchmarks.sh --mode exhaustive
+```
+
+Recommended cadence:
+- `quick` after local feature work or large refactors
+- `full` after major feature completion and before updating `BENCHMARKS.md`
+- `exhaustive` when doing dedicated performance work
+
 ### Developer mode targets
 
 These are targets you may invoke using the build command from above, with an

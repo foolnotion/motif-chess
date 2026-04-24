@@ -15,6 +15,8 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <duckdb.h>
+#include <gtl/meminfo.hpp>
+#include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <tl/expected.hpp>
 
@@ -33,6 +35,8 @@ namespace motif::db
 
 namespace
 {
+constexpr std::size_t rebuild_batch_rows = 50'000;
+
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto open_sqlite(std::filesystem::path const& db_path) -> result<sqlite3*>
 {
@@ -202,7 +206,7 @@ database_manager::~database_manager()
 
 database_manager::database_manager(database_manager&& other) noexcept
     : conn_ {std::exchange(other.conn_, nullptr)}
-    , store_ {other.store_}
+    , store_ {std::move(other.store_)}
     , manifest_ {std::move(other.manifest_)}
     , dir_ {std::move(other.dir_)}
     , duck_db_ {std::exchange(other.duck_db_, nullptr)}
@@ -219,7 +223,7 @@ auto database_manager::operator=(database_manager&& other) noexcept
     if (this != &other) {
         close();
         conn_ = std::exchange(other.conn_, nullptr);
-        store_ = other.store_;
+        store_ = std::move(other.store_);
         manifest_ = std::move(other.manifest_);
         dir_ = std::move(other.dir_);
         duck_db_ = std::exchange(other.duck_db_, nullptr);
@@ -437,11 +441,24 @@ auto database_manager::positions() const noexcept -> position_store const&
     return *positions_;
 }
 
-auto database_manager::rebuild_position_store() -> result<void>
+auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
+    -> result<void>
 {
     if (duck_con_ == nullptr || !positions_) {
         return tl::unexpected {error_code::io_failure};
     }
+
+    auto log = spdlog::get("motif.db");
+    auto log_rss = [&](char const* const phase) -> void
+    {
+        if (log == nullptr) {
+            return;
+        }
+        auto const rss_bytes = gtl::GetProcessMemoryUsed();
+        log->info("rebuild_position_store rss {}: {} bytes", phase, rss_bytes);
+    };
+
+    log_rss("start");
 
     duckdb_result tx_res {};
     if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
@@ -472,6 +489,7 @@ auto database_manager::rebuild_position_store() -> result<void>
             conn_, "SELECT id FROM game ORDER BY id", -1, &raw, nullptr)
         != SQLITE_OK)
     {
+        rollback();
         return tl::unexpected {error_code::io_failure};
     }
     auto const stmt_guard =
@@ -489,6 +507,23 @@ auto database_manager::rebuild_position_store() -> result<void>
         rollback();
         return tl::unexpected {error_code::io_failure};
     }
+    log_rss("after_collect_game_ids");
+
+    std::vector<position_row> pending_rows;
+    pending_rows.reserve(rebuild_batch_rows);
+
+    auto flush_pending_rows = [&]() -> result<void>
+    {
+        if (pending_rows.empty()) {
+            return {};
+        }
+        if (auto ins_res = positions_->insert_batch(pending_rows); !ins_res) {
+            return tl::unexpected {ins_res.error()};
+        }
+        pending_rows.clear();
+        log_rss("after_flush_batch");
+        return {};
+    };
 
     for (auto const game_id : game_ids) {
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -508,11 +543,29 @@ auto database_manager::rebuild_position_store() -> result<void>
         }
 
         if (!batch->empty()) {
-            if (auto ins_res = positions_->insert_batch(*batch); !ins_res) {
-                rollback();
-                return tl::unexpected {ins_res.error()};
+            pending_rows.insert(
+                pending_rows.end(), batch->begin(), batch->end());
+            if (pending_rows.size() >= rebuild_batch_rows) {
+                auto flush_res = flush_pending_rows();
+                if (!flush_res) {
+                    rollback();
+                    return tl::unexpected {flush_res.error()};
+                }
             }
         }
+    }
+
+    if (auto flush_res = flush_pending_rows(); !flush_res) {
+        rollback();
+        return tl::unexpected {flush_res.error()};
+    }
+
+    if (sort_by_zobrist) {
+        if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
+            rollback();
+            return tl::unexpected {sort_res.error()};
+        }
+        log_rss("after_sort_by_zobrist");
     }
 
     duckdb_result commit_res {};
@@ -522,6 +575,7 @@ auto database_manager::rebuild_position_store() -> result<void>
         return tl::unexpected {error_code::io_failure};
     }
     duckdb_destroy_result(&commit_res);
+    log_rss("after_commit");
 
     return {};
 }

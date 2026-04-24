@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/core/types.hpp>
+#include <duckdb.h>
 #include <sqlite3.h>
 
 #include "motif/db/error.hpp"
@@ -39,6 +40,50 @@ struct tmp_dir
     tmp_dir(tmp_dir&&) = delete;
     auto operator=(tmp_dir&&) -> tmp_dir& = delete;
 };
+
+constexpr auto select_position_hashes_sql = R"sql(
+    SELECT zobrist_hash
+    FROM position
+)sql";
+
+struct duckdb_handle_guard
+{
+    duckdb_database db {};
+    duckdb_connection con {};
+    duckdb_result res {};
+
+    duckdb_handle_guard() = default;
+    duckdb_handle_guard(duckdb_handle_guard const&) = delete;
+    auto operator=(duckdb_handle_guard const&) -> duckdb_handle_guard& = delete;
+    duckdb_handle_guard(duckdb_handle_guard&&) = delete;
+    auto operator=(duckdb_handle_guard&&) -> duckdb_handle_guard& = delete;
+
+    ~duckdb_handle_guard()
+    {
+        duckdb_destroy_result(&res);
+        duckdb_disconnect(&con);
+        duckdb_close(&db);
+    }
+};
+
+auto read_position_hashes(std::filesystem::path const& duckdb_path)
+    -> std::vector<std::uint64_t>
+{
+    auto handles = duckdb_handle_guard {};
+    REQUIRE(duckdb_open(duckdb_path.c_str(), &handles.db) == DuckDBSuccess);
+    REQUIRE(duckdb_connect(handles.db, &handles.con) == DuckDBSuccess);
+    REQUIRE(duckdb_query(handles.con, select_position_hashes_sql, &handles.res)
+            == DuckDBSuccess);
+
+    auto const row_count = duckdb_row_count(&handles.res);
+    std::vector<std::uint64_t> hashes;
+    hashes.reserve(static_cast<std::size_t>(row_count));
+    for (idx_t row_idx = 0; row_idx < row_count; ++row_idx) {
+        hashes.push_back(duckdb_value_uint64(&handles.res, 0, row_idx));
+    }
+
+    return hashes;
+}
 
 }  // namespace
 
@@ -401,4 +446,60 @@ TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo",
     auto rebuild_res = mgr->rebuild_position_store();
     REQUIRE_FALSE(rebuild_res.has_value());
     CHECK(rebuild_res.error() == motif::db::error_code::io_failure);
+}
+
+TEST_CASE(
+    "database_manager::rebuild_position_store defaults to sorted-by-zobrist",
+    "[motif-db][database_manager][duckdb]")
+{
+    tmp_dir const tdir {"duckdb_rebuild_sorted_default"};
+
+    chesslib::move e2e4 {};
+    e2e4.source_square = chesslib::square::e2;
+    e2e4.target_square = chesslib::square::e4;
+    e2e4.double_pawn = 1;
+
+    chesslib::move d2d4 {};
+    d2d4.source_square = chesslib::square::d2;
+    d2d4.target_square = chesslib::square::d4;
+    d2d4.double_pawn = 1;
+
+    motif::db::game const test_game_a {
+        .white = {.name = "White", .elo = 2800, .title = {}, .country = {}},
+        .black = {.name = "Black", .elo = 2700, .title = {}, .country = {}},
+        .event_details = {},
+        .date = {},
+        .result = "1-0",
+        .eco = {},
+        .moves = {chesslib::codec::encode(e2e4)},
+        .extra_tags = {},
+    };
+
+    motif::db::game const test_game_b {
+        .white = {.name = "White 2", .elo = 2500, .title = {}, .country = {}},
+        .black = {.name = "Black 2", .elo = 2400, .title = {}, .country = {}},
+        .event_details = {},
+        .date = {},
+        .result = "0-1",
+        .eco = {},
+        .moves = {chesslib::codec::encode(d2d4)},
+        .extra_tags = {},
+    };
+
+    auto mgr =
+        motif::db::database_manager::create(tdir.path, "sorted-default-db");
+    REQUIRE(mgr.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->store().insert(test_game_a).has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->store().insert(test_game_b).has_value());
+
+    // Default call — should sort by zobrist (new default behavior)
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto rebuild_res = mgr->rebuild_position_store();
+    REQUIRE(rebuild_res.has_value());
+
+    auto hashes = read_position_hashes(tdir.path / "positions.duckdb");
+    REQUIRE(hashes.size() == 2);
+    CHECK(std::ranges::is_sorted(hashes));
 }
