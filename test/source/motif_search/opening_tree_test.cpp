@@ -15,6 +15,7 @@
 #include "motif/search/opening_tree.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
@@ -129,6 +130,7 @@ void insert_games_and_rebuild(motif::db::database_manager& manager, std::initial
     REQUIRE(rebuilt.has_value());
 }
 
+constexpr auto elo_abs_tolerance = 0.5;
 constexpr auto us_per_ms = 1000.0;
 constexpr auto perf_sample_hashes = std::size_t {100};
 constexpr auto perf_sample_seed = std::uint64_t {42};
@@ -199,11 +201,23 @@ TEST_CASE("opening_tree::open returns root with correct continuations at depth 1
     CHECK(root.continuations[0].frequency == 1);
     CHECK(root.continuations[0].black_wins == 1);
     CHECK(root.continuations[0].result_hash == hash_after_sans({"e4", "e5", "Nc3"}));
+    CHECK(root.continuations[0].eco == "C25");
+    CHECK(root.continuations[0].opening_name == "Vienna Game");
+    REQUIRE(root.continuations[0].average_white_elo.has_value());
+    CHECK_THAT(root.continuations[0].average_white_elo.value(), Catch::Matchers::WithinAbs(static_cast<double>(white_elo_low), elo_abs_tolerance));
+    REQUIRE(root.continuations[0].average_black_elo.has_value());
+    CHECK_THAT(root.continuations[0].average_black_elo.value(), Catch::Matchers::WithinAbs(static_cast<double>(black_elo_other), elo_abs_tolerance));
 
     CHECK(root.continuations[1].san == "Nf3");
     CHECK(root.continuations[1].frequency == 1);
     CHECK(root.continuations[1].white_wins == 1);
     CHECK(root.continuations[1].result_hash == hash_after_sans({"e4", "e5", "Nf3"}));
+    CHECK(root.continuations[1].eco == "C40");
+    CHECK(root.continuations[1].opening_name == "King's Knight Opening");
+    REQUIRE(root.continuations[1].average_white_elo.has_value());
+    CHECK_THAT(root.continuations[1].average_white_elo.value(), Catch::Matchers::WithinAbs(static_cast<double>(white_elo_high), elo_abs_tolerance));
+    REQUIRE(root.continuations[1].average_black_elo.has_value());
+    CHECK_THAT(root.continuations[1].average_black_elo.value(), Catch::Matchers::WithinAbs(static_cast<double>(black_elo_high), elo_abs_tolerance));
 }
 
 TEST_CASE("opening_tree::open prefetches to configured depth", "[motif-search][opening_tree]")
@@ -291,6 +305,46 @@ TEST_CASE("opening_tree::open leaves boundary nodes unexpanded", "[motif-search]
 
     auto const& nf3 = e5_continuation.subtree->continuations[0];
     CHECK_FALSE(nf3.subtree->is_expanded);
+}
+
+TEST_CASE("opening_tree::open with prefetch_depth=1 marks all continuations as boundary", "[motif-search][opening_tree]")
+{
+    tmp_dir const tdir {"depth1_boundary"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "tree-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4"});
+
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight"}}),
+                                 make_game({.sans = {"e4", "d5"},
+                                            .result = "0-1",
+                                            .white_elo = white_elo_low,
+                                            .black_elo = black_elo_other,
+                                            .eco = std::string {"B01"},
+                                            .opening_name = std::string {"Scandinavian"}}),
+                             });
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, 1);
+    REQUIRE(tree_res.has_value());
+    CHECK(tree_res->prefetch_depth == 1);
+
+    auto const& root = tree_res->root;
+    CHECK(root.is_expanded);
+    REQUIRE(root.continuations.size() == 2);
+
+    // All continuations at depth=1 == max_depth=1, so every subtree is a boundary leaf.
+    for (auto const& cont : root.continuations) {
+        REQUIRE(cont.subtree != nullptr);
+        CHECK_FALSE(cont.subtree->is_expanded);
+    }
 }
 
 TEST_CASE("opening_tree::expand populates children for unexpanded node", "[motif-search][opening_tree]")

@@ -43,3 +43,9 @@
 
 - NFR02 AC1 gap: p99 reaches 700ms on 1M corpus for high-fanout positions (e.g., after 1.e4), 200ms over the 500ms target. Not critical; will decide later whether to address. Fix path: extract only `moves[2*ply]` from moves blob instead of full deserialization, or cache game contexts per query [opening_stats.cpp, position_store.cpp].
 - `dominant_eco` tie-break rule (alphabetical ECO code on count ties) documented only in `.cpp` comment, not in `opening_stats.hpp` public API — Story 3.3 depends on output shape; the tie-break rule should appear in the header.
+
+## Deferred from: code review of 3-3-lazy-opening-tree-with-prefetch (2026-04-24)
+
+- Quadratic `replay_position` calls — `open()` replays the board from ply 0 for every row in the occurrence loop and again for every node in the bottom-up build pass, with no incremental reuse across depths. `O(occurrences × max_depth × avg_root_ply)` move applications. Performance concern only; no correctness impact. [`source/motif/search/opening_tree.cpp:300,340,389`]
+- Zobrist collision merges different positions into the same node aggregate — two board positions sharing the same Zobrist hash would have their continuation statistics silently merged and produce an incorrect `result_hash`. Pre-existing architecture risk inherent to 64-bit Zobrist hashing. [`source/motif/search/opening_tree.cpp:313`]
+- `const_cast` delegation in `game_store::get_game_contexts` non-const overload — the non-const overload delegates to the const one via `const_cast`. Safe and the non-const overload is unused in practice (all callers hold `database_manager const&`); should be removed when cleaning up the `game_store` API. [`source/motif/db/game_store.cpp`]
