@@ -36,8 +36,7 @@ TEST_CASE("checkpoint: glaze round-trip all fields", "[motif-import]")
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("checkpoint: read_checkpoint returns not_found when absent",
-          "[motif-import]")
+TEST_CASE("checkpoint: read_checkpoint returns not_found when absent", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "cp_absent";
     std::filesystem::create_directories(tmp);
@@ -56,8 +55,7 @@ TEST_CASE("checkpoint: delete_checkpoint is idempotent", "[motif-import]")
 
     CHECK_NOTHROW(motif::import::delete_checkpoint(tmp));
 
-    motif::import::import_checkpoint const chk {.source_path = "x",
-                                                .byte_offset = 1};
+    motif::import::import_checkpoint const chk {.source_path = "x", .byte_offset = 1};
     REQUIRE(motif::import::write_checkpoint(tmp, chk).has_value());
     motif::import::delete_checkpoint(tmp);
     CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(tmp)));

@@ -34,13 +34,11 @@
 namespace
 {
 
-constexpr std::size_t async_queue_capacity =
-    8192;  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+constexpr std::size_t async_queue_capacity = 8192;  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 constexpr std::size_t rotate_file_count = 3;
-constexpr std::uintmax_t rotate_max_bytes = 5ULL * 1024ULL
-    * 1024ULL;  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
-constexpr std::array<std::string_view, 3> logger_names {
-    "motif.db", "motif.import", "motif.search"};
+constexpr std::uintmax_t rotate_max_bytes =
+    5ULL * 1024ULL * 1024ULL;  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+constexpr std::array<std::string_view, 3> logger_names {"motif.db", "motif.import", "motif.search"};
 constexpr unsigned char control_character_limit = 0x20U;
 
 auto logging_mutex() -> std::mutex&
@@ -92,9 +90,7 @@ auto escape_json_string(std::string_view value) -> std::string
             default:
                 if (code < control_character_limit) {
                     std::ostringstream unicode_escape;
-                    unicode_escape << "\\u" << std::hex << std::setw(4)
-                                   << std::setfill('0')
-                                   << static_cast<int>(code);
+                    unicode_escape << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(code);
                     escaped += unicode_escape.str();
                 } else {
                     escaped += character;
@@ -106,13 +102,10 @@ auto escape_json_string(std::string_view value) -> std::string
     return escaped;
 }
 
-auto format_timestamp(const std::chrono::system_clock::time_point time_point)
-    -> std::string
+auto format_timestamp(const std::chrono::system_clock::time_point time_point) -> std::string
 {
     const auto time = std::chrono::system_clock::to_time_t(time_point);
-    const auto millisec = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              time_point.time_since_epoch())
-        % 1000;
+    const auto millisec = std::chrono::duration_cast<std::chrono::milliseconds>(time_point.time_since_epoch()) % 1000;
 
     std::tm timestamp {};
 #ifdef _WIN32
@@ -122,8 +115,7 @@ auto format_timestamp(const std::chrono::system_clock::time_point time_point)
 #endif
 
     std::ostringstream stream;
-    stream << std::put_time(&timestamp, "%Y-%m-%dT%H:%M:%S") << '.'
-           << std::setw(3) << std::setfill('0') << millisec.count();
+    stream << std::put_time(&timestamp, "%Y-%m-%dT%H:%M:%S") << '.' << std::setw(3) << std::setfill('0') << millisec.count();
 
     return stream.str();
 }
@@ -143,14 +135,10 @@ class jsonl_file_sink final : public spdlog::sinks::base_sink<std::mutex>
   protected:
     void sink_it_(const spdlog::details::log_msg& msg) override
     {
-        stream_ << R"({"ts":")" << format_timestamp(msg.time)
-                << R"(","level":")"
-                << to_std_string_view(spdlog::level::to_string_view(msg.level))
-                << R"(","logger":")"
-                << escape_json_string(to_std_string_view(msg.logger_name))
-                << R"(","msg":")"
-                << escape_json_string(to_std_string_view(msg.payload))
-                << R"("})" << '\n';
+        stream_ << R"({"ts":")" << format_timestamp(msg.time) << R"(","level":")"
+                << to_std_string_view(spdlog::level::to_string_view(msg.level)) << R"(","logger":")"
+                << escape_json_string(to_std_string_view(msg.logger_name)) << R"(","msg":")"
+                << escape_json_string(to_std_string_view(msg.payload)) << R"("})" << '\n';
 
         if (!stream_) {
             throw spdlog::spdlog_ex("failed to write json log file");
@@ -171,8 +159,7 @@ class jsonl_file_sink final : public spdlog::sinks::base_sink<std::mutex>
 
 using jsonl_file_sink_mt = jsonl_file_sink;
 
-auto config_matches(const motif::import::log_config& lhs,
-                    const motif::import::log_config& rhs) -> bool
+auto config_matches(const motif::import::log_config& lhs, const motif::import::log_config& rhs) -> bool
 {
     return lhs.log_dir == rhs.log_dir && lhs.json_sink == rhs.json_sink;
 }
@@ -182,9 +169,7 @@ auto drop_registered_loggers() -> bool
     auto flush_failed = false;
 
     for (const auto name : logger_names) {
-        if (const auto logger = spdlog::get(std::string {name});
-            logger != nullptr)
-        {
+        if (const auto logger = spdlog::get(std::string {name}); logger != nullptr) {
             try {
                 logger->flush();
             } catch (const spdlog::spdlog_ex&) {
@@ -199,18 +184,12 @@ auto drop_registered_loggers() -> bool
 
 [[nodiscard]] auto all_loggers_registered() -> bool
 {
-    return std::ranges::all_of(
-        logger_names,
-        [](const auto name) -> bool
-        { return spdlog::get(std::string {name}) != nullptr; });
+    return std::ranges::all_of(logger_names, [](const auto name) -> bool { return spdlog::get(std::string {name}) != nullptr; });
 }
 
 [[nodiscard]] auto any_logger_registered() -> bool
 {
-    return std::ranges::any_of(
-        logger_names,
-        [](const auto name) -> bool
-        { return spdlog::get(std::string {name}) != nullptr; });
+    return std::ranges::any_of(logger_names, [](const auto name) -> bool { return spdlog::get(std::string {name}) != nullptr; });
 }
 
 }  // namespace
@@ -225,9 +204,7 @@ auto initialize_logging(log_config const& cfg) -> result<void>
     const std::scoped_lock lock(logging_mutex());
 
     if (all_loggers_registered()) {
-        if (const auto& existing_config = current_config();
-            existing_config.has_value())
-        {
+        if (const auto& existing_config = current_config(); existing_config.has_value()) {
             if (config_matches(existing_config.value(), cfg)) {
                 return {};
             }
@@ -240,9 +217,7 @@ auto initialize_logging(log_config const& cfg) -> result<void>
         return tl::unexpected<error_code> {error_code::invalid_state};
     }
 
-    if (const auto& existing_config = current_config();
-        existing_config.has_value())
-    {
+    if (const auto& existing_config = current_config(); existing_config.has_value()) {
         if (config_matches(existing_config.value(), cfg)) {
             return tl::unexpected<error_code> {error_code::invalid_state};
         }
@@ -257,29 +232,21 @@ auto initialize_logging(log_config const& cfg) -> result<void>
     try {
         fs::create_directories(cfg.log_dir);
 
-        logging_thread_pool() = std::make_shared<spdlog::details::thread_pool>(
-            async_queue_capacity, 1);
+        logging_thread_pool() = std::make_shared<spdlog::details::thread_pool>(async_queue_capacity, 1);
 
         auto text_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            (cfg.log_dir / "motif-chess.log").string(),
-            rotate_max_bytes,
-            rotate_file_count);
+            (cfg.log_dir / "motif-chess.log").string(), rotate_max_bytes, rotate_file_count);
         text_sink->set_pattern("[%Y-%m-%dT%H:%M:%S.%e] [%l] [%n] %v");
 
         std::vector<spdlog::sink_ptr> sinks {text_sink};
 
         if (cfg.json_sink) {
-            sinks.push_back(std::make_shared<jsonl_file_sink_mt>(
-                cfg.log_dir / "motif-chess.jsonl"));
+            sinks.push_back(std::make_shared<jsonl_file_sink_mt>(cfg.log_dir / "motif-chess.jsonl"));
         }
 
         for (const auto name : logger_names) {
             auto logger = std::make_shared<spdlog::async_logger>(
-                std::string {name},
-                sinks.begin(),
-                sinks.end(),
-                logging_thread_pool(),
-                spdlog::async_overflow_policy::block);
+                std::string {name}, sinks.begin(), sinks.end(), logging_thread_pool(), spdlog::async_overflow_policy::block);
             logger->set_level(spdlog::level::trace);
             spdlog::register_logger(logger);
         }

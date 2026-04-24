@@ -22,16 +22,14 @@ struct process_result
 class import_worker
 {
   public:
-    explicit import_worker(motif::db::game_store& store,
-                           motif::db::position_store& positions) noexcept;
+    explicit import_worker(motif::db::game_store& store, motif::db::position_store& positions) noexcept;
 
     // Convert pgn::game to stored game row + DuckDB position rows.
     // Errors:
     //   duplicate   — identity key already in DB; no rows written
     //   parse_error — chesslib rejected a SAN move in the main line; no rows
     //   written io_failure  — a DB write failed
-    [[nodiscard]] auto process(pgn::game const& pgn_game)
-        -> result<process_result>;
+    [[nodiscard]] auto process(pgn::game const& pgn_game) -> result<process_result>;
 
   private:
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)

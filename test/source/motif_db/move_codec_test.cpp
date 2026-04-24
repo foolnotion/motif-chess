@@ -34,8 +34,7 @@ struct move_test_support
         };
     }
 
-    static auto move_fields(chesslib::move move)
-        -> std::array<int, move_field_count>
+    static auto move_fields(chesslib::move move) -> std::array<int, move_field_count>
     {
         return {
             move.source_square,
@@ -48,11 +47,7 @@ struct move_test_support
         };
     }
 
-    static auto require_same_move(chesslib::move lhs, chesslib::move rhs)
-        -> void
-    {
-        REQUIRE(move_fields(lhs) == move_fields(rhs));
-    }
+    static auto require_same_move(chesslib::move lhs, chesslib::move rhs) -> void { REQUIRE(move_fields(lhs) == move_fields(rhs)); }
 };
 
 struct move_case
@@ -64,20 +59,15 @@ struct move_case
 TEST_CASE("error_code: string conversion", "[motif_db][error_code]")
 {
     CHECK(motif::db::to_string(motif::db::error_code::ok) == "ok");
-    CHECK(motif::db::to_string(motif::db::error_code::not_found)
-          == "not_found");
-    CHECK(motif::db::to_string(motif::db::error_code::schema_mismatch)
-          == "schema_mismatch");
-    CHECK(motif::db::to_string(motif::db::error_code::io_failure)
-          == "io_failure");
-    CHECK(motif::db::to_string(motif::db::error_code::duplicate)
-          == "duplicate");
+    CHECK(motif::db::to_string(motif::db::error_code::not_found) == "not_found");
+    CHECK(motif::db::to_string(motif::db::error_code::schema_mismatch) == "schema_mismatch");
+    CHECK(motif::db::to_string(motif::db::error_code::io_failure) == "io_failure");
+    CHECK(motif::db::to_string(motif::db::error_code::duplicate) == "duplicate");
 }
 
 TEST_CASE("move_codec: encode returns encoded move", "[motif_db][move_codec]")
 {
-    auto const source = move_test_support::make_move(chesslib::square::g1,
-                                                     chesslib::square::f3);
+    auto const source = move_test_support::make_move(chesslib::square::g1, chesslib::square::f3);
 
     auto const encoded = motif::db::encode_move(source);
 
@@ -87,48 +77,38 @@ TEST_CASE("move_codec: encode returns encoded move", "[motif_db][move_codec]")
 
 TEST_CASE("move_codec: decode returns decoded move", "[motif_db][move_codec]")
 {
-    auto const source = move_test_support::make_move(
-        chesslib::square::a7,
-        chesslib::square::a8,
-        static_cast<chesslib::u8>(chesslib::piece::queen));
+    auto const source =
+        move_test_support::make_move(chesslib::square::a7, chesslib::square::a8, static_cast<chesslib::u8>(chesslib::piece::queen));
 
-    auto const decoded =
-        motif::db::decode_move(chesslib::codec::encode(source));
+    auto const decoded = motif::db::decode_move(chesslib::codec::encode(source));
 
     REQUIRE(decoded.has_value());
     move_test_support::require_same_move(decoded.value(), source);
 }
 
-TEST_CASE("move_codec: round trips supported move types",
-          "[motif_db][move_codec]")
+TEST_CASE("move_codec: round trips supported move types", "[motif_db][move_codec]")
 {
     auto const test_cases = std::array {
         move_case {
             .name = "quiet",
-            .value = move_test_support::make_move(chesslib::square::g1,
-                                                  chesslib::square::f3),
+            .value = move_test_support::make_move(chesslib::square::g1, chesslib::square::f3),
         },
         move_case {
             .name = "capture",
-            .value = move_test_support::make_move(
-                chesslib::square::e4, chesslib::square::d5, 0, 1),
+            .value = move_test_support::make_move(chesslib::square::e4, chesslib::square::d5, 0, 1),
         },
         move_case {
             .name = "promotion",
-            .value = move_test_support::make_move(
-                chesslib::square::a7,
-                chesslib::square::a8,
-                static_cast<chesslib::u8>(chesslib::piece::queen)),
+            .value =
+                move_test_support::make_move(chesslib::square::a7, chesslib::square::a8, static_cast<chesslib::u8>(chesslib::piece::queen)),
         },
         move_case {
             .name = "castling",
-            .value = move_test_support::make_move(
-                chesslib::square::e1, chesslib::square::g1, 0, 0, 0, 0, 1),
+            .value = move_test_support::make_move(chesslib::square::e1, chesslib::square::g1, 0, 0, 0, 0, 1),
         },
         move_case {
             .name = "en_passant",
-            .value = move_test_support::make_move(
-                chesslib::square::e5, chesslib::square::d6, 0, 1, 0, 1),
+            .value = move_test_support::make_move(chesslib::square::e5, chesslib::square::d6, 0, 1, 0, 1),
         },
     };
 
@@ -141,8 +121,7 @@ TEST_CASE("move_codec: round trips supported move types",
             auto const decoded = motif::db::decode_move(encoded.value());
             REQUIRE(decoded.has_value());
 
-            move_test_support::require_same_move(decoded.value(),
-                                                 test_case.value);
+            move_test_support::require_same_move(decoded.value(), test_case.value);
         }
     }
 }

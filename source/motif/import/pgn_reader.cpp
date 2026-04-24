@@ -51,8 +51,7 @@ auto is_event_tag_line(std::string_view line) noexcept -> bool
     return line.starts_with(event_tag_prefix);
 }
 
-auto update_brace_comment_state(std::string_view text,
-                                bool in_brace_comment) noexcept -> bool
+auto update_brace_comment_state(std::string_view text, bool in_brace_comment) noexcept -> bool
 {
     for (auto current_char : text) {
         if (!in_brace_comment && current_char == '{') {
@@ -72,8 +71,7 @@ auto to_offset(std::streampos position) -> std::size_t
     return static_cast<std::size_t>(position);
 }
 
-auto read_game_block(std::ifstream& file, std::size_t start_offset)
-    -> result<game_block>
+auto read_game_block(std::ifstream& file, std::size_t start_offset) -> result<game_block>
 {
     auto block = game_block {};
 
@@ -95,8 +93,7 @@ auto read_game_block(std::ifstream& file, std::size_t start_offset)
             break;
         }
 
-        if (!block.text.empty() && !in_brace_comment && is_event_tag_line(line))
-        {
+        if (!block.text.empty() && !in_brace_comment && is_event_tag_line(line)) {
             block.following_offset = to_offset(line_start);
             block.has_following_game = true;
             file.clear();
@@ -151,15 +148,9 @@ auto pgn_reader::next() -> result<pgn::game>
             log->warn("pgn parse error at game {} (byte offset: {}): {}",
                       game_number_,
                       offset_before,
-                      !game_result
-                              && game_result.error()
-                                  == pgn::parse_error::file_not_found
-                          ? "file not found"
-                          : "syntax error");
+                      !game_result && game_result.error() == pgn::parse_error::file_not_found ? "file not found" : "syntax error");
         }
-        if (!game_result
-            && game_result.error() == pgn::parse_error::file_not_found)
-        {
+        if (!game_result && game_result.error() == pgn::parse_error::file_not_found) {
             return tl::unexpected(error_code::io_failure);
         }
         return tl::unexpected(error_code::parse_error);
@@ -215,9 +206,7 @@ auto pgn_reader::reset_to_offset(std::size_t byte_offset) -> result<void>
             return {};
         }
 
-        if (!in_brace_comment && to_offset(line_start) >= byte_offset
-            && is_event_tag_line(line))
-        {
+        if (!in_brace_comment && to_offset(line_start) >= byte_offset && is_event_tag_line(line)) {
             next_game_offset_ = to_offset(line_start);
             has_next_game_ = true;
             file_.clear();
