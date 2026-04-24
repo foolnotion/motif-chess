@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-23  # updated: story 3.2 code review, patches applied
+last_updated: 2026-04-24  # updated: Story 3.3 created (lazy opening tree with prefetch) → ready-for-dev
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -69,8 +69,8 @@ development_status:
   # ─── Epic 3: Position Search & Opening Statistics ───────────────────────────
   epic-3: in-progress
   3-1-position-search-by-zobrist-hash: done
-  3-2-opening-statistics-per-position: in-progress
-  3-3-lazy-opening-tree-with-prefetch: backlog
+  3-2-opening-statistics-per-position: done
+  3-3-lazy-opening-tree-with-prefetch: ready-for-dev
 
   # ─── Epic 4: Desktop Application ───────────────────────────────────
   epic-4: backlog
