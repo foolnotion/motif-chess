@@ -77,6 +77,7 @@
               spdlog
               sqlite
               duckdb
+              httplib
               reproc
               lexy
               chesslib.packages.${system}.default
@@ -110,6 +111,9 @@
                 uv
 
                 nodejs_24
+
+                # CI local runner
+                act
               ]);
 
             buildInputs =
@@ -117,6 +121,9 @@
               ++ (with pkgs; [
                 # testing
                 catch2_3
+
+                # HTTP server (needed for CMake find_package in fresh configures)
+                httplib
 
                 # debugging / profiling
                 cpptrace

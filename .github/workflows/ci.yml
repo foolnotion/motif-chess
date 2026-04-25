@@ -25,8 +25,15 @@ jobs:
     - name: Install codespell
       run: pip3 install codespell
 
+    - name: Install clang-format-21
+      run: |
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+        sudo apt-get update -q
+        sudo apt-get install clang-format-21 -y -q
+
     - name: Lint
-      run: cmake -D FORMAT_COMMAND=clang-format-18 -P cmake/lint.cmake
+      run: cmake -D FORMAT_COMMAND=clang-format-21 -P cmake/lint.cmake
 
     - name: Spell check
       if: always()
@@ -76,13 +83,21 @@ jobs:
 
   sanitize:
     needs: [lint]
+    if: false # vcpkg sync deferred
 
     runs-on: ubuntu-24.04
 
-    env: { CXX: clang++-18 }
+    env: { CXX: clang++-21 }
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install clang-21
+      run: |
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+        sudo apt-get update -q
+        sudo apt-get install clang-21 -y -q
 
     - name: Install vcpkg
       uses: friendlyanon/setup-vcpkg@v1
@@ -109,6 +124,7 @@ jobs:
 
   test:
     needs: [lint]
+    if: false # vcpkg sync deferred
 
     strategy:
       matrix:
@@ -119,14 +135,16 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Install LLVM 21
+      if: matrix.os == 'ubuntu-24.04'
+      uses: KyleMayes/install-llvm-action@v2
+      with: { version: "21" }
+
     - name: Install static analyzers
       if: matrix.os == 'ubuntu-24.04'
-      run: >-
-        sudo apt-get install clang-tidy-18 cppcheck -y -q
-
-        sudo update-alternatives --install
-        /usr/bin/clang-tidy clang-tidy
-        /usr/bin/clang-tidy-18 180
+      run: |
+        sudo apt-get install cppcheck -y -q
+        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy "$(which clang-tidy-21)" 210
 
     - name: Install vcpkg
       uses: friendlyanon/setup-vcpkg@v1

@@ -23,7 +23,9 @@ class position_store
     auto sort_by_zobrist() -> result<void>;
     auto insert_batch(std::span<position_row const> rows) -> result<void>;
     auto row_count() const -> result<std::int64_t>;
-    auto query_by_zobrist(std::uint64_t zobrist_hash) const
+    auto query_by_zobrist(std::uint64_t zobrist_hash,
+                          std::size_t limit = 0,
+                          std::size_t offset = 0) const
         -> result<std::vector<position_match>>;
     auto query_opening_moves(std::uint64_t zobrist_hash) const
         -> result<std::vector<opening_move_stat>>;

@@ -62,7 +62,7 @@ struct db_fixture
     }
 
     // Count rows in any table — used to verify deduplication and cascade
-    // behaviour.
+    // behavior.
     [[nodiscard]] auto count_rows(char const* table) const -> int
     {
         std::string sql = "SELECT COUNT(*) FROM ";

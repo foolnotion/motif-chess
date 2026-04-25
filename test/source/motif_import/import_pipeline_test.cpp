@@ -24,7 +24,6 @@
 #include "motif/import/error.hpp"
 #include "motif/import/logger.hpp"
 #include "motif/import/pgn_helpers.hpp"
-
 #include "test_helpers.hpp"
 
 namespace
@@ -171,18 +170,14 @@ auto perf_pgn_path() -> std::filesystem::path
         return std::filesystem::path {perf_pgn};
     }
 
-    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR}
-                    / "bench"
-                    / "data"
-                    / "twic-bench.pgn";
+    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
+        / "data" / "twic-bench.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
 
-    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR}
-               / "bench"
-               / "data"
-               / "twic-1m.pgn";
+    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
+        / "data" / "twic-1m.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
@@ -911,8 +906,10 @@ TEST_CASE("import_pipeline: zero num_lines is rejected", "[motif-import]")
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: rebuild_positions_after_import=false leaves position store empty",
-          "[motif-import]")
+TEST_CASE(
+    "import_pipeline: rebuild_positions_after_import=false leaves position "
+    "store empty",
+    "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_no_pos_rows";
     std::filesystem::remove_all(tmp);

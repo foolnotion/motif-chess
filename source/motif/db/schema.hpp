@@ -7,7 +7,8 @@
 
 struct sqlite3;
 
-namespace motif::db::schema {
+namespace motif::db::schema
+{
 
 // Current schema version embedded in PRAGMA user_version.
 inline constexpr std::uint32_t current_version = 1;
@@ -20,4 +21,4 @@ auto initialize(sqlite3* conn) -> result<void>;
 // Query PRAGMA user_version from the connection.
 auto version(sqlite3* conn) -> result<std::uint32_t>;
 
-} // namespace motif::db::schema
+}  // namespace motif::db::schema

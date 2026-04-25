@@ -1,6 +1,6 @@
-#include "motif/db/scratch_base.hpp"
-
 #include <exception>
+
+#include "motif/db/scratch_base.hpp"
 
 #include <duckdb.h>
 #include <sqlite3.h>
@@ -9,9 +9,11 @@
 #include "motif/db/game_store.hpp"
 #include "motif/db/schema.hpp"
 
-namespace motif::db {
+namespace motif::db
+{
 
-namespace {
+namespace
+{
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 void must(result<void> const& res)
 {
@@ -19,7 +21,7 @@ void must(result<void> const& res)
         std::terminate();
     }
 }
-} // namespace
+}  // namespace
 
 scratch_base::scratch_base()
 {
@@ -69,4 +71,4 @@ auto scratch_base::positions() noexcept -> position_store&
     return *positions_;
 }
 
-} // namespace motif::db
+}  // namespace motif::db

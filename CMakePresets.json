@@ -161,6 +161,96 @@
     {
       "name": "ci-windows",
       "inherits": ["ci-build", "ci-win64", "dev-mode", "ci-multi-config", "vcpkg", "vcpkg-win64-static"]
+    },
+    {
+      "name": "dev-linux",
+      "binaryDir": "${sourceDir}/build/dev-linux",
+      "inherits": ["dev-mode", "clang-tidy", "cppcheck", "ci-linux"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "dev-sanitize",
+      "binaryDir": "${sourceDir}/build/dev-sanitize",
+      "inherits": ["dev-mode", "clang-tidy", "cppcheck", "ci-linux"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Sanitize",
+        "CMAKE_MAP_IMPORTED_CONFIG_SANITIZE": "Sanitize;RelWithDebInfo;Release;Debug;",
+        "CMAKE_CXX_FLAGS_SANITIZE": "-U_FORTIFY_SOURCE -O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-common"
+      }
+    },
+    {
+      "name": "dev",
+      "binaryDir": "${sourceDir}/build/dev",
+      "inherits": "dev-linux"
+    },
+    {
+      "name": "perf-release",
+      "binaryDir": "${sourceDir}/build/perf-release",
+      "inherits": ["dev-mode", "clang-tidy", "cppcheck", "ci-linux"],
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "configuration": "Debug",
+      "jobs": 32
+    },
+    {
+      "name": "dev-sanitize",
+      "configurePreset": "dev-sanitize",
+      "configuration": "Sanitize",
+      "jobs": 32
+    },
+    {
+      "name": "perf-release",
+      "configurePreset": "perf-release",
+      "configuration": "Release",
+      "jobs": 32
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 32,
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "dev-sanitize",
+      "configurePreset": "dev-sanitize",
+      "configuration": "Sanitize",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 32,
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "perf-release",
+      "configurePreset": "perf-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 1,
+        "noTestsAction": "error"
+      }
     }
   ]
 }

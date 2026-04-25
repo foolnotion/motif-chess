@@ -133,19 +133,19 @@ _No UX Design document exists. GUI is deferred to spec 004 (Phase 1 MVP, later s
 - FR02: Epic 1 — insert game with full metadata and encoded move sequence
 - FR03: Epic 1 — deduplicate players and events on insert
 - FR04: Epic 1 — detect and skip/reject duplicate games on insert
-- FR05: Epic 1 — retrieve complete game by game ID
+- FR05: Epic 1 — retrieve complete game by game ID | Epic 4b — HTTP endpoint GET /games/{id}
 - FR06: Epic 1 — delete game and all associated data
 - FR07: Epic 1 — idempotent schema creation
 - FR08: Epic 1 — database inspectable with standard CLI tools
-- FR09: Epic 2 — import one or more PGN files
+- FR09: Epic 2 — import one or more PGN files | Epic 4b — HTTP endpoint POST /imports
 - FR10: Epic 2 — parallel multi-game processing
 - FR11: Epic 2 — skip and log malformed games
 - FR12: Epic 2 — interrupt and resume import from last checkpoint
-- FR13: Epic 2 — monitor import progress
-- FR14: Epic 2 — structured completion summary
+- FR13: Epic 2 — monitor import progress | Epic 4b — SSE progress stream
+- FR14: Epic 2 — structured completion summary | Epic 4b — SSE final event
 - FR15: Epic 2 — configurable memory ceiling
-- FR16: Epic 3 — search position by Zobrist hash
-- FR17: Epic 3 — view opening statistics per position
+- FR16: Epic 3 — search position by Zobrist hash | Epic 4b — HTTP endpoint GET /positions/{hash}
+- FR17: Epic 3 — view opening statistics per position | Epic 4b — HTTP endpoint GET /openings/{hash}/stats
 - FR18: Epic 3 — navigate opening tree with per-node statistics
 - FR19: Epic 3 — lazy opening tree traversal
 - FR20: Epic 2 — position index populated automatically during import
@@ -154,7 +154,7 @@ _No UX Design document exists. GUI is deferred to spec 004 (Phase 1 MVP, later s
 - FR23: Epic 4 — game tree view with variations
 - FR24: Epic 4 — initiate PGN import and monitor progress from UI
 - FR25: Epic 4 — position search from current board state
-- FR26: Epic 4 — game list browser with filtering
+- FR26: Epic 4 — game list browser with filtering | Epic 4b — HTTP endpoint GET /games
 - FR27: Epic 4 — high-DPI display support
 - FR28: Epic 4 — full keyboard navigation
 - FR29: Epic 5 — configure UCI engine by executable path
@@ -185,6 +185,8 @@ _No UX Design document exists. GUI is deferred to spec 004 (Phase 1 MVP, later s
 - AR09: Epic 2 (import checkpoint struct and resume)
 - AR10: Epic 3 (opening tree 5-level prefetch)
 
+**Epic 4b Note:** No new ARs — Epic 4b is a thin HTTP adapter over existing stable APIs. All architectural constraints (module boundaries, dependency direction, no Qt in non-app modules) continue to apply.
+
 ## Epic List
 
 ### Epic 1: Game Database Foundation
@@ -205,7 +207,13 @@ Users can find any board position by Zobrist hash, view move frequency and win/d
 **ARs covered:** AR10 (prefetch)
 **NFRs covered:** NFR01, NFR02
 
-### Epic 4: Desktop Application
+### Epic 4b: HTTP API Layer
+An HTTP API layer between motif-chess and any future frontend (Qt, web, or experimental), exposing the core database, search, and import capabilities as REST endpoints. The OpenAPI spec becomes a versioned interface boundary.
+**FRs covered:** FR05, FR09, FR13, FR14, FR16, FR17, FR26
+**NFRs covered:** NFR01, NFR02, NFR10
+**Dependencies:** All met — `position_search`, `opening_stats`, `opening_tree`, `import_pipeline`, `database_manager` are stable and tested.
+
+### Epic 4: Desktop Application *(DEFERRED — Epic 4b takes priority)*
 Users interact with the full database through a native Qt 6 desktop GUI — browsing games, navigating positions on a chessboard, running imports, searching positions, and configuring the application — all keyboard-accessible on high-DPI displays.
 **FRs covered:** FR21–FR28, FR39–FR40, FR42
 **NFRs covered:** NFR05, NFR06
@@ -601,7 +609,137 @@ So that I can click through the main line of an opening rapidly without per-move
 
 ---
 
-## Epic 4: Desktop Application
+## Epic 4b: HTTP API Layer
+
+An HTTP API layer between motif-chess and any future frontend (Qt, web, or experimental), exposing the core database, search, and import capabilities as REST endpoints. Provides a low-stakes experimentation space for features too risky or speculative for motif-chess proper. The OpenAPI spec becomes a versioned interface boundary.
+
+**Pre-conditions (from Epic 3 retrospective):**
+- Triage all deferred items — close or promote before Epic 4b starts
+- Document `dominant_eco` tie-break rule in `opening_stats.hpp`
+
+### Story 4b.1: HTTP Server Scaffold
+
+As a developer,
+I want an HTTP server scaffold using cpp-httplib with CORS support, database configuration at startup, and a health endpoint,
+So that all subsequent endpoint stories have a running server with common infrastructure ready.
+
+**Acceptance Criteria:**
+
+**Given** the `motif_http` module is configured
+**When** the server starts
+**Then** it listens on a configured port (default: 8080) and exposes a `GET /health` endpoint returning HTTP 200 with `{ "status": "ok" }`
+**And** CORS headers are present on all responses allowing cross-origin requests from any host during development
+**And** the server opens or creates a database bundle at a path provided via CLI argument or environment variable
+**And** a new `motif_http` static library module is created with the same one-directional dependency pattern as existing modules
+**And** `cmake --preset=dev && cmake --build build/dev` succeeds with zero warnings
+**And** `ctest --test-dir build/dev` passes including a test that verifies the health endpoint returns 200
+
+### Story 4b.2: Position Search Endpoint
+
+As a user,
+I want to search for a chess position via HTTP and receive a list of matching games,
+So that I can find every game where a specific position occurred without a GUI.
+
+**Acceptance Criteria:**
+
+**Given** the server is running and a database is loaded
+**When** `GET /api/positions/{zobrist_hash}` is called
+**Then** the response contains a JSON array of games that reached that position, each with `game_id`, `ply`, `result`, `white_elo`, `black_elo` (FR16)
+**And** the endpoint responds in under 100ms for a 10M-game corpus (NFR01)
+
+**Given** a Zobrist hash with no matches
+**When** the endpoint is called
+**Then** HTTP 200 is returned with an empty array
+
+**Given** an invalid Zobrist hash (non-numeric, negative)
+**When** the endpoint is called
+**Then** HTTP 400 is returned with an error message (NFR10)
+
+### Story 4b.3: Opening Statistics Endpoint
+
+As a user,
+I want to retrieve opening statistics for a position via HTTP,
+So that I can see move frequency and win/draw/loss breakdowns for any position.
+
+**Acceptance Criteria:**
+
+**Given** the server is running and a populated database is loaded
+**When** `GET /api/openings/{zobrist_hash}/stats` is called
+**Then** the response contains for each continuation move: move (SAN), frequency, white wins, draws, black wins, average white Elo, average black Elo (FR17)
+**And** the endpoint responds in under 500ms (NFR02)
+
+**Given** a position with no continuations
+**When** the endpoint is called
+**Then** HTTP 200 is returned with an empty continuations array
+
+### Story 4b.4: Import Trigger & SSE Progress Stream
+
+As a user,
+I want to trigger a PGN import via HTTP and receive real-time progress updates via Server-Sent Events,
+So that I can import games from any frontend and monitor progress without polling.
+
+**Acceptance Criteria:**
+
+**Given** the server is running and a database is loaded
+**When** `POST /api/imports` is called with `{ "path": "/path/to/file.pgn" }`
+**Then** the import starts asynchronously and the response returns HTTP 202 with `{ "import_id": "<uuid>" }` (FR09)
+
+**Given** an import is running
+**When** `GET /api/imports/{import_id}/progress` is called (SSE endpoint)
+**Then** events are streamed containing `games_processed`, `games_committed`, `games_skipped`, `elapsed_seconds` (FR13)
+**And** a final event is sent with the complete `import_summary` on completion (FR14)
+
+**Given** an import fails to start (file not found, unreadable)
+**When** `POST /api/imports` is called
+**Then** HTTP 400 is returned with an error message (NFR10)
+
+**Given** an import is running
+**When** `DELETE /api/imports/{import_id}` is called
+**Then** the import is gracefully stopped and checkpoint is saved for resume
+
+### Story 4b.5: Game List Endpoint
+
+As a user,
+I want to browse the list of games in the database via HTTP with optional filtering,
+So that I can find specific games from any frontend.
+
+**Acceptance Criteria:**
+
+**Given** the server is running and a populated database is loaded
+**When** `GET /api/games` is called
+**Then** a paginated JSON array of games is returned with fields: `id`, `white`, `black`, `result`, `event`, `date`, `eco` (FR26)
+
+**Given** query parameters `?player=<name>&result=<result>`
+**When** `GET /api/games?player=Carlsen&result=1-0` is called
+**Then** the list is filtered by player name (white or black) and result (FR26)
+
+**Given** a large database
+**When** the endpoint is called with `?offset=100&limit=50`
+**Then** pagination is applied; default limit is 50; maximum limit is 200
+
+### Story 4b.6: Single Game Retrieval Endpoint
+
+As a user,
+I want to retrieve a complete game by ID via HTTP,
+So that I can view full game metadata and move data from any frontend.
+
+**Acceptance Criteria:**
+
+**Given** the server is running and a populated database is loaded
+**When** `GET /api/games/{id}` is called with a valid game ID
+**Then** the response contains the full game: metadata (players, event, site, date, result, ECO, tags) and encoded move sequence (FR05)
+
+**Given** a game ID that does not exist
+**When** the endpoint is called
+**Then** HTTP 404 is returned with `{ "error": "not_found" }`
+
+**Given** an invalid game ID format
+**When** the endpoint is called
+**Then** HTTP 400 is returned with an error message
+
+---
+
+## Epic 4: Desktop Application *(DEFERRED — Epic 4b takes priority)*
 
 Users interact with the full database through a native Qt 6 desktop GUI — browsing games, navigating positions on a chessboard, running imports, searching positions, and configuring the application — all keyboard-accessible on high-DPI displays.
 
@@ -650,7 +788,7 @@ So that I can step through any game in my database without reaching for the mous
 
 **Given** high-DPI display scaling is active
 **When** the board renders
-**Then** pieces and squares are crisp with no blurry scaling artefacts (FR27)
+**Then** pieces and squares are crisp with no blurry scaling artifacts (FR27)
 
 ### Story 4.3: Game List Browser
 
@@ -747,7 +885,7 @@ So that I can get engine evaluations without leaving the application.
 
 As a user,
 I want to see engine depth, score, and principal variation updating in real time, and have engine crashes never crash the application,
-So that I can analyse positions safely even with unstable third-party engines.
+So that I can analyze positions safely even with unstable third-party engines.
 
 **Acceptance Criteria:**
 
@@ -830,7 +968,7 @@ So that I have a structured preparation reference I can return to.
 
 As a user,
 I want to drill my repertoire lines in a practice mode where the application plays the opponent's moves and I respond,
-So that I can memorise my preparation through active recall.
+So that I can memorize my preparation through active recall.
 
 **Acceptance Criteria:**
 
@@ -851,7 +989,7 @@ Users receive a personalized opening repertoire generated from analysis of their
 ### Story 8.1: Corpus Analysis & Player Profiling
 
 As a user,
-I want the system to analyse my game corpus and produce a profile of my playing style, strengths, and theoretical weaknesses,
+I want the system to analyze my game corpus and produce a profile of my playing style, strengths, and theoretical weaknesses,
 So that I have a data-driven foundation for personalised repertoire recommendations.
 
 **Acceptance Criteria:**
@@ -870,7 +1008,7 @@ So that I receive concrete preparation recommendations tailored to my current ab
 
 **Given** a player profile from Story 8.1 exists
 **When** repertoire generation runs
-**Then** a repertoire proposal is produced covering both colours, accounting for the player's current strength, preferred piece structures, and identified theoretical gaps (FR44, FR45)
+**Then** a repertoire proposal is produced covering both colors, accounting for the player's current strength, preferred piece structures, and identified theoretical gaps (FR44, FR45)
 
 **Given** the player's corpus grows with new games
 **When** the user re-runs repertoire generation

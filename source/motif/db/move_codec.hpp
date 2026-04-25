@@ -8,16 +8,21 @@
 
 #include "motif/db/error.hpp"
 
-namespace motif::db {
+namespace motif::db
+{
 
 using encoded_move = std::uint16_t;
 
-[[nodiscard]] inline auto encode_move(chesslib::move move) noexcept -> result<encoded_move> {
-    return result<encoded_move>{chesslib::codec::encode(move)};
+[[nodiscard]] inline auto encode_move(chesslib::move move) noexcept
+    -> result<encoded_move>
+{
+    return result<encoded_move> {chesslib::codec::encode(move)};
 }
 
-[[nodiscard]] inline auto decode_move(encoded_move encoded) noexcept -> result<chesslib::move> {
-    return result<chesslib::move>{chesslib::codec::decode(encoded)};
+[[nodiscard]] inline auto decode_move(encoded_move encoded) noexcept
+    -> result<chesslib::move>
+{
+    return result<chesslib::move> {chesslib::codec::decode(encoded)};
 }
 
-} // namespace motif::db
+}  // namespace motif::db
