@@ -51,15 +51,11 @@ class import_pipeline
     explicit import_pipeline(motif::db::database_manager& dbm) noexcept;
 
     // Fresh import of pgn_path into the bound database.
-    [[nodiscard]] auto run(std::filesystem::path const& pgn_path,
-                           import_config const& config = {})
-        -> result<import_summary>;
+    [[nodiscard]] auto run(std::filesystem::path const& pgn_path, import_config const& config = {}) -> result<import_summary>;
 
     // Resume from <db-dir>/import.checkpoint.json. Returns io_failure if
     // absent.
-    [[nodiscard]] auto resume(std::filesystem::path const& pgn_path,
-                              import_config const& config = {})
-        -> result<import_summary>;
+    [[nodiscard]] auto resume(std::filesystem::path const& pgn_path, import_config const& config = {}) -> result<import_summary>;
 
     // Thread-safe snapshot of current progress.
     [[nodiscard]] auto progress() const noexcept -> import_progress;
@@ -69,8 +65,7 @@ class import_pipeline
                                 std::size_t start_offset,
                                 std::int64_t pre_committed,
                                 std::int64_t pre_last_game_id,
-                                import_config const& config)
-        -> result<import_summary>;
+                                import_config const& config) -> result<import_summary>;
 
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     motif::db::database_manager& db_;

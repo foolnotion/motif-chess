@@ -51,14 +51,11 @@ class game_store
     auto get(std::uint32_t game_id) -> result<game>;
     auto get(std::uint32_t game_id) const -> result<game>;
     auto get_opening_context(std::uint32_t game_id) -> result<opening_context>;
-    auto get_opening_context(std::uint32_t game_id) const
-        -> result<opening_context>;
+    auto get_opening_context(std::uint32_t game_id) const -> result<opening_context>;
     // Precondition: game_ids contains no duplicates (duplicate entries are
     // silently dropped by the unordered_map; deduplicate before calling).
-    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids)
-        -> result<std::unordered_map<std::uint32_t, game_context>>;
-    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const
-        -> result<std::unordered_map<std::uint32_t, game_context>>;
+    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<std::unordered_map<std::uint32_t, game_context>>;
+    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const -> result<std::unordered_map<std::uint32_t, game_context>>;
 
     // Delete the game row and all associated game_tag rows.
     // Player and event rows are preserved.
@@ -82,12 +79,8 @@ class game_store
 
     auto find_or_insert_player(player const& plr) -> result<std::int64_t>;
     auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
-    auto insert_game_tags(
-        std::uint32_t game_id,
-        std::vector<std::pair<std::string, std::string>> const& extra_tags)
-        -> result<void>;
-    auto prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql)
-        -> result<sqlite3_stmt*>;
+    auto insert_game_tags(std::uint32_t game_id, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
+    auto prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql) -> result<sqlite3_stmt*>;
 };
 
 }  // namespace motif::db

@@ -29,10 +29,7 @@ struct continuation_key
     std::uint32_t game_id;
     std::uint16_t encoded_move;
 
-    auto operator==(continuation_key const& other) const -> bool
-    {
-        return game_id == other.game_id && encoded_move == other.encoded_move;
-    }
+    auto operator==(continuation_key const& other) const -> bool { return game_id == other.game_id && encoded_move == other.encoded_move; }
 };
 
 struct continuation_key_hash
@@ -44,8 +41,7 @@ struct continuation_key_hash
         constexpr std::size_t lshift = 12U;
         constexpr std::size_t rshift = 4U;
         auto seed = std::hash<std::uint32_t> {}(key.game_id);
-        seed ^= static_cast<std::size_t>(key.encoded_move) + phi
-            + (seed << lshift) + (seed >> rshift);
+        seed ^= static_cast<std::size_t>(key.encoded_move) + phi + (seed << lshift) + (seed >> rshift);
         return seed;
     }
 };
@@ -65,8 +61,7 @@ struct continuation_aggregate
     std::map<std::string, std::uint32_t, std::less<>> eco_counts;
 };
 
-auto average_elo(std::int64_t const sum, std::uint32_t const count)
-    -> std::optional<double>
+auto average_elo(std::int64_t const sum, std::uint32_t const count) -> std::optional<double>
 {
     if (count == 0U) {
         return std::nullopt;
@@ -89,9 +84,7 @@ void note_result(continuation_aggregate& aggregate, std::int8_t const result)
     ++aggregate.draws;
 }
 
-void note_elo(continuation_aggregate& aggregate,
-              std::optional<std::int16_t> const& white_elo,
-              std::optional<std::int16_t> const& black_elo)
+void note_elo(continuation_aggregate& aggregate, std::optional<std::int16_t> const& white_elo, std::optional<std::int16_t> const& black_elo)
 {
     if (white_elo.has_value()) {
         aggregate.white_elo_sum += static_cast<std::int64_t>(*white_elo);
@@ -103,10 +96,7 @@ void note_elo(continuation_aggregate& aggregate,
     }
 }
 
-void note_opening_name(
-    std::map<std::string, std::string, std::less<>>& eco_lookup,
-    std::string const& eco,
-    std::string const& opening_name)
+void note_opening_name(std::map<std::string, std::string, std::less<>>& eco_lookup, std::string const& eco, std::string const& opening_name)
 {
     auto const [lookup_it, inserted] = eco_lookup.emplace(eco, opening_name);
     if (!inserted && opening_name.size() > lookup_it->second.size()) {
@@ -114,18 +104,14 @@ void note_opening_name(
     }
 }
 
-auto dominant_eco(continuation_aggregate const& aggregate)
-    -> std::optional<std::string>
+auto dominant_eco(continuation_aggregate const& aggregate) -> std::optional<std::string>
 {
     if (aggregate.eco_counts.empty()) {
         return std::nullopt;
     }
 
     auto best = aggregate.eco_counts.begin();
-    for (auto it = std::next(aggregate.eco_counts.begin());
-         it != aggregate.eco_counts.end();
-         ++it)
-    {
+    for (auto it = std::next(aggregate.eco_counts.begin()); it != aggregate.eco_counts.end(); ++it) {
         if (it->second > best->second) {
             best = it;
         }
@@ -135,9 +121,7 @@ auto dominant_eco(continuation_aggregate const& aggregate)
     return best->first;
 }
 
-auto replay_position(motif::db::game_context const& context,
-                     std::uint16_t const ply)
-    -> motif::search::result<chesslib::board>
+auto replay_position(motif::db::game_context const& context, std::uint16_t const ply) -> motif::search::result<chesslib::board>
 {
     auto board = chesslib::board {};
 
@@ -160,8 +144,7 @@ namespace motif::search::opening_stats
 {
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto query(motif::db::database_manager const& database,
-           std::uint64_t const zobrist_hash) -> result<stats>
+auto query(motif::db::database_manager const& database, std::uint64_t const zobrist_hash) -> result<stats>
 {
     auto opening_moves = database.positions().query_opening_moves(zobrist_hash);
     if (!opening_moves) {
@@ -193,9 +176,7 @@ auto query(motif::db::database_manager const& database,
         if (ctx_it == contexts->end()) {
             continue;
         }
-        if (static_cast<std::size_t>(move_row.ply)
-            >= ctx_it->second.moves.size())
-        {
+        if (static_cast<std::size_t>(move_row.ply) >= ctx_it->second.moves.size()) {
             continue;
         }
         auto replayed = replay_position(ctx_it->second, move_row.ply);
@@ -212,8 +193,7 @@ auto query(motif::db::database_manager const& database,
 
     auto grouped = std::map<std::uint16_t, continuation_aggregate> {};
     auto eco_lookup = std::map<std::string, std::string, std::less<>> {};
-    auto seen =
-        std::unordered_map<continuation_key, bool, continuation_key_hash> {};
+    auto seen = std::unordered_map<continuation_key, bool, continuation_key_hash> {};
 
     for (auto const& move_row : *opening_moves) {
         auto const ctx_it = contexts->find(move_row.game_id);
@@ -226,23 +206,18 @@ auto query(motif::db::database_manager const& database,
             continue;
         }
 
-        auto const encoded_continuation =
-            context.moves[static_cast<std::size_t>(move_row.ply)];
+        auto const encoded_continuation = context.moves[static_cast<std::size_t>(move_row.ply)];
 
-        auto const key = continuation_key {
-            .game_id = move_row.game_id, .encoded_move = encoded_continuation};
+        auto const key = continuation_key {.game_id = move_row.game_id, .encoded_move = encoded_continuation};
         if (seen.contains(key)) {
             continue;
         }
         seen.emplace(key, true);
 
-        auto& aggregate =
-            grouped.try_emplace(encoded_continuation, continuation_aggregate {})
-                .first->second;
+        auto& aggregate = grouped.try_emplace(encoded_continuation, continuation_aggregate {}).first->second;
         aggregate.encoded_move = encoded_continuation;
         if (aggregate.frequency == 0U) {
-            auto const cont_move =
-                chesslib::codec::decode(encoded_continuation);
+            auto const cont_move = chesslib::codec::decode(encoded_continuation);
             auto child_board = position;
             chesslib::move_maker {child_board, cont_move}.make();
             aggregate.result_hash = child_board.hash();
@@ -270,9 +245,7 @@ auto query(motif::db::database_manager const& database,
         auto eco = dominant_eco(aggregate);
         auto opening_name = std::optional<std::string> {};
         if (eco.has_value()) {
-            if (auto lookup_it = eco_lookup.find(*eco);
-                lookup_it != eco_lookup.end())
-            {
+            if (auto lookup_it = eco_lookup.find(*eco); lookup_it != eco_lookup.end()) {
                 opening_name = lookup_it->second;
             }
         }
@@ -287,25 +260,22 @@ auto query(motif::db::database_manager const& database,
             .white_wins = aggregate.white_wins,
             .draws = aggregate.draws,
             .black_wins = aggregate.black_wins,
-            .average_white_elo =
-                average_elo(aggregate.white_elo_sum, aggregate.white_elo_count),
-            .average_black_elo =
-                average_elo(aggregate.black_elo_sum, aggregate.black_elo_count),
+            .average_white_elo = average_elo(aggregate.white_elo_sum, aggregate.white_elo_count),
+            .average_black_elo = average_elo(aggregate.black_elo_sum, aggregate.black_elo_count),
             .eco = std::move(eco),
             .opening_name = std::move(opening_name),
         });
     }
 
-    std::ranges::sort(
-        output.continuations,
-        [](continuation const& left, continuation const& right) -> bool
-        {
-            if (left.frequency != right.frequency) {
-                return left.frequency > right.frequency;
-            }
+    std::ranges::sort(output.continuations,
+                      [](continuation const& left, continuation const& right) -> bool
+                      {
+                          if (left.frequency != right.frequency) {
+                              return left.frequency > right.frequency;
+                          }
 
-            return left.san < right.san;
-        });
+                          return left.san < right.san;
+                      });
 
     return output;
 }

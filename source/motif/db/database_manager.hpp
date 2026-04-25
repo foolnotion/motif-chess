@@ -36,14 +36,12 @@ class database_manager
 
     // Create a new bundle at dir. Fails with io_failure if games.db already
     // exists at that path.
-    static auto create(std::filesystem::path const& dir,
-                       std::string const& name) -> result<database_manager>;
+    static auto create(std::filesystem::path const& dir, std::string const& name) -> result<database_manager>;
 
     // Open an existing bundle. Fails with not_found if games.db or
     // manifest.json are absent; fails with schema_mismatch if PRAGMA
     // user_version does not match schema::k_version.
-    static auto open(std::filesystem::path const& dir)
-        -> result<database_manager>;
+    static auto open(std::filesystem::path const& dir) -> result<database_manager>;
 
     // Access the SQLite game store for CRUD operations.
     [[nodiscard]] auto store() noexcept -> game_store&;

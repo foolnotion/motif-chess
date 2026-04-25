@@ -26,8 +26,7 @@ struct disk_db
 
     explicit disk_db(std::string const& suffix)
     {
-        path = std::filesystem::temp_directory_path()
-            / ("motif_schema_test_" + suffix + ".db");
+        path = std::filesystem::temp_directory_path() / ("motif_schema_test_" + suffix + ".db");
         sqlite3_open(path.c_str(), &conn);
     }
 
@@ -47,8 +46,7 @@ struct disk_db
 
 }  // namespace
 
-TEST_CASE("schema::initialize on a fresh on-disk database succeeds",
-          "[motif-db][schema]")
+TEST_CASE("schema::initialize on a fresh on-disk database succeeds", "[motif-db][schema]")
 {
     disk_db ddb {"init"};
     REQUIRE(ddb.conn != nullptr);
@@ -57,8 +55,7 @@ TEST_CASE("schema::initialize on a fresh on-disk database succeeds",
     REQUIRE(res.has_value());
 }
 
-TEST_CASE("schema::initialize is idempotent — second call also succeeds",
-          "[motif-db][schema]")
+TEST_CASE("schema::initialize is idempotent — second call also succeeds", "[motif-db][schema]")
 {
     disk_db ddb {"idempotent"};
     REQUIRE(ddb.conn != nullptr);
@@ -70,8 +67,7 @@ TEST_CASE("schema::initialize is idempotent — second call also succeeds",
     REQUIRE(second.has_value());
 }
 
-TEST_CASE("schema::version returns k_version after initialize",
-          "[motif-db][schema]")
+TEST_CASE("schema::version returns k_version after initialize", "[motif-db][schema]")
 {
     disk_db ddb {"version"};
     REQUIRE(ddb.conn != nullptr);
@@ -85,8 +81,7 @@ TEST_CASE("schema::version returns k_version after initialize",
     REQUIRE(*ver == motif::db::schema::current_version);
 }
 
-TEST_CASE("schema::version on fresh connection returns 0 (not yet initialized)",
-          "[motif-db][schema]")
+TEST_CASE("schema::version on fresh connection returns 0 (not yet initialized)", "[motif-db][schema]")
 {
     disk_db ddb {"zero"};
     REQUIRE(ddb.conn != nullptr);
@@ -97,9 +92,7 @@ TEST_CASE("schema::version on fresh connection returns 0 (not yet initialized)",
     REQUIRE(*ver == 0U);
 }
 
-TEST_CASE(
-    "schema::initialize on :memory: succeeds (WAL falls back to memory mode)",
-    "[motif-db][schema]")
+TEST_CASE("schema::initialize on :memory: succeeds (WAL falls back to memory mode)", "[motif-db][schema]")
 {
     sqlite3* conn = open_memory();
     REQUIRE(conn != nullptr);

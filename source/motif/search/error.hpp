@@ -19,8 +19,7 @@ enum class error_code : std::uint8_t
 template<typename T>
 using result = tl::expected<T, error_code>;
 
-[[nodiscard]] constexpr auto to_string(error_code code) noexcept
-    -> std::string_view
+[[nodiscard]] constexpr auto to_string(error_code code) noexcept -> std::string_view
 {
     switch (code) {
         case error_code::ok:

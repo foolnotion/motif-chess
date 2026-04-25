@@ -25,8 +25,7 @@ namespace
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto now_iso8601() -> std::string
 {
-    auto const now = std::chrono::floor<std::chrono::seconds>(
-        std::chrono::system_clock::now());
+    auto const now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     return fmt::format("{:%Y-%m-%dT%H:%M:%S}Z", now);
 }
 
@@ -42,8 +41,7 @@ auto make_manifest(std::string const& name) -> db_manifest
     };
 }
 
-auto write_manifest(std::filesystem::path const& path,
-                    db_manifest const& manifest) -> result<void>
+auto write_manifest(std::filesystem::path const& path, db_manifest const& manifest) -> result<void>
 {
     std::string buffer;
     auto const write_err = glz::write_json(manifest, buffer);

@@ -14,8 +14,7 @@
 namespace motif::import
 {
 
-auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key)
-    -> std::string
+auto find_tag(std::vector<pgn::tag> const& tags, std::string_view key) -> std::string
 {
     for (auto const& tag : tags) {
         if (tag.key == key) {
@@ -35,9 +34,7 @@ auto parse_elo(std::string const& raw) -> std::optional<std::int16_t>
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     auto const* const fin = raw.data() + raw.size();
     auto const parsed = std::from_chars(beg, fin, val);
-    if (parsed.ec != std::errc {} || parsed.ptr != fin || val < 0
-        || val > std::numeric_limits<std::int16_t>::max())
-    {
+    if (parsed.ec != std::errc {} || parsed.ptr != fin || val < 0 || val > std::numeric_limits<std::int16_t>::max()) {
         return std::nullopt;
     }
     return static_cast<std::int16_t>(val);

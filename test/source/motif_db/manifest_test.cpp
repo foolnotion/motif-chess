@@ -16,8 +16,7 @@ struct tmp_file
 
     explicit tmp_file(std::string const& suffix)
     {
-        path = std::filesystem::temp_directory_path()
-            / ("motif_manifest_test_" + suffix + ".json");
+        path = std::filesystem::temp_directory_path() / ("motif_manifest_test_" + suffix + ".json");
     }
 
     ~tmp_file() { std::filesystem::remove(path); }
@@ -30,8 +29,7 @@ struct tmp_file
 
 }  // namespace
 
-TEST_CASE("manifest: glaze round-trip preserves all fields",
-          "[motif-db][manifest]")
+TEST_CASE("manifest: glaze round-trip preserves all fields", "[motif-db][manifest]")
 {
     motif::db::db_manifest const original {
         .name = "round-trip-db",
@@ -55,18 +53,15 @@ TEST_CASE("manifest: glaze round-trip preserves all fields",
     CHECK(loaded.created_at == original.created_at);
 }
 
-TEST_CASE("manifest: read_manifest returns not_found for missing file",
-          "[motif-db][manifest]")
+TEST_CASE("manifest: read_manifest returns not_found for missing file", "[motif-db][manifest]")
 {
-    auto const missing_path = std::filesystem::temp_directory_path()
-        / "motif_manifest_does_not_exist_xyz.json";
+    auto const missing_path = std::filesystem::temp_directory_path() / "motif_manifest_does_not_exist_xyz.json";
     auto res = motif::db::read_manifest(missing_path);
     REQUIRE_FALSE(res.has_value());
     CHECK(res.error() == motif::db::error_code::not_found);
 }
 
-TEST_CASE("manifest: make_manifest populates all fields with non-empty values",
-          "[motif-db][manifest]")
+TEST_CASE("manifest: make_manifest populates all fields with non-empty values", "[motif-db][manifest]")
 {
     auto const manifest = motif::db::make_manifest("test-db");
     CHECK(manifest.name == "test-db");
@@ -75,8 +70,7 @@ TEST_CASE("manifest: make_manifest populates all fields with non-empty values",
     CHECK_FALSE(manifest.created_at.empty());
 }
 
-TEST_CASE("manifest: round-trip with zero game_count and empty extra fields",
-          "[motif-db][manifest]")
+TEST_CASE("manifest: round-trip with zero game_count and empty extra fields", "[motif-db][manifest]")
 {
     motif::db::db_manifest const original {
         .name = "empty-db",

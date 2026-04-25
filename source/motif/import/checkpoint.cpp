@@ -15,14 +15,12 @@
 namespace motif::import
 {
 
-auto checkpoint_path(std::filesystem::path const& db_dir)
-    -> std::filesystem::path
+auto checkpoint_path(std::filesystem::path const& db_dir) -> std::filesystem::path
 {
     return db_dir / "import.checkpoint.json";
 }
 
-auto write_checkpoint(std::filesystem::path const& db_dir,
-                      import_checkpoint const& checkpoint) -> result<void>
+auto write_checkpoint(std::filesystem::path const& db_dir, import_checkpoint const& checkpoint) -> result<void>
 {
     std::string buffer;
     auto const write_err = glz::write_json(checkpoint, buffer);
@@ -41,8 +39,7 @@ auto write_checkpoint(std::filesystem::path const& db_dir,
     return {};
 }
 
-auto read_checkpoint(std::filesystem::path const& db_dir)
-    -> result<import_checkpoint>
+auto read_checkpoint(std::filesystem::path const& db_dir) -> result<import_checkpoint>
 {
     auto const path = checkpoint_path(db_dir);
     std::error_code fserr;

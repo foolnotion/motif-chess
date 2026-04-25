@@ -45,9 +45,7 @@ constexpr std::array<std::string_view, 11> known_tag_keys = {
 
 auto is_known_tag(std::string_view key) noexcept -> bool
 {
-    return std::ranges::any_of(known_tag_keys,
-                               [&](std::string_view known) -> bool
-                               { return key == known; });
+    return std::ranges::any_of(known_tag_keys, [&](std::string_view known) -> bool { return key == known; });
 }
 
 auto extract_game(pgn::game const& pgn_game) -> motif::db::game
@@ -64,37 +62,27 @@ auto extract_game(pgn::game const& pgn_game) -> motif::db::game
     auto const date_raw = find_tag(tags, "Date");
     auto const eco_raw = find_tag(tags, "ECO");
 
-    auto const valid_date = (!date_raw.empty() && date_raw != "????.??.??")
-        ? std::optional<std::string> {date_raw}
-        : std::nullopt;
+    auto const valid_date = (!date_raw.empty() && date_raw != "????.??.??") ? std::optional<std::string> {date_raw} : std::nullopt;
 
     motif::db::game dbg;
     dbg.white.name = find_tag(tags, "White");
-    dbg.white.elo =
-        white_elo ? std::optional<std::int32_t> {*white_elo} : std::nullopt;
-    dbg.white.title = white_title_raw.empty()
-        ? std::nullopt
-        : std::optional<std::string> {white_title_raw};
+    dbg.white.elo = white_elo ? std::optional<std::int32_t> {*white_elo} : std::nullopt;
+    dbg.white.title = white_title_raw.empty() ? std::nullopt : std::optional<std::string> {white_title_raw};
 
     dbg.black.name = find_tag(tags, "Black");
-    dbg.black.elo =
-        black_elo ? std::optional<std::int32_t> {*black_elo} : std::nullopt;
-    dbg.black.title = black_title_raw.empty()
-        ? std::nullopt
-        : std::optional<std::string> {black_title_raw};
+    dbg.black.elo = black_elo ? std::optional<std::int32_t> {*black_elo} : std::nullopt;
+    dbg.black.title = black_title_raw.empty() ? std::nullopt : std::optional<std::string> {black_title_raw};
 
     if (!event_name.empty()) {
         dbg.event_details = motif::db::event {
             .name = event_name,
-            .site = site_raw.empty() ? std::nullopt
-                                     : std::optional<std::string> {site_raw},
+            .site = site_raw.empty() ? std::nullopt : std::optional<std::string> {site_raw},
             .date = valid_date,
         };
     }
 
     dbg.date = valid_date;
-    dbg.eco =
-        eco_raw.empty() ? std::nullopt : std::optional<std::string> {eco_raw};
+    dbg.eco = eco_raw.empty() ? std::nullopt : std::optional<std::string> {eco_raw};
     dbg.result = pgn_result_to_string(pgn_game.result);
 
     for (auto const& tag : tags) {
@@ -108,8 +96,7 @@ auto extract_game(pgn::game const& pgn_game) -> motif::db::game
 
 }  // namespace
 
-import_worker::import_worker(motif::db::game_store& store,
-                             motif::db::position_store& positions) noexcept
+import_worker::import_worker(motif::db::game_store& store, motif::db::position_store& positions) noexcept
     : store_ {store}
     , positions_ {positions}
 {

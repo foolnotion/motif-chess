@@ -21,8 +21,7 @@ struct db_manifest
 // Create a new manifest with current UTC timestamp and game_count = 0.
 auto make_manifest(std::string const& name) -> db_manifest;
 
-auto write_manifest(std::filesystem::path const& path,
-                    db_manifest const& manifest) -> result<void>;
+auto write_manifest(std::filesystem::path const& path, db_manifest const& manifest) -> result<void>;
 
 auto read_manifest(std::filesystem::path const& path) -> result<db_manifest>;
 
