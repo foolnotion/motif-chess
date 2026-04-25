@@ -43,3 +43,7 @@
 
 - NFR02 AC1 gap: p99 reaches 700ms on 1M corpus for high-fanout positions (e.g., after 1.e4), 200ms over the 500ms target. Not critical; will decide later whether to address. Fix path: extract only `moves[2*ply]` from moves blob instead of full deserialization, or cache game contexts per query [opening_stats.cpp, position_store.cpp].
 - `dominant_eco` tie-break rule (alphabetical ECO code on count ties) documented only in `.cpp` comment, not in `opening_stats.hpp` public API — Story 3.3 depends on output shape; the tie-break rule should appear in the header.
+
+## Deferred from: code review of 4b-1-http-server-scaffold.md (2026-04-25)
+
+- Baseline dev build reports clang-tidy/cppcheck warnings outside Story 4b.1 touched files (for example `source/motif/db/database_manager.cpp:444`), so AC5 zero-warning verification remains blocked by pre-existing issues.

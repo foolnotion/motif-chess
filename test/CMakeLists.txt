@@ -53,6 +53,17 @@ target_compile_definitions(
 )
 catch_discover_tests(motif_search_test)
 
+add_executable(motif_http_test
+    source/motif_http/http_server_test.cpp
+)
+target_link_libraries(motif_http_test PRIVATE motif_http motif_import Catch2::Catch2WithMain)
+target_compile_features(motif_http_test PRIVATE cxx_std_23)
+target_include_directories(motif_http_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
+target_compile_definitions(
+    motif_http_test PRIVATE MOTIF_PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+catch_discover_tests(motif_http_test)
+
 # ---- End-of-file commands ----
 
 add_folders(Test)
