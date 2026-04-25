@@ -111,6 +111,9 @@
                 uv
 
                 nodejs_24
+
+                # CI local runner
+                act
               ]);
 
             buildInputs =
