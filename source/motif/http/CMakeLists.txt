@@ -19,6 +19,7 @@ target_link_libraries(motif_http
         motif_db
     PRIVATE
         motif_search
+        motif_import
 )
 
 target_compile_features(motif_http PUBLIC cxx_std_23)

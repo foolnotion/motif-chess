@@ -47,3 +47,36 @@
 ## Deferred from: code review of 4b-1-http-server-scaffold.md (2026-04-25)
 
 - Baseline dev build reports clang-tidy/cppcheck warnings outside Story 4b.1 touched files (for example `source/motif/db/database_manager.cpp:444`), so AC5 zero-warning verification remains blocked by pre-existing issues.
+
+## Deferred from: code review of 4b-5-game-list-endpoint (2026-04-25)
+
+- `game_continuation_context` struct and `get_continuation_contexts` method added out of scope — possible prep work for tree view / story 4b.6 extension; belongs to opening stats feature [types.hpp, game_store.hpp, game_store.cpp]
+- `import_workers` vector grows without bound; completed `jthread`s never pruned [server.cpp] — from story 4b-4, not actionable in this story
+- SSE progress handler dereferences `session->pipeline` without null guard [server.cpp] — from story 4b-4
+- `memory_order_relaxed` for `failed` flag fragile; relies on implicit sequencing after acquire load of `done` [server.cpp] — from story 4b-4; document ordering proof or upgrade to `acquire`
+- `get_continuation_contexts` silently drops entries with zero-length move blob — output vector smaller than input with no correlation [game_store.cpp] — out of scope for this story
+- Hardcoded port numbers in all HTTP tests flake on parallel runs [http_server_test.cpp] — pre-existing pattern across all stories
+- Non-const `get_continuation_contexts` delegates to const via `const_cast` with no rationale [game_store.cpp] — out of scope
+- Import DELETE test does not verify early termination — passes even if `request_stop` is a no-op [http_server_test.cpp] — from story 4b-4
+- Dynamic SQL in `get_continuation_contexts` has no guard against `SQLITE_LIMIT_VARIABLE_NUMBER` (300 × 3 = 900 vars; limit 999) [game_store.cpp] — out of scope
+- `sessions` map never evicts completed import sessions — unbounded growth over many imports [server.cpp] — from story 4b-4
+- SSE chunk provider loops forever if worker thread deadlocks before `done.store` [server.cpp] — from story 4b-4
+- TOCTOU: file readability checked before async pipeline opens it [server.cpp] — from story 4b-4; design choice
+
+## Deferred from: code review of 4b-6-single-game-retrieval-endpoint (2026-04-25)
+
+- `std::jthread` constructor can throw `std::system_error` in POST /api/imports — orphaned session with `done=false` permanently blocks all future imports [source/motif/http/server.cpp] — 4b-4 code
+- `import_session::pgn_path` field never assigned after construction — dead field, reads will return empty path [source/motif/http/server.cpp] — 4b-4 code
+- SSE error event embeds `session->error_message` directly into format string without JSON escaping — malformed JSON if message contains `"`, `\`, or newline [source/motif/http/server.cpp] — 4b-4 code
+- SSE chunked content provider calls `sleep_for(250ms)` on httplib's thread — blocks thread pool slot for the full poll interval, exhausted under concurrent imports [source/motif/http/server.cpp] — 4b-4 code
+- `error_message` and `summary` written by worker, read by SSE callback — correctness relies on undocumented release/acquire ordering through `done`; one refactor away from a data race [source/motif/http/server.cpp] — 4b-4 code
+- `cancel_requested` atomic is set by DELETE handler but never read anywhere — dead state, misleading in a concurrency-sensitive struct [source/motif/http/server.cpp] — 4b-4 code
+- `import_pipeline` and `import_session` constructed before the active-import conflict check — resources wasted on every 409 response [source/motif/http/server.cpp] — 4b-4 code
+- `game_response::result` is an unvalidated `std::string` — corrupt or non-standard DB values propagate directly into API responses [source/motif/http/server.cpp] — design gap, no spec requirement to validate at HTTP layer
+- Destructor iterates `sessions` under `sessions_mutex` while `import_workers` jthreads join implicitly after the lock-guarded body exits — worker threads may still be running when destructor returns [source/motif/http/server.cpp] — 4b-4 code
+- `opening_stats_endpoint_limit` set to 500ms (5× the position-search budget) with no documented rationale [test/source/motif_http/http_server_test.cpp] — 4b-3 code
+
+## Deferred from: code review of 4b-3-opening-stats-endpoint (2026-04-25)
+
+- `glz::write_json` error discarded — serialization failure returns 200 with empty body [server.cpp:199] — pre-existing pattern, all route handlers in server.cpp use the same `[[maybe_unused]]` suppression
+- Server thread may outlive `srv` on `wait_for_ready` failure [http_server_test.cpp] — pre-existing test pattern, `std::terminate` hazard on REQUIRE failure before join
