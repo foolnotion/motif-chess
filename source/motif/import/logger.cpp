@@ -39,7 +39,7 @@ constexpr std::size_t rotate_file_count = 3;
 constexpr std::uintmax_t rotate_max_bytes =
     5ULL * 1024ULL * 1024ULL;  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 constexpr std::array<std::string_view, 3> logger_names {"motif.db", "motif.import", "motif.search"};
-constexpr unsigned char control_character_limit = 0x20U;
+constexpr std::uint8_t control_character_limit = 0x20U;
 
 auto logging_mutex() -> std::mutex&
 {
@@ -70,7 +70,7 @@ auto escape_json_string(std::string_view value) -> std::string
     escaped.reserve(value.size());
 
     for (const auto character : value) {
-        const auto code = static_cast<unsigned char>(character);
+        const auto code = static_cast<std::uint8_t>(character);
         switch (character) {
             case '\\':
                 escaped += "\\\\";
