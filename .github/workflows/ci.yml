@@ -133,14 +133,16 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install clang-21 and static analyzers
+    - name: Install LLVM 21
+      if: matrix.os == 'ubuntu-24.04'
+      uses: KyleMayes/install-llvm-action@v2
+      with: { version: "21" }
+
+    - name: Install static analyzers
       if: matrix.os == 'ubuntu-24.04'
       run: |
-        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
-        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
-        sudo apt-get update -q
-        sudo apt-get install clang-21 clang-tidy-21 cppcheck -y -q
-        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-21 210
+        sudo apt-get install cppcheck -y -q
+        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy "$(which clang-tidy-21)" 210
 
     - name: Install vcpkg
       uses: friendlyanon/setup-vcpkg@v1
