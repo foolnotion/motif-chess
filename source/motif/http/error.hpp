@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstdint>
+
 #include <tl/expected.hpp>
 
 namespace motif::http
 {
 
-enum class error_code : unsigned char
+enum class error_code : std::uint8_t
 {
     ok,
     db_open_failed,
