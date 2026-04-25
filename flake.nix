@@ -77,6 +77,7 @@
               spdlog
               sqlite
               duckdb
+              httplib
               reproc
               lexy
               chesslib.packages.${system}.default
@@ -117,6 +118,9 @@
               ++ (with pkgs; [
                 # testing
                 catch2_3
+
+                # HTTP server (needed for CMake find_package in fresh configures)
+                httplib
 
                 # debugging / profiling
                 cpptrace
