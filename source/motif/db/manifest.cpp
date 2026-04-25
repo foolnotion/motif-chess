@@ -7,7 +7,7 @@
 #include <string>
 #include <system_error>
 
-#include <fmt/chrono.h>  // NOLINT(misc-include-cleaner) — provides chrono format specialisations
+#include <fmt/chrono.h>  // NOLINT(misc-include-cleaner) — provides chrono format specializations
 #include <fmt/format.h>
 #include <glaze/json/read.hpp>
 #include <glaze/json/write.hpp>

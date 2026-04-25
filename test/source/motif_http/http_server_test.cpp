@@ -439,7 +439,7 @@ TEST_CASE(
 
 // NOLINTEND(readability-function-cognitive-complexity)
 
-TEST_CASE("server: position search honours limit parameter", "[motif-http]")
+TEST_CASE("server: position search honors limit parameter", "[motif-http]")
 {
     constexpr std::uint64_t page_hash {42};
     constexpr std::size_t page_total {10};

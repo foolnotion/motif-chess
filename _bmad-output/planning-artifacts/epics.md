@@ -788,7 +788,7 @@ So that I can step through any game in my database without reaching for the mous
 
 **Given** high-DPI display scaling is active
 **When** the board renders
-**Then** pieces and squares are crisp with no blurry scaling artefacts (FR27)
+**Then** pieces and squares are crisp with no blurry scaling artifacts (FR27)
 
 ### Story 4.3: Game List Browser
 
@@ -885,7 +885,7 @@ So that I can get engine evaluations without leaving the application.
 
 As a user,
 I want to see engine depth, score, and principal variation updating in real time, and have engine crashes never crash the application,
-So that I can analyse positions safely even with unstable third-party engines.
+So that I can analyze positions safely even with unstable third-party engines.
 
 **Acceptance Criteria:**
 
@@ -968,7 +968,7 @@ So that I have a structured preparation reference I can return to.
 
 As a user,
 I want to drill my repertoire lines in a practice mode where the application plays the opponent's moves and I respond,
-So that I can memorise my preparation through active recall.
+So that I can memorize my preparation through active recall.
 
 **Acceptance Criteria:**
 
@@ -989,7 +989,7 @@ Users receive a personalized opening repertoire generated from analysis of their
 ### Story 8.1: Corpus Analysis & Player Profiling
 
 As a user,
-I want the system to analyse my game corpus and produce a profile of my playing style, strengths, and theoretical weaknesses,
+I want the system to analyze my game corpus and produce a profile of my playing style, strengths, and theoretical weaknesses,
 So that I have a data-driven foundation for personalised repertoire recommendations.
 
 **Acceptance Criteria:**
@@ -1008,7 +1008,7 @@ So that I receive concrete preparation recommendations tailored to my current ab
 
 **Given** a player profile from Story 8.1 exists
 **When** repertoire generation runs
-**Then** a repertoire proposal is produced covering both colours, accounting for the player's current strength, preferred piece structures, and identified theoretical gaps (FR44, FR45)
+**Then** a repertoire proposal is produced covering both colors, accounting for the player's current strength, preferred piece structures, and identified theoretical gaps (FR44, FR45)
 
 **Given** the player's corpus grows with new games
 **When** the user re-runs repertoire generation

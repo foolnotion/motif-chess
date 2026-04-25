@@ -169,7 +169,7 @@ claude-sonnet-4-6
 - `llvm-prefer-static-over-anonymous-namespace` and `misc-use-anonymous-namespace` fire simultaneously on the same code (directly contradictory checks). Anonymous namespace is kept (C++ standard preference); NOLINT suppresses the LLVM-specific check on each affected free function.
 - `bugprone-unchecked-optional-access` fires on `.value()` after a Catch2 `REQUIRE(opt.has_value())` because clang-tidy cannot model the REQUIRE macro's control flow. Suppressed with NOLINT on that single line.
 - Duplicate detection key: `(white_id, black_id, COALESCE(event_id, -1), COALESCE(date, ''), result, moves)` — COALESCE is needed because SQLite treats NULL as distinct in UNIQUE indexes, so two games with NULL event_id would not be caught as duplicates without it.
-- `find_or_insert_player` and `find_or_insert_event` deduplicate by name only; the first-inserted row's other fields win on subsequent inserts for the same name. This is documented behaviour.
+- `find_or_insert_player` and `find_or_insert_event` deduplicate by name only; the first-inserted row's other fields win on subsequent inserts for the same name. This is documented behavior.
 - `PRAGMA foreign_keys = ON` is set in `create_schema()` and persists for the connection lifetime; `ON DELETE CASCADE` on `game_tag.game_id` handles tag cleanup in `remove()`.
 
 ### Completion Notes List
