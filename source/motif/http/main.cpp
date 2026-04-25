@@ -62,16 +62,16 @@ auto parse_args(std::span<char const* const> argv) -> std::optional<cli_args>
     }
 
     if (args.db_path.empty()) {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe) — called before any threads
-        // start
+        // Called before any threads start.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe)
         if (auto const* env_path = std::getenv("MOTIF_DB_PATH")) {
             args.db_path = env_path;
         }
     }
 
     if (args.port == motif::http::server::default_port) {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe) — called before any threads
-        // start
+        // Called before any threads start.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe)
         if (auto const* env_port = std::getenv("MOTIF_HTTP_PORT")) {
             if (auto const port_opt = parse_port(std::string_view {env_port})) {
                 args.port = *port_opt;

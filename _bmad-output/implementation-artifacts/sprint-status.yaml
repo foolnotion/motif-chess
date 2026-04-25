@@ -1,5 +1,5 @@
 # generated: 2026-04-14
-# last_updated: 2026-04-25
+# last_updated: 2026-04-25  # 4b-6 code review done
 # project: motif-chess
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-25
+last_updated: 2026-04-25  # 4b-6 code review done
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -77,10 +77,10 @@ development_status:
   epic-4b: in-progress
   4b-1-http-server-scaffold: done
   4b-2-position-search-endpoint: done
-  4b-3-opening-stats-endpoint: backlog
-  4b-4-import-trigger-sse-progress-stream: backlog
-  4b-5-game-list-endpoint: backlog
-  4b-6-single-game-retrieval-endpoint: backlog
+  4b-3-opening-stats-endpoint: done
+  4b-4-import-trigger-sse-progress-stream: done
+  4b-5-game-list-endpoint: done
+  4b-6-single-game-retrieval-endpoint: done
   epic-4b-retrospective: optional
 
   # ─── Epic 4: Desktop Application (DEFERRED — Epic 4b takes priority) ───────

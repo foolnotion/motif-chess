@@ -5,6 +5,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -18,6 +19,7 @@
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
+#include "motif/db/error.hpp"
 #include "motif/db/types.hpp"
 #include "motif/search/error.hpp"
 
@@ -121,16 +123,16 @@ auto dominant_eco(continuation_aggregate const& aggregate) -> std::optional<std:
     return best->first;
 }
 
-auto replay_position(motif::db::game_context const& context, std::uint16_t const ply) -> motif::search::result<chesslib::board>
+auto replay_position(std::span<std::uint16_t const> moves, std::uint16_t const ply) -> motif::search::result<chesslib::board>
 {
     auto board = chesslib::board {};
 
     for (std::size_t index = 0; index < ply; ++index) {
-        if (index >= context.moves.size()) {
+        if (index >= moves.size()) {
             return tl::unexpected {motif::search::error_code::io_failure};
         }
 
-        auto const move = chesslib::codec::decode(context.moves[index]);
+        auto const move = chesslib::codec::decode(moves[index]);
         chesslib::move_maker maker {board, move};
         maker.make();
     }
@@ -155,31 +157,20 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
         return stats {};
     }
 
-    auto game_ids = std::vector<std::uint32_t> {};
-    game_ids.reserve(opening_moves->size());
-    for (auto const& move_row : *opening_moves) {
-        game_ids.push_back(move_row.game_id);
-    }
-    std::ranges::sort(game_ids);
-    auto const unique_end = std::ranges::unique(game_ids);
-    game_ids.erase(unique_end.begin(), unique_end.end());
-
-    auto contexts = database.store().get_game_contexts(game_ids);
-    if (!contexts) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
     auto position = chesslib::board {};
     bool position_set = false;
     for (auto const& move_row : *opening_moves) {
-        auto const ctx_it = contexts->find(move_row.game_id);
-        if (ctx_it == contexts->end()) {
+        auto context = database.store().get_opening_context(move_row.game_id);
+        if (!context) {
+            if (context.error() != motif::db::error_code::not_found) {
+                return tl::unexpected {error_code::io_failure};
+            }
             continue;
         }
-        if (static_cast<std::size_t>(move_row.ply) >= ctx_it->second.moves.size()) {
+        if (static_cast<std::size_t>(move_row.ply) >= context->moves.size()) {
             continue;
         }
-        auto replayed = replay_position(ctx_it->second, move_row.ply);
+        auto replayed = replay_position(context->moves, move_row.ply);
         if (replayed) {
             position = *replayed;
             position_set = true;
@@ -191,40 +182,33 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
         return stats {};
     }
 
+    auto continuation_contexts = database.store().get_continuation_contexts(*opening_moves);
+    if (!continuation_contexts) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
     auto grouped = std::map<std::uint16_t, continuation_aggregate> {};
     auto eco_lookup = std::map<std::string, std::string, std::less<>> {};
     auto seen = std::unordered_map<continuation_key, bool, continuation_key_hash> {};
 
-    for (auto const& move_row : *opening_moves) {
-        auto const ctx_it = contexts->find(move_row.game_id);
-        if (ctx_it == contexts->end()) {
-            continue;
-        }
-        auto const& context = ctx_it->second;
-
-        if (static_cast<std::size_t>(move_row.ply) >= context.moves.size()) {
-            continue;
-        }
-
-        auto const encoded_continuation = context.moves[static_cast<std::size_t>(move_row.ply)];
-
-        auto const key = continuation_key {.game_id = move_row.game_id, .encoded_move = encoded_continuation};
+    for (auto const& context : *continuation_contexts) {
+        auto const key = continuation_key {.game_id = context.game_id, .encoded_move = context.encoded_move};
         if (seen.contains(key)) {
             continue;
         }
         seen.emplace(key, true);
 
-        auto& aggregate = grouped.try_emplace(encoded_continuation, continuation_aggregate {}).first->second;
-        aggregate.encoded_move = encoded_continuation;
+        auto& aggregate = grouped.try_emplace(context.encoded_move, continuation_aggregate {}).first->second;
+        aggregate.encoded_move = context.encoded_move;
         if (aggregate.frequency == 0U) {
-            auto const cont_move = chesslib::codec::decode(encoded_continuation);
+            auto const cont_move = chesslib::codec::decode(context.encoded_move);
             auto child_board = position;
             chesslib::move_maker {child_board, cont_move}.make();
             aggregate.result_hash = child_board.hash();
         }
         ++aggregate.frequency;
-        note_result(aggregate, move_row.result);
-        note_elo(aggregate, move_row.white_elo, move_row.black_elo);
+        note_result(aggregate, context.result);
+        note_elo(aggregate, context.white_elo, context.black_elo);
 
         auto const eco = context.eco;
         if (eco.has_value()) {
