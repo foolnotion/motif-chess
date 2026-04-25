@@ -238,6 +238,160 @@ TEST_CASE("game_store: get_game_contexts returns all requested contexts", "[moti
     CHECK(contexts->at(*second_id).moves == second.moves);
 }
 
+TEST_CASE("game_store: get_continuation_contexts returns requested next moves only", "[motif_db][game_store]")
+{
+    constexpr std::int16_t test_white_elo {2500};
+    constexpr std::int16_t test_black_elo {2400};
+
+    db_fixture fix;
+    auto src = make_game();
+    src.eco = "C20";
+    src.extra_tags = {{"Opening", "King's Pawn Game"}};
+
+    auto const ins_res = fix.store.insert(src);
+    REQUIRE(ins_res.has_value());
+
+    auto contexts = fix.store.get_continuation_contexts({
+        motif::db::opening_move_stat {
+            .game_id = *ins_res,
+            .ply = 1,
+            .result = 1,
+            .white_elo = test_white_elo,
+            .black_elo = test_black_elo,
+        },
+        motif::db::opening_move_stat {
+            .game_id = *ins_res,
+            .ply = 3,
+            .result = 1,
+            .white_elo = test_white_elo,
+            .black_elo = test_black_elo,
+        },
+    });
+
+    REQUIRE(contexts.has_value());
+    REQUIRE(contexts->size() == 1);
+    CHECK(contexts->front().game_id == *ins_res);
+    CHECK(contexts->front().ply == 1);
+    CHECK(contexts->front().encoded_move == move_b);
+    CHECK(contexts->front().result == 1);
+    CHECK(contexts->front().white_elo == std::optional<std::int16_t> {test_white_elo});
+    CHECK(contexts->front().black_elo == std::optional<std::int16_t> {test_black_elo});
+    CHECK(contexts->front().eco == src.eco);
+    CHECK(contexts->front().opening_name == std::optional<std::string> {"King's Pawn Game"});
+}
+
+TEST_CASE("game_store: list_games returns summary fields in id order", "[motif_db][game_store]")
+{
+    db_fixture fix;
+    auto first = make_game("Magnus Carlsen", "Ian Nepomniachtchi");
+    first.event_details = motif::db::event {
+        .name = "WCC 2021",
+        .site = "Dubai",
+        .date = "2021",
+    };
+    first.date = "2021.12.03";
+    first.eco = "C88";
+    first.result = "1-0";
+
+    auto second = make_game("Hikaru Nakamura", "Fabiano Caruana");
+    second.event_details = motif::db::event {
+        .name = "Candidates 2024",
+        .site = "Toronto",
+        .date = "2024",
+    };
+    second.date = "2024.04.05";
+    second.eco = "A04";
+    second.result = "1/2-1/2";
+
+    auto const first_id = fix.store.insert(first);
+    auto const second_id = fix.store.insert(second);
+    REQUIRE(first_id.has_value());
+    REQUIRE(second_id.has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {});
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 2);
+
+    CHECK(entries->at(0).id == *first_id);
+    CHECK(entries->at(0).white == "Magnus Carlsen");
+    CHECK(entries->at(0).black == "Ian Nepomniachtchi");
+    CHECK(entries->at(0).result == "1-0");
+    CHECK(entries->at(0).event == "WCC 2021");
+    CHECK(entries->at(0).date == "2021.12.03");
+    CHECK(entries->at(0).eco == "C88");
+    CHECK(entries->at(1).id == *second_id);
+}
+
+TEST_CASE("game_store: list_games filters by player substring and result", "[motif_db][game_store]")
+{
+    db_fixture fix;
+    auto first = make_game("Magnus Carlsen", "Ian Nepomniachtchi");
+    first.result = "1-0";
+    auto second = make_game("Levon Aronian", "Magnus Carlsen");
+    second.result = "0-1";
+    auto third = make_game("Hikaru Nakamura", "Fabiano Caruana");
+    third.result = "1-0";
+
+    REQUIRE(fix.store.insert(first).has_value());
+    auto const second_id = fix.store.insert(second);
+    REQUIRE(second_id.has_value());
+    REQUIRE(fix.store.insert(third).has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {
+        .player = "Carlsen",
+        .result = "0-1",
+    });
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+    CHECK(entries->front().id == *second_id);
+    CHECK(entries->front().white == "Levon Aronian");
+    CHECK(entries->front().black == "Magnus Carlsen");
+    CHECK(entries->front().result == "0-1");
+}
+
+TEST_CASE("game_store: list_games applies stable limit and offset", "[motif_db][game_store]")
+{
+    db_fixture fix;
+    auto first = make_game("Alpha", "Beta");
+    auto second = make_game("Gamma", "Delta");
+    auto third = make_game("Epsilon", "Zeta");
+
+    auto const first_id = fix.store.insert(first);
+    auto const second_id = fix.store.insert(second);
+    auto const third_id = fix.store.insert(third);
+    REQUIRE(first_id.has_value());
+    REQUIRE(second_id.has_value());
+    REQUIRE(third_id.has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {
+        .player = std::nullopt,
+        .result = std::nullopt,
+        .limit = 1,
+        .offset = 1,
+    });
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+    CHECK(entries->front().id == *second_id);
+}
+
+TEST_CASE("game_store: list_games returns empty results", "[motif_db][game_store]")
+{
+    db_fixture const empty_fix;
+    auto const empty_entries = empty_fix.store.list_games(motif::db::game_list_query {});
+    REQUIRE(empty_entries.has_value());
+    CHECK(empty_entries->empty());
+
+    db_fixture filtered_fix;
+    REQUIRE(filtered_fix.store.insert(make_game("Alpha", "Beta")).has_value());
+
+    auto const unmatched_entries = filtered_fix.store.list_games(motif::db::game_list_query {
+        .player = "Carlsen",
+        .result = std::nullopt,
+    });
+    REQUIRE(unmatched_entries.has_value());
+    CHECK(unmatched_entries->empty());
+}
+
 TEST_CASE("game_store: create_schema fails when foreign keys cannot be enabled", "[motif_db][game_store]")
 {
     sqlite3* raw = nullptr;

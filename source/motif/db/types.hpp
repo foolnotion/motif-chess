@@ -1,6 +1,7 @@
 // NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -78,6 +79,18 @@ struct game_context
     std::vector<std::uint16_t> moves;
 };
 
+struct game_continuation_context
+{
+    std::uint32_t game_id {};
+    std::uint16_t ply {};
+    std::uint16_t encoded_move {};
+    std::int8_t result {};
+    std::optional<std::int16_t> white_elo;
+    std::optional<std::int16_t> black_elo;
+    std::optional<std::string> eco;
+    std::optional<std::string> opening_name;
+};
+
 struct opening_context
 {
     std::optional<std::int32_t> white_elo;
@@ -85,6 +98,25 @@ struct opening_context
     std::optional<std::string> eco;
     std::optional<std::string> opening_name;
     std::vector<std::uint16_t> moves;
+};
+
+struct game_list_entry
+{
+    std::uint32_t id {};
+    std::string white;
+    std::string black;
+    std::string result;
+    std::string event;
+    std::string date;
+    std::string eco;
+};
+
+struct game_list_query
+{
+    std::optional<std::string> player;
+    std::optional<std::string> result;
+    std::size_t limit {50};  // NOLINT(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    std::size_t offset {0};
 };
 
 struct game

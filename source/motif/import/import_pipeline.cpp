@@ -209,6 +209,11 @@ auto import_pipeline::progress() const noexcept -> import_progress
     };
 }
 
+auto import_pipeline::request_stop() noexcept -> void
+{
+    stop_requested_.store(true, std::memory_order_relaxed);
+}
+
 auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
     return run_from(pgn_path, 0, 0, 0, config);
@@ -248,6 +253,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
     auto log = spdlog::get("motif.import");
 
+    stop_requested_.store(false, std::memory_order_relaxed);
     games_processed_.store(0, std::memory_order_relaxed);
     games_committed_.store(0, std::memory_order_relaxed);
     games_skipped_.store(0, std::memory_order_relaxed);
@@ -271,6 +277,8 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     std::size_t batch_pending = 0;
     bool sqlite_tx_open = false;
     bool eof_reached = false;
+    bool stopped = false;
+    std::size_t checkpoint_offset = start_offset;
     std::optional<error_code> fatal_error;
 
     auto begin_sqlite_batch = [&]() -> bool
@@ -308,6 +316,21 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         return true;
     };
 
+    auto write_progress_checkpoint = [&]() -> void
+    {
+        import_checkpoint const chk {
+            .source_path = pgn_path.string(),
+            .byte_offset = checkpoint_offset,
+            .games_committed = committed,
+            .last_game_id = last_game_id,
+        };
+        if (auto wres = write_checkpoint(db_.dir(), chk); !wres) {
+            if (log) {
+                log->error("checkpoint write failed");
+            }
+        }
+    };
+
     if (!begin_sqlite_batch()) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -316,6 +339,12 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
     auto stage0 = [&](tf::Pipeflow& pflow) -> void
     {
+        if (stop_requested_.load(std::memory_order_relaxed)) {
+            stopped = true;
+            eof_reached = true;
+            pflow.stop();
+            return;
+        }
         if (eof_reached) {
             pflow.stop();
             return;
@@ -416,6 +445,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             return;
         }
 
+        checkpoint_offset = slot.next_game_offset;
         auto const game_id = *ins;
 
         last_game_id = static_cast<std::int64_t>(game_id);
@@ -437,18 +467,16 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
                 return;
             }
 
-            import_checkpoint const chk {
-                .source_path = pgn_path.string(),
-                .byte_offset = slot.next_game_offset,
-                .games_committed = committed,
-                .last_game_id = last_game_id,
-            };
-            if (auto wres = write_checkpoint(db_.dir(), chk); !wres) {
-                if (log) {
-                    log->error("checkpoint write failed");
-                }
-            }
+            write_progress_checkpoint();
             batch_pending = 0;
+            if (stop_requested_.load(std::memory_order_relaxed)) {
+                stopped = true;
+                eof_reached = true;
+                pflow.stop();
+                slot.prepared.reset();
+                slot.state = slot_state::empty;
+                return;
+            }
             if (!begin_sqlite_batch()) {
                 fatal_error = error_code::io_failure;
                 eof_reached = true;
@@ -487,6 +515,20 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     if (!commit_sqlite_batch()) {
         rollback_sqlite_batch();
         return tl::unexpected {error_code::io_failure};
+    }
+
+    if (stopped || stop_requested_.load(std::memory_order_relaxed)) {
+        write_progress_checkpoint();
+        auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::nanoseconds {current_time_ns() - start_time_ns_.load(std::memory_order_relaxed)});
+
+        return import_summary {
+            .total_attempted = games_processed_.load(std::memory_order_relaxed),
+            .committed = static_cast<std::size_t>(committed - pre_committed),
+            .skipped = games_skipped_.load(std::memory_order_relaxed),
+            .errors = games_errored_.load(std::memory_order_relaxed),
+            .elapsed = elapsed,
+        };
     }
 
     if (config.rebuild_positions_after_import) {
