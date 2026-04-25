@@ -156,11 +156,15 @@ TEST_CASE("position_store round-trip: insert then query columns directly",
     REQUIRE(fix.store.insert_batch(std::span {&row, 1}).has_value());
 
     duckdb_result qres {};
-    REQUIRE(duckdb_query(fix.con,
-                         "SELECT zobrist_hash, game_id, ply, result, "
-                         "white_elo, black_elo " "FROM position",
-                         &qres)
-            == DuckDBSuccess);
+    REQUIRE(
+        duckdb_query(
+            fix.con,
+            "SELECT zobrist_hash, game_id, ply, result, " "white_elo, "
+                                                          "black_elo " "FROM "
+                                                                       "positio"
+                                                                       "n",
+            &qres)
+        == DuckDBSuccess);
     REQUIRE(duckdb_row_count(&qres) == 1);
 
     CHECK(duckdb_value_uint64(&qres, 0, 0) == row.zobrist_hash);
