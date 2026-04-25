@@ -19,7 +19,7 @@ for large datasets, and real-time engine analysis display.
 - Renders 8x8 board with pieces.
 - Drag-and-drop piece movement (legal moves only).
 - Highlights: last move, selected square, legal move targets.
-- Arrow drawing for engine PV visualisation.
+- Arrow drawing for engine PV visualization.
 - Board flip (white/black perspective).
 - Coordinate labels (a-h, 1-8).
 
@@ -37,7 +37,7 @@ for large datasets, and real-time engine analysis display.
 - For the current board position, shows:
   - Each move played from this position.
   - Win / Draw / Loss counts and percentages.
-  - Horizontal bar chart (green/grey/red).
+  - Horizontal bar chart (green/gray/red).
   - Average ELO and total games.
 - Clicking a move plays it on the board and updates the explorer.
 

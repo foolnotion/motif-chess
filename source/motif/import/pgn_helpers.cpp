@@ -7,9 +7,9 @@
 #include <system_error>
 #include <vector>
 
-#include <pgnlib/types.hpp>
-
 #include "motif/import/pgn_helpers.hpp"
+
+#include <pgnlib/types.hpp>
 
 namespace motif::import
 {

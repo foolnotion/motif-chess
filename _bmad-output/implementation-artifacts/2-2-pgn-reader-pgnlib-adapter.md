@@ -115,7 +115,7 @@ public:
 };
 ```
 
-**file_not_found behaviour (critical):** When path does not exist, the constructor sets the first
+**file_not_found behavior (critical):** When path does not exist, the constructor sets the first
 `current` slot to `tl::unexpected(parse_error::file_not_found)` and leaves `remaining` empty. The
 first dereference of the iterator yields the error; `++iter` then sets `done=true`. So the iterator
 is NOT immediately at `sentinel` — it produces exactly one `file_not_found` error then exhausts.

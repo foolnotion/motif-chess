@@ -130,14 +130,23 @@ auto position_store::row_count() const -> result<std::int64_t>
     return count;
 }
 
-auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash) const
+auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash,
+                                      std::size_t const limit,
+                                      std::size_t const offset) const
     -> result<std::vector<position_match>>
 {
     duckdb_result res {};
     std::ostringstream sql;
     sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position "
            "WHERE zobrist_hash = CAST("
-        << zobrist_hash << " AS UBIGINT)";
+        << zobrist_hash << " AS UBIGINT) "
+           "ORDER BY game_id, ply";
+    if (limit > 0) {
+        sql << " LIMIT " << limit;
+    }
+    if (offset > 0) {
+        sql << " OFFSET " << offset;
+    }
     if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
         duckdb_destroy_result(&res);
         return tl::unexpected {error_code::io_failure};

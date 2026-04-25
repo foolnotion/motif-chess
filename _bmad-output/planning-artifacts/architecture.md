@@ -40,7 +40,7 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 - **NFR05/06:** 100ms UI interaction, 3s startup → no blocking calls on the Qt main thread; all DB access off-thread
 - **NFR07/08:** Crash-safe, always resumable → explicit SQLite transaction commits + DuckDB checkpoints as invariant in import loop
 - **NFR09:** SQLite authoritative; DuckDB derived → one-directional consistency model; rebuild command must be a first-class operation
-- **NFR20:** taskflow as preferred task graph library → import pipeline and future statistical queries modelled as taskflow DAGs
+- **NFR20:** taskflow as preferred task graph library → import pipeline and future statistical queries modeled as taskflow DAGs
 
 **Scale & Complexity:**
 
@@ -530,7 +530,7 @@ NFR coverage: NFR01/02 (latency) → DuckDB denormalized schema; NFR03/04 (throu
 The existing root `CMakeLists.txt` declares `VERSION 3.14`. The floor must be set to the minimum that covers all CMake features actually in use: `CMakePresets.json` alone requires 3.19; the cmake helper files may require higher. The correct action is to audit `cmake/` helpers and set the floor to the highest feature requirement found — not to the installed version.
 
 **G2 — Remove template placeholder files.**
-`source/lib.cpp`, `source/lib.hpp`, and `source/main.cpp` are scaffold artefacts. They must be removed and the root `CMakeLists.txt` restructured (`add_subdirectory` per module) as part of spec 001's first story.
+`source/lib.cpp`, `source/lib.hpp`, and `source/main.cpp` are scaffold artifacts. They must be removed and the root `CMakeLists.txt` restructured (`add_subdirectory` per module) as part of spec 001's first story.
 
 **G3 — `test/CMakeLists.txt` is monolithic.**
 Currently defines a single `motif_test` executable. Must be restructured into per-module test executables (`motif_db_test`, `motif_import_test`, `motif_search_test`) each with `catch_discover_tests`, as part of spec 001.

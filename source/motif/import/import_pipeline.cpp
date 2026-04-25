@@ -130,8 +130,7 @@ struct pipeline_slot
 };
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto prepare_game(pgn::game const& pgn_game)
-    -> result<prepared_game>
+auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
 {
     auto const& tags = pgn_game.tags;
 

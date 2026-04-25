@@ -24,7 +24,6 @@
 #include "motif/db/types.hpp"
 #include "motif/import/import_pipeline.hpp"
 #include "motif/import/logger.hpp"
-
 #include "test_helpers.hpp"
 
 namespace
@@ -264,9 +263,8 @@ void run_opening_stats_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes =
-        manager->positions().sample_zobrist_hashes(perf_sample_hashes,
-                                                   perf_sample_seed);
+    auto sample_hashes = manager->positions().sample_zobrist_hashes(
+        perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
@@ -428,8 +426,9 @@ TEST_CASE("opening_stats::query returns empty statistics for missing positions",
     CHECK(stats->continuations.empty());
 }
 
-TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats",
-          "[motif-search][opening_stats]")
+TEST_CASE(
+    "opening_stats::query skips orphaned rows and returns remaining stats",
+    "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"orphaned-row"};
 
@@ -472,7 +471,8 @@ TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats"
     CHECK(continuation.draws == 0);
     CHECK(continuation.black_wins == 1);
     CHECK(continuation.eco == std::optional<std::string> {"C25"});
-    CHECK(continuation.opening_name == std::optional<std::string> {"Vienna Game"});
+    CHECK(continuation.opening_name
+          == std::optional<std::string> {"Vienna Game"});
 }
 
 TEST_CASE("opening_stats::query performance on sorted position store",

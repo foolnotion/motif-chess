@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
 #include <iostream>
@@ -10,8 +10,9 @@
 #include <string>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
+#include "motif/search/position_search.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include <chesslib/board/board.hpp>
 #include <chesslib/util/san.hpp>
 
@@ -19,8 +20,6 @@
 #include "motif/db/types.hpp"
 #include "motif/import/import_pipeline.hpp"
 #include "motif/import/logger.hpp"
-#include "motif/search/position_search.hpp"
-
 #include "test_helpers.hpp"
 
 namespace
@@ -37,8 +36,8 @@ struct tmp_dir
         auto const base = std::filesystem::temp_directory_path();
         auto const tick =
             std::chrono::steady_clock::now().time_since_epoch().count();
-        path = base
-             / ("motif_search_test_" + suffix + "_" + std::to_string(tick));
+        path =
+            base / ("motif_search_test_" + suffix + "_" + std::to_string(tick));
     }
 
     ~tmp_dir() { std::filesystem::remove_all(path); }
@@ -74,18 +73,14 @@ auto perf_pgn_path() -> std::filesystem::path
         return std::filesystem::path {perf_pgn};
     }
 
-    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR}
-                    / "bench"
-                    / "data"
-                    / "twic-bench.pgn";
+    auto repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
+        / "data" / "twic-bench.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
 
-    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR}
-               / "bench"
-               / "data"
-               / "twic-1m.pgn";
+    repo_local = std::filesystem::path {MOTIF_PROJECT_SOURCE_DIR} / "bench"
+        / "data" / "twic-1m.pgn";
     if (std::filesystem::exists(repo_local)) {
         return repo_local;
     }
@@ -136,11 +131,9 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
     total_ms /= us_per_ms;
 
     auto const p50_idx = std::min(
-        count - 1,
-        static_cast<std::size_t>(static_cast<double>(count) * 0.50));
+        count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.50));
     auto const p99_idx = std::min(
-        count - 1,
-        static_cast<std::size_t>(static_cast<double>(count) * 0.99));
+        count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
 
     return query_latency_result {
         .variant_name = std::string {variant_name},
@@ -154,7 +147,8 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
     };
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch assertions make the perf setup inherently branchy
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch assertions
+// make the perf setup inherently branchy
 void run_position_search_perf_test()
 {
     if (is_sanitized_build) {
@@ -176,8 +170,8 @@ void run_position_search_perf_test()
         motif::db::database_manager::create(tdir.path / "db", "search-perf");
     REQUIRE(manager.has_value());
 
-    auto init_log = motif::import::initialize_logging(
-        {.log_dir = tdir.path / "logs"});
+    auto init_log =
+        motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
     REQUIRE(init_log.has_value());
 
     motif::import::import_pipeline pipeline {*manager};
@@ -185,9 +179,8 @@ void run_position_search_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes =
-        manager->positions().sample_zobrist_hashes(perf_sample_hashes,
-                                                   perf_sample_seed);
+    auto sample_hashes = manager->positions().sample_zobrist_hashes(
+        perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 

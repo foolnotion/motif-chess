@@ -28,7 +28,7 @@ DuckDB API restrictions, error handling, module boundaries, packaging workflow, 
 
 - Catch2 v3
 - Every public API function must have tests
-- Sanitisers: cmake --preset=dev-sanitize
+- Sanitizers: cmake --preset=dev-sanitize
 
 ## Workflow
 

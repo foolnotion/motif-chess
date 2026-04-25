@@ -112,7 +112,7 @@ CMake find call for glaze: `find_package(glaze REQUIRED)` — the CMake target i
   ```
   DuckDB (`positions.duckdb`) is NOT part of this story — it is added in Story 1.5. Do not create it here.
 - `schema.hpp` is the authoritative owner of all SQLite DDL. `game_store::create_schema()` continues to exist for test fixtures (in-memory connections used in Story 1.3 tests) but is not called by `database_manager`. `database_manager` calls `schema::initialize()` instead.
-- `schema::initialize()` re-uses the same `CREATE TABLE IF NOT EXISTS` pattern already established in `game_store::create_schema()`. The schema_migrations table is the one new addition:
+- `schema::initialize()` reuses the same `CREATE TABLE IF NOT EXISTS` pattern already established in `game_store::create_schema()`. The schema_migrations table is the one new addition:
   ```sql
   CREATE TABLE IF NOT EXISTS schema_migrations (
       name       TEXT NOT NULL PRIMARY KEY,
