@@ -80,7 +80,7 @@ TEST_CASE("schema::version returns k_version after initialize",
     REQUIRE(*ver == motif::db::schema::current_version);
 }
 
-TEST_CASE("schema::version on fresh connection returns 0 (not yet initialised)",
+TEST_CASE("schema::version on fresh connection returns 0 (not yet initialized)",
           "[motif-db][schema]")
 {
     disk_db ddb{"zero"};

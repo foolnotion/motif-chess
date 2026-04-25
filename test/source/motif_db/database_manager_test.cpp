@@ -133,7 +133,7 @@ TEST_CASE("database_manager::create fails if bundle already exists",
 }
 
 TEST_CASE(
-    "database_manager::create initialises SQLite with correct schema version",
+    "database_manager::create initializes SQLite with correct schema version",
     "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"schema_ver"};
