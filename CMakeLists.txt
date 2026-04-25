@@ -33,6 +33,7 @@ add_subdirectory(source/motif/db)
 add_subdirectory(source/motif/import)
 add_subdirectory(source/motif/search)
 add_subdirectory(source/motif/engine)
+add_subdirectory(source/motif/http)
 
 # ---- Install rules ----
 
