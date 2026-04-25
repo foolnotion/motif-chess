@@ -5,15 +5,18 @@
 
 #include "motif/http/error.hpp"
 
-namespace motif::db {
+namespace motif::db
+{
 class database_manager;
-} // namespace motif::db
+}  // namespace motif::db
 
-namespace motif::http {
+namespace motif::http
+{
 
 // HTTP server wrapping cpp-httplib. httplib.h is confined to server.cpp via
 // pImpl so the platform network headers don't propagate through this interface.
-class server {
+class server
+{
   public:
     static constexpr std::uint16_t default_port {8080};
 
@@ -38,4 +41,4 @@ class server {
     std::unique_ptr<impl> impl_;
 };
 
-} // namespace motif::http
+}  // namespace motif::http
