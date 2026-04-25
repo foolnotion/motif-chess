@@ -46,8 +46,7 @@ struct duck_fixture
 
 }  // namespace
 
-TEST_CASE("position_store::initialize_schema creates table with zero rows",
-          "[motif-db][position_store]")
+TEST_CASE("position_store::initialize_schema creates table with zero rows", "[motif-db][position_store]")
 {
     duck_fixture fix;
     auto res = fix.store.initialize_schema();
@@ -60,16 +59,14 @@ TEST_CASE("position_store::initialize_schema creates table with zero rows",
     CHECK(*count == 0);
 }
 
-TEST_CASE("position_store::initialize_schema is idempotent",
-          "[motif-db][position_store]")
+TEST_CASE("position_store::initialize_schema is idempotent", "[motif-db][position_store]")
 {
     duck_fixture fix;
     REQUIRE(fix.store.initialize_schema().has_value());
     REQUIRE(fix.store.initialize_schema().has_value());
 }
 
-TEST_CASE("position_store::insert_batch increases row_count",
-          "[motif-db][position_store]")
+TEST_CASE("position_store::insert_batch increases row_count", "[motif-db][position_store]")
 {
     duck_fixture fix;
     REQUIRE(fix.store.initialize_schema().has_value());
@@ -80,18 +77,8 @@ TEST_CASE("position_store::insert_batch increases row_count",
     static constexpr std::int16_t elo_black = 2750;
 
     std::vector<motif::db::position_row> rows {
-        {.zobrist_hash = hash_a,
-         .game_id = 1,
-         .ply = 1,
-         .result = 1,
-         .white_elo = {elo_white},
-         .black_elo = {elo_black}},
-        {.zobrist_hash = hash_b,
-         .game_id = 1,
-         .ply = 2,
-         .result = 1,
-         .white_elo = {elo_white},
-         .black_elo = {elo_black}},
+        {.zobrist_hash = hash_a, .game_id = 1, .ply = 1, .result = 1, .white_elo = {elo_white}, .black_elo = {elo_black}},
+        {.zobrist_hash = hash_b, .game_id = 1, .ply = 2, .result = 1, .white_elo = {elo_white}, .black_elo = {elo_black}},
     };
 
     auto ins_res = fix.store.insert_batch(rows);
@@ -104,8 +91,7 @@ TEST_CASE("position_store::insert_batch increases row_count",
     CHECK(*count == 2);
 }
 
-TEST_CASE("position_store::insert_batch accepts null elo columns",
-          "[motif-db][position_store]")
+TEST_CASE("position_store::insert_batch accepts null elo columns", "[motif-db][position_store]")
 {
     duck_fixture fix;
     REQUIRE(fix.store.initialize_schema().has_value());
@@ -113,12 +99,7 @@ TEST_CASE("position_store::insert_batch accepts null elo columns",
     static constexpr std::uint64_t hash_null_elo = 0xABCDABCDABCDABCD;
 
     std::vector<motif::db::position_row> rows {
-        {.zobrist_hash = hash_null_elo,
-         .game_id = 2,
-         .ply = 1,
-         .result = 0,
-         .white_elo = {},
-         .black_elo = {}},
+        {.zobrist_hash = hash_null_elo, .game_id = 2, .ply = 1, .result = 0, .white_elo = {}, .black_elo = {}},
     };
 
     auto ins_res = fix.store.insert_batch(rows);
@@ -131,8 +112,7 @@ TEST_CASE("position_store::insert_batch accepts null elo columns",
     CHECK(*count == 1);
 }
 
-TEST_CASE("position_store round-trip: insert then query columns directly",
-          "[motif-db][position_store]")
+TEST_CASE("position_store round-trip: insert then query columns directly", "[motif-db][position_store]")
 {
     duck_fixture fix;
     REQUIRE(fix.store.initialize_schema().has_value());
@@ -156,16 +136,14 @@ TEST_CASE("position_store round-trip: insert then query columns directly",
     REQUIRE(fix.store.insert_batch(std::span {&row, 1}).has_value());
 
     duckdb_result qres {};
-    char const* query = "SELECT zobrist_hash, game_id, ply, result,"
-                        " white_elo, black_elo FROM position";
+    char const* query = "SELECT zobrist_hash, game_id, ply, result," " white_elo, black_elo FROM position";
     REQUIRE(duckdb_query(fix.con, query, &qres) == DuckDBSuccess);
     REQUIRE(duckdb_row_count(&qres) == 1);
 
     CHECK(duckdb_value_uint64(&qres, 0, 0) == row.zobrist_hash);
     CHECK(duckdb_value_uint32(&qres, 1, 0) == row.game_id);
     CHECK(duckdb_value_uint16(&qres, 2, 0) == row.ply);
-    CHECK(static_cast<std::int8_t>(duckdb_value_int8(&qres, 3, 0))
-          == row.result);
+    CHECK(static_cast<std::int8_t>(duckdb_value_int8(&qres, 3, 0)) == row.result);
     CHECK(duckdb_value_int16(&qres, 4, 0) == *row.white_elo);
     CHECK(duckdb_value_int16(&qres, 5, 0) == *row.black_elo);
 

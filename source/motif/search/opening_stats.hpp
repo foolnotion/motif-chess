@@ -37,7 +37,6 @@ struct stats
     std::vector<continuation> continuations;
 };
 
-[[nodiscard]] auto query(motif::db::database_manager const& database,
-                         std::uint64_t zobrist_hash) -> result<stats>;
+[[nodiscard]] auto query(motif::db::database_manager const& database, std::uint64_t zobrist_hash) -> result<stats>;
 
 }  // namespace motif::search::opening_stats

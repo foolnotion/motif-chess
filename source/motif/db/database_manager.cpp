@@ -54,20 +54,15 @@ auto open_sqlite(std::filesystem::path const& db_path) -> result<sqlite3*>
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto enable_foreign_keys(sqlite3* conn) -> result<void>
 {
-    int const ret = sqlite3_exec(
-        conn, "PRAGMA foreign_keys = ON;", nullptr, nullptr, nullptr);
+    int const ret = sqlite3_exec(conn, "PRAGMA foreign_keys = ON;", nullptr, nullptr, nullptr);
     if (ret != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
     }
     sqlite3_stmt* raw = nullptr;
-    if (sqlite3_prepare_v2(conn, "PRAGMA foreign_keys;", -1, &raw, nullptr)
-        != SQLITE_OK)
-    {
+    if (sqlite3_prepare_v2(conn, "PRAGMA foreign_keys;", -1, &raw, nullptr) != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
     }
-    auto const guard =
-        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {
-            raw, sqlite3_finalize};
+    auto const guard = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {raw, sqlite3_finalize};
     if (sqlite3_step(guard.get()) != SQLITE_ROW) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -101,25 +96,19 @@ auto map_result(std::string const& pgn_result) -> std::int8_t
 }
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto narrow_elo(std::optional<std::int32_t> const& elo)
-    -> result<std::optional<std::int16_t>>
+auto narrow_elo(std::optional<std::int32_t> const& elo) -> result<std::optional<std::int16_t>>
 {
     if (!elo.has_value()) {
         return std::optional<std::int16_t> {};
     }
-    if (*elo < std::numeric_limits<std::int16_t>::min()
-        || *elo > std::numeric_limits<std::int16_t>::max())
-    {
+    if (*elo < std::numeric_limits<std::int16_t>::min() || *elo > std::numeric_limits<std::int16_t>::max()) {
         return tl::unexpected {error_code::io_failure};
     }
     return std::optional<std::int16_t> {static_cast<std::int16_t>(*elo)};
 }
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto build_position_rows(game const& game,
-                         std::uint32_t game_id,
-                         std::int8_t result_code)
-    -> result<std::vector<position_row>>
+auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t result_code) -> result<std::vector<position_row>>
 {
     if (game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
         return tl::unexpected {error_code::io_failure};
@@ -179,9 +168,7 @@ auto cleanup_failed_create(std::filesystem::path const& dir,
 }
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto open_duckdb(std::filesystem::path const& duck_path,
-                 duckdb_database& out_db,
-                 duckdb_connection& out_con) -> result<void>
+auto open_duckdb(std::filesystem::path const& duck_path, duckdb_database& out_db, duckdb_connection& out_con) -> result<void>
 {
     if (duckdb_open(duck_path.c_str(), &out_db) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
@@ -217,8 +204,7 @@ database_manager::database_manager(database_manager&& other) noexcept
     other.positions_.reset();
 }
 
-auto database_manager::operator=(database_manager&& other) noexcept
-    -> database_manager&
+auto database_manager::operator=(database_manager&& other) noexcept -> database_manager&
 {
     if (this != &other) {
         close();
@@ -256,9 +242,7 @@ void database_manager::close() noexcept
 // ── Factory methods
 // ───────────────────────────────────────────────────────────
 
-auto database_manager::create(std::filesystem::path const& dir,
-                              std::string const& name)
-    -> result<database_manager>
+auto database_manager::create(std::filesystem::path const& dir, std::string const& name) -> result<database_manager>
 {
     auto const db_path = dir / "games.db";
     auto const duck_path = dir / "positions.duckdb";
@@ -287,8 +271,7 @@ auto database_manager::create(std::filesystem::path const& dir,
     auto init_res = schema::initialize(conn);
     if (!init_res) {
         sqlite3_close(conn);
-        cleanup_failed_create(
-            dir, db_path, duck_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
         return tl::unexpected {init_res.error()};
     }
 
@@ -296,8 +279,7 @@ auto database_manager::create(std::filesystem::path const& dir,
     auto write_res = write_manifest(manifest_path, new_manifest);
     if (!write_res) {
         sqlite3_close(conn);
-        cleanup_failed_create(
-            dir, db_path, duck_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
         return tl::unexpected {write_res.error()};
     }
 
@@ -310,23 +292,20 @@ auto database_manager::create(std::filesystem::path const& dir,
     auto duck_res = open_duckdb(duck_path, mgr.duck_db_, mgr.duck_con_);
     if (!duck_res) {
         mgr.close();
-        cleanup_failed_create(
-            dir, db_path, duck_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
         return tl::unexpected {duck_res.error()};
     }
     mgr.positions_.emplace(mgr.duck_con_);
     if (auto schema_res = mgr.positions_->initialize_schema(); !schema_res) {
         mgr.close();
-        cleanup_failed_create(
-            dir, db_path, duck_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
         return tl::unexpected {schema_res.error()};
     }
 
     return mgr;
 }
 
-auto database_manager::open(std::filesystem::path const& dir)
-    -> result<database_manager>
+auto database_manager::open(std::filesystem::path const& dir) -> result<database_manager>
 {
     auto const db_path = dir / "games.db";
     auto const manifest_path = dir / "manifest.json";
@@ -380,8 +359,7 @@ auto database_manager::open(std::filesystem::path const& dir)
     mgr.manifest_ = std::move(*mf_res);
     mgr.dir_ = dir;
 
-    auto duck_res =
-        open_duckdb(dir / "positions.duckdb", mgr.duck_db_, mgr.duck_con_);
+    auto duck_res = open_duckdb(dir / "positions.duckdb", mgr.duck_db_, mgr.duck_con_);
     if (!duck_res) {
         mgr.close();
         return tl::unexpected {duck_res.error()};
@@ -441,8 +419,8 @@ auto database_manager::positions() const noexcept -> position_store const&
     return *positions_;
 }
 
-auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
-    -> result<void>
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> result<void>
 {
     if (duck_con_ == nullptr || !positions_) {
         return tl::unexpected {error_code::io_failure};
@@ -454,6 +432,7 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
         if (log == nullptr) {
             return;
         }
+        // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
         auto const rss_bytes = gtl::GetProcessMemoryUsed();
         log->info("rebuild_position_store rss {}: {} bytes", phase, rss_bytes);
     };
@@ -475,8 +454,7 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
     };
 
     duckdb_result del_res {};
-    auto const del_ret =
-        duckdb_query(duck_con_, "DELETE FROM position", &del_res);
+    auto const del_ret = duckdb_query(duck_con_, "DELETE FROM position", &del_res);
     duckdb_destroy_result(&del_res);
     if (del_ret == DuckDBError) {
         rollback();
@@ -485,22 +463,16 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
 
     // Collect all game IDs from SQLite
     sqlite3_stmt* raw = nullptr;
-    if (sqlite3_prepare_v2(
-            conn_, "SELECT id FROM game ORDER BY id", -1, &raw, nullptr)
-        != SQLITE_OK)
-    {
+    if (sqlite3_prepare_v2(conn_, "SELECT id FROM game ORDER BY id", -1, &raw, nullptr) != SQLITE_OK) {
         rollback();
         return tl::unexpected {error_code::io_failure};
     }
-    auto const stmt_guard =
-        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {
-            raw, sqlite3_finalize};
+    auto const stmt_guard = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {raw, sqlite3_finalize};
 
     std::vector<std::uint32_t> game_ids;
     int step_result = sqlite3_step(stmt_guard.get());
     while (step_result == SQLITE_ROW) {
-        game_ids.push_back(static_cast<std::uint32_t>(
-            sqlite3_column_int(stmt_guard.get(), 0)));
+        game_ids.push_back(static_cast<std::uint32_t>(sqlite3_column_int(stmt_guard.get(), 0)));
         step_result = sqlite3_step(stmt_guard.get());
     }
     if (step_result != SQLITE_DONE) {
@@ -543,8 +515,7 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist)
         }
 
         if (!batch->empty()) {
-            pending_rows.insert(
-                pending_rows.end(), batch->begin(), batch->end());
+            pending_rows.insert(pending_rows.end(), batch->begin(), batch->end());
             if (pending_rows.size() >= rebuild_batch_rows) {
                 auto flush_res = flush_pending_rows();
                 if (!flush_res) {

@@ -18,10 +18,7 @@ namespace
 
 struct stmt_deleter
 {
-    auto operator()(sqlite3_stmt* stmt) const noexcept -> void
-    {
-        sqlite3_finalize(stmt);
-    }
+    auto operator()(sqlite3_stmt* stmt) const noexcept -> void { sqlite3_finalize(stmt); }
 };
 
 using unique_stmt = std::unique_ptr<sqlite3_stmt, stmt_deleter>;
@@ -116,8 +113,7 @@ auto initialize(sqlite3* conn) -> result<void>
         return tl::unexpected {error_code::io_failure};
     }
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    auto const* mode_raw =
-        reinterpret_cast<char const*>(sqlite3_column_text(wal_stmt->get(), 0));
+    auto const* mode_raw = reinterpret_cast<char const*>(sqlite3_column_text(wal_stmt->get(), 0));
     if (mode_raw == nullptr) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -150,8 +146,7 @@ auto initialize(sqlite3* conn) -> result<void>
     }
 
     // Set schema version.
-    auto const ver_sql =
-        fmt::format("PRAGMA user_version = {};", current_version);
+    auto const ver_sql = fmt::format("PRAGMA user_version = {};", current_version);
     return exec(conn, ver_sql.c_str());
 }
 

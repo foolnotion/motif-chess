@@ -85,8 +85,7 @@ auto find_tag(pgn::game const& game, std::string_view key) -> std::string
     return {};
 }
 
-auto write_temp_pgn(std::string_view content, std::string const& filename)
-    -> std::filesystem::path
+auto write_temp_pgn(std::string_view content, std::string const& filename) -> std::filesystem::path
 {
     auto tmp = std::filesystem::temp_directory_path() / filename;
     std::ofstream out(tmp, std::ios::binary);
@@ -131,12 +130,9 @@ TEST_CASE("pgn_reader: empty PGN returns eof on first call", "[motif-import]")
     std::filesystem::remove(tmp);
 }
 
-TEST_CASE(
-    "pgn_reader: malformed middle game returns parse_error then continues",
-    "[motif-import]")
+TEST_CASE("pgn_reader: malformed middle game returns parse_error then continues", "[motif-import]")
 {
-    auto tmp =
-        write_temp_pgn(three_games_second_bad, "pgn_reader_bad_middle.pgn");
+    auto tmp = write_temp_pgn(three_games_second_bad, "pgn_reader_bad_middle.pgn");
 
     motif::import::pgn_reader reader {tmp};
 
@@ -159,8 +155,7 @@ TEST_CASE(
     std::filesystem::remove(tmp);
 }
 
-TEST_CASE("pgn_reader: seek_to_offset resumes from correct game",
-          "[motif-import]")
+TEST_CASE("pgn_reader: seek_to_offset resumes from correct game", "[motif-import]")
 {
     auto tmp = write_temp_pgn(two_games, "pgn_reader_seek_test.pgn");
 
@@ -185,8 +180,7 @@ TEST_CASE("pgn_reader: seek_to_offset resumes from correct game",
     std::filesystem::remove(tmp);
 }
 
-TEST_CASE("pgn_reader: byte_offset stays absolute across seek_to_offset",
-          "[motif-import]")
+TEST_CASE("pgn_reader: byte_offset stays absolute across seek_to_offset", "[motif-import]")
 {
     auto tmp = write_temp_pgn(two_games, "pgn_reader_absolute_offset_test.pgn");
 
@@ -211,11 +205,9 @@ TEST_CASE("pgn_reader: byte_offset stays absolute across seek_to_offset",
     std::filesystem::remove(tmp);
 }
 
-TEST_CASE("pgn_reader: ignores [Event] lines inside brace comments",
-          "[motif-import]")
+TEST_CASE("pgn_reader: ignores [Event] lines inside brace comments", "[motif-import]")
 {
-    auto tmp = write_temp_pgn(two_games_with_event_in_comment,
-                              "pgn_reader_event_comment_test.pgn");
+    auto tmp = write_temp_pgn(two_games_with_event_in_comment, "pgn_reader_event_comment_test.pgn");
 
     motif::import::pgn_reader reader {tmp};
 
@@ -227,12 +219,10 @@ TEST_CASE("pgn_reader: ignores [Event] lines inside brace comments",
     REQUIRE(game2.has_value());
     CHECK(find_tag(*game2, "Event") == "CommentGame2");
 
-    auto resume_offset =
-        two_games_with_event_in_comment.find("[Event \"Fake\"]");
+    auto resume_offset = two_games_with_event_in_comment.find("[Event \"Fake\"]");
     REQUIRE(resume_offset != std::string_view::npos);
 
-    auto real_game2_offset =
-        two_games_with_event_in_comment.find("[Event \"CommentGame2\"]");
+    auto real_game2_offset = two_games_with_event_in_comment.find("[Event \"CommentGame2\"]");
     REQUIRE(real_game2_offset != std::string_view::npos);
 
     motif::import::pgn_reader resumed_reader {tmp};
@@ -249,8 +239,7 @@ TEST_CASE("pgn_reader: ignores [Event] lines inside brace comments",
 
 TEST_CASE("pgn_reader: nonexistent file returns io_failure", "[motif-import]")
 {
-    motif::import::pgn_reader reader {
-        std::filesystem::path {"/nonexistent/path/file.pgn"}};
+    motif::import::pgn_reader reader {std::filesystem::path {"/nonexistent/path/file.pgn"}};
     auto result = reader.next();
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error() == motif::import::error_code::io_failure);

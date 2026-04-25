@@ -35,10 +35,7 @@ constexpr std::uint32_t absent_id = 99999U;
 
 struct sqlite3_deleter
 {
-    auto operator()(sqlite3* conn) const noexcept -> void
-    {
-        sqlite3_close(conn);
-    }
+    auto operator()(sqlite3* conn) const noexcept -> void { sqlite3_close(conn); }
 };
 
 using unique_sqlite3 = std::unique_ptr<sqlite3, sqlite3_deleter>;
@@ -89,8 +86,7 @@ struct db_fixture
     };
 }
 
-[[nodiscard]] auto
-make_game(  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
+[[nodiscard]] auto make_game(  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
     std::string white_name = "Kasparov",
     std::string black_name = "Karpov") -> motif::db::game
 {
@@ -106,8 +102,7 @@ make_game(  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
     };
 }
 
-[[nodiscard]] auto make_game_with_event(std::string event_name)
-    -> motif::db::game
+[[nodiscard]] auto make_game_with_event(std::string event_name) -> motif::db::game
 {  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
     auto new_game = make_game();
     new_game.event_details = motif::db::event {
@@ -130,8 +125,7 @@ TEST_CASE("game_store: insert returns a valid id", "[motif_db][game_store]")
     CHECK(*res > 0U);
 }
 
-TEST_CASE("game_store: get reconstructs original metadata and moves",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: get reconstructs original metadata and moves", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto const src = make_game();
@@ -149,8 +143,7 @@ TEST_CASE("game_store: get reconstructs original metadata and moves",
     CHECK(got.moves == src.moves);
 }
 
-TEST_CASE("game_store: get with event reconstructs event details",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: get with event reconstructs event details", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto src = make_game();
@@ -181,8 +174,7 @@ TEST_CASE("game_store: get with event reconstructs event details",
     CHECK(got_event.date == "2024");
 }
 
-TEST_CASE("game_store: get with extra tags round-trips tag key-value pairs",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: get with extra tags round-trips tag key-value pairs", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto src = make_game();
@@ -196,9 +188,7 @@ TEST_CASE("game_store: get with extra tags round-trips tag key-value pairs",
     CHECK(get_res->extra_tags == src.extra_tags);
 }
 
-TEST_CASE(
-    "game_store: get_opening_context returns moves elo eco and opening tag",
-    "[motif_db][game_store]")
+TEST_CASE("game_store: get_opening_context returns moves elo eco and opening tag", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto src = make_game();
@@ -215,13 +205,11 @@ TEST_CASE(
     CHECK(context_res->white_elo == src.white.elo);
     CHECK(context_res->black_elo == src.black.elo);
     CHECK(context_res->eco == src.eco);
-    CHECK(context_res->opening_name
-          == std::optional<std::string> {"King's Pawn Game"});
+    CHECK(context_res->opening_name == std::optional<std::string> {"King's Pawn Game"});
     CHECK(context_res->moves == src.moves);
 }
 
-TEST_CASE("game_store: get_game_contexts returns all requested contexts",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: get_game_contexts returns all requested contexts", "[motif_db][game_store]")
 {
     db_fixture fix;
 
@@ -243,36 +231,30 @@ TEST_CASE("game_store: get_game_contexts returns all requested contexts",
     REQUIRE(contexts->size() == 2);
 
     CHECK(contexts->at(*first_id).eco == first.eco);
-    CHECK(contexts->at(*first_id).opening_name
-          == std::optional<std::string> {"King's Pawn Game"});
+    CHECK(contexts->at(*first_id).opening_name == std::optional<std::string> {"King's Pawn Game"});
     CHECK(contexts->at(*first_id).moves == first.moves);
     CHECK(contexts->at(*second_id).eco == second.eco);
-    CHECK(contexts->at(*second_id).opening_name
-          == std::optional<std::string> {"Scandinavian Defense"});
+    CHECK(contexts->at(*second_id).opening_name == std::optional<std::string> {"Scandinavian Defense"});
     CHECK(contexts->at(*second_id).moves == second.moves);
 }
 
-TEST_CASE("game_store: create_schema fails when foreign keys cannot be enabled",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: create_schema fails when foreign keys cannot be enabled", "[motif_db][game_store]")
 {
     sqlite3* raw = nullptr;
     REQUIRE(sqlite3_open(":memory:", &raw) == SQLITE_OK);
     unique_sqlite3 const db_conn {raw};
 
-    REQUIRE(sqlite3_exec(db_conn.get(), "BEGIN;", nullptr, nullptr, nullptr)
-            == SQLITE_OK);
+    REQUIRE(sqlite3_exec(db_conn.get(), "BEGIN;", nullptr, nullptr, nullptr) == SQLITE_OK);
 
     motif::db::game_store store {db_conn.get()};
     auto const schema_res = store.create_schema();
     REQUIRE_FALSE(schema_res.has_value());
     CHECK(schema_res.error() == motif::db::error_code::io_failure);
 
-    REQUIRE(sqlite3_exec(db_conn.get(), "ROLLBACK;", nullptr, nullptr, nullptr)
-            == SQLITE_OK);
+    REQUIRE(sqlite3_exec(db_conn.get(), "ROLLBACK;", nullptr, nullptr, nullptr) == SQLITE_OK);
 }
 
-TEST_CASE("game_store: get on unknown id returns not_found",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: get on unknown id returns not_found", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto const res = fix.store.get(absent_id);
@@ -282,8 +264,7 @@ TEST_CASE("game_store: get on unknown id returns not_found",
 
 // ── AC #1: Player deduplication ──────────────────────────────────────────────
 
-TEST_CASE("game_store: same player name is reused across games",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: same player name is reused across games", "[motif_db][game_store]")
 {
     db_fixture fix;
 
@@ -302,14 +283,12 @@ TEST_CASE("game_store: same player name is reused across games",
 
 // ── AC #1: Event deduplication ───────────────────────────────────────────────
 
-TEST_CASE("game_store: same event name is reused across games",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: same event name is reused across games", "[motif_db][game_store]")
 {
     db_fixture fix;
 
     auto game1 = make_game_with_event("Tata Steel 2024");
-    auto game2 =
-        make_game("Anand", "Giri");  // different players → distinct game
+    auto game2 = make_game("Anand", "Giri");  // different players → distinct game
     game2.event_details = motif::db::event {
         .name = "Tata Steel 2024",
         .site = std::nullopt,
@@ -324,8 +303,7 @@ TEST_CASE("game_store: same event name is reused across games",
 
 // ── AC #1: Duplicate game rejection ──────────────────────────────────────────
 
-TEST_CASE("game_store: inserting identical game returns duplicate",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: inserting identical game returns duplicate", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto const src = make_game();
@@ -337,15 +315,13 @@ TEST_CASE("game_store: inserting identical game returns duplicate",
     CHECK(dup_res.error() == motif::db::error_code::duplicate);
 }
 
-TEST_CASE("game_store: different moves make two games distinct",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: different moves make two games distinct", "[motif_db][game_store]")
 {
     db_fixture fix;
 
     auto game1 = make_game();
     auto game2 = make_game();
-    game2.moves = {move_d,
-                   move_e};  // different move sequence → not a duplicate
+    game2.moves = {move_d, move_e};  // different move sequence → not a duplicate
 
     REQUIRE(fix.store.insert(game1).has_value());
     REQUIRE(fix.store.insert(game2).has_value());
@@ -357,8 +333,7 @@ TEST_CASE("game_store: different moves make two games distinct",
 // ── AC #3: Remove semantics
 // ───────────────────────────────────────────────────
 
-TEST_CASE("game_store: remove deletes game and game_tag rows",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: remove deletes game and game_tag rows", "[motif_db][game_store]")
 {
     db_fixture fix;
 
@@ -379,8 +354,7 @@ TEST_CASE("game_store: remove deletes game and game_tag rows",
     CHECK(fix.count_rows("game_tag") == 0);
 }
 
-TEST_CASE("game_store: remove preserves player and event rows",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: remove preserves player and event rows", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto src = make_game_with_event("Candidates 2024");
@@ -399,8 +373,7 @@ TEST_CASE("game_store: remove preserves player and event rows",
     CHECK(fix.count_rows("event") == 1);  // preserved
 }
 
-TEST_CASE("game_store: remove on unknown id returns not_found",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: remove on unknown id returns not_found", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto const res = fix.store.remove(absent_id);
@@ -408,8 +381,7 @@ TEST_CASE("game_store: remove on unknown id returns not_found",
     CHECK(res.error() == motif::db::error_code::not_found);
 }
 
-TEST_CASE("game_store: get after remove returns not_found",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: get after remove returns not_found", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto const ins_res = fix.store.insert(make_game());
@@ -425,8 +397,7 @@ TEST_CASE("game_store: get after remove returns not_found",
 // ── AC #4: Edge cases
 // ─────────────────────────────────────────────────────────
 
-TEST_CASE("game_store: game with no moves round-trips correctly",
-          "[motif_db][game_store]")
+TEST_CASE("game_store: game with no moves round-trips correctly", "[motif_db][game_store]")
 {
     db_fixture fix;
     auto src = make_game();
