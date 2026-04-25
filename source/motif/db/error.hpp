@@ -6,9 +6,11 @@
 
 #include <tl/expected.hpp>
 
-namespace motif::db {
+namespace motif::db
+{
 
-enum class error_code : std::uint8_t {
+enum class error_code : std::uint8_t
+{
     ok,
     not_found,
     schema_mismatch,
@@ -19,7 +21,9 @@ enum class error_code : std::uint8_t {
 template<typename T>
 using result = tl::expected<T, error_code>;
 
-[[nodiscard]] constexpr auto to_string(error_code code) noexcept -> std::string_view {
+[[nodiscard]] constexpr auto to_string(error_code code) noexcept
+    -> std::string_view
+{
     switch (code) {
         case error_code::ok:
             return "ok";
@@ -36,4 +40,4 @@ using result = tl::expected<T, error_code>;
     return "unknown";
 }
 
-} // namespace motif::db
+}  // namespace motif::db

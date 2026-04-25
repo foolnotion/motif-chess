@@ -4,6 +4,6 @@
 
 TEST_CASE("Name is motif", "[library]")
 {
-  auto const lib = library {};
-  REQUIRE(lib.name == "motif");
+    auto const lib = library {};
+    REQUIRE(lib.name == "motif");
 }

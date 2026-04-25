@@ -112,7 +112,7 @@ if (limit > 0) {
 }
 ```
 
-`LIMIT 0` in SQL means "return 0 rows" — that's why the guard `limit > 0` is required. When `limit == 0`, no LIMIT clause → returns all rows (existing behaviour, needed by `opening_stats` internals and tests).
+`LIMIT 0` in SQL means "return 0 rows" — that's why the guard `limit > 0` is required. When `limit == 0`, no LIMIT clause → returns all rows (existing behavior, needed by `opening_stats` internals and tests).
 
 ### Task 2: `position_search::find` Changes
 
@@ -307,7 +307,7 @@ auto seed_positions(motif::db::database_manager& db,
 
 **Test outline: pagination**
 ```cpp
-TEST_CASE("server: position search honours limit parameter", "[motif-http]")
+TEST_CASE("server: position search honors limit parameter", "[motif-http]")
 {
     auto const tdir = tmp_dir{"pos_page"};
     auto db_res = motif::db::database_manager::create(tdir.path, "page-db");
@@ -371,7 +371,7 @@ At max limit 500 rows × ≈ 50 bytes/item ≈ 25 KB JSON. `glz::write_json` on 
 
 ### Backward Compatibility
 
-Existing `position_search_test.cpp` and `opening_stats_test.cpp` call `position_search::find(db, hash)` with no limit/offset — default `limit=0` preserves the existing "return all" behaviour. No test changes needed in `motif_search_test`.
+Existing `position_search_test.cpp` and `opening_stats_test.cpp` call `position_search::find(db, hash)` with no limit/offset — default `limit=0` preserves the existing "return all" behavior. No test changes needed in `motif_search_test`.
 
 ### Namespace Reminders
 
@@ -413,7 +413,7 @@ claude-sonnet-4-6
 
 ### Completion Notes List
 
-- Added `limit`/`offset` defaulted params to `position_store::query_by_zobrist` — zero regression since existing callers use `limit=0` which preserves "return all" behaviour.
+- Added `limit`/`offset` defaulted params to `position_store::query_by_zobrist` — zero regression since existing callers use `limit=0` which preserves "return all" behavior.
 - Threaded params through `position_search::find` with identical defaults.
 - Added `motif_search` as PRIVATE link dep to `motif_http` (used only in `server.cpp`, not exposed via `server.hpp`).
 - Implemented `GET /api/positions/:zobrist_hash` with `parse_size` helper, default limit 100, max limit 500; uses `from_chars` with NOLINT suppressions matching `main.cpp` convention.
