@@ -1,8 +1,8 @@
 #include <charconv>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <iostream>
 #include <memory>
 #include <optional>
 #include <span>
@@ -10,6 +10,7 @@
 #include <string_view>
 #include <system_error>
 
+#include <fmt/base.h>
 #include <spdlog/logger.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -54,7 +55,7 @@ auto parse_args(std::span<char const* const> argv) -> std::optional<cli_args>
         } else if (arg == "--port" && i + 1 < argv.size()) {
             auto const port_opt = parse_port(std::string_view {argv[++i]});
             if (!port_opt) {
-                std::cerr << "error: invalid port value: " << argv[i] << '\n';
+                fmt::print(stderr, "error: invalid port value: {}\n", argv[i]);
                 return std::nullopt;
             }
             args.port = *port_opt;
@@ -102,7 +103,7 @@ auto main(int argc, char** argv) -> int
     auto const& args = *args_opt;
 
     if (args.db_path.empty()) {
-        std::cerr << "error: database path required; use --db <path> or set " "MOTIF_DB_PATH\n";
+        fmt::print(stderr, "error: database path required; use --db <path> or set MOTIF_DB_PATH\n");
         return EXIT_FAILURE;
     }
 

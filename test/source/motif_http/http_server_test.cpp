@@ -2,14 +2,16 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
-#include <iostream>
+#include <ios>
 #include <optional>
 #include <ratio>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -18,7 +20,12 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
+#include <fmt/base.h>
+#include <fmt/format.h>
+#include <glaze/json/read.hpp>
 #include <httplib.h>
+// NOLINTNEXTLINE(hicpp-deprecated-headers,modernize-deprecated-headers) -- POSIX setenv/unsetenv are declared here.
+#include <stdlib.h>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
@@ -27,6 +34,29 @@
 #include "motif/import/import_pipeline.hpp"
 #include "motif/import/logger.hpp"
 #include "test_helpers.hpp"
+
+// Placed in a named namespace so glaze aggregate reflection can find it
+// (glaze cannot reflect types in anonymous namespaces).
+namespace motif_http_test
+{
+
+// Union of all fields that appear in SSE data lines (progress, complete, error).
+// Unknown keys are silently ignored by glaze.
+struct sse_event_payload
+{
+    std::optional<std::size_t> games_processed;
+    std::optional<std::size_t> games_committed;
+    std::optional<std::size_t> games_skipped;
+    std::optional<double> elapsed_seconds;
+    std::optional<std::size_t> total_attempted;
+    std::optional<std::size_t> committed;
+    std::optional<std::size_t> skipped;
+    std::optional<std::size_t> errors;
+    std::optional<std::size_t> elapsed_ms;
+    std::optional<std::string> error;
+};
+
+}  // namespace motif_http_test
 
 namespace
 {
@@ -44,6 +74,8 @@ constexpr auto perf_sample_seed = std::uint64_t {42};
 constexpr auto perf_p99_limit_us = 100000.0;
 constexpr auto opening_stats_perf_p99_limit_us = 500000.0;
 constexpr std::chrono::milliseconds opening_stats_endpoint_limit {500};
+constexpr std::string_view fail_next_import_worker_start_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_START"};
+constexpr std::string_view fail_next_import_worker_run_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_RUN"};
 
 struct tmp_dir
 {
@@ -52,7 +84,7 @@ struct tmp_dir
     explicit tmp_dir(std::string const& suffix)
     {
         auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
-        path = std::filesystem::temp_directory_path() / ("motif_http_test_" + suffix + "_" + std::to_string(tick));
+        path = std::filesystem::temp_directory_path() / fmt::format("motif_http_test_{}_{}", suffix, tick);
     }
 
     ~tmp_dir() { std::filesystem::remove_all(path); }
@@ -98,6 +130,46 @@ class import_logging_scope
 
   private:
     bool active_ {false};
+};
+
+class env_flag_scope
+{
+  public:
+    explicit env_flag_scope(std::string_view name)
+        : name_ {name}
+    {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe) -- set before server threads start.
+        auto const set_result = ::setenv(name_.c_str(), "1", 1);
+        REQUIRE(set_result == 0);
+    }
+
+    ~env_flag_scope() noexcept
+    {
+        if (active_) {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe) -- test cleanup after construction-time read.
+            static_cast<void>(::unsetenv(name_.c_str()));
+        }
+    }
+
+    env_flag_scope(env_flag_scope const&) = delete;
+    auto operator=(env_flag_scope const&) -> env_flag_scope& = delete;
+    env_flag_scope(env_flag_scope&&) = delete;
+    auto operator=(env_flag_scope&&) -> env_flag_scope& = delete;
+
+    void clear()
+    {
+        if (!active_) {
+            return;
+        }
+        // NOLINTNEXTLINE(concurrency-mt-unsafe) -- clear immediately after server construction.
+        auto const unset_result = ::unsetenv(name_.c_str());
+        active_ = false;
+        REQUIRE(unset_result == 0);
+    }
+
+  private:
+    std::string name_;
+    bool active_ {true};
 };
 
 // Wait up to ~200 ms for the server to become ready.
@@ -312,15 +384,13 @@ auto make_repeated_pgn(std::size_t const game_count) -> std::string
 {
     auto pgn = std::string {};
     for (std::size_t game_index = 0; game_index < game_count; ++game_index) {
-        pgn += "[Event \"Long Import ";
-        pgn += std::to_string(game_index);
-        pgn += "\"]\n[Site \"?\"]\n[Date \"2024.01.01\"]\n[Round \"";
-        pgn += std::to_string(game_index + 1);
-        pgn += "\"]\n[White \"A";
-        pgn += std::to_string(game_index);
-        pgn += "\"]\n[Black \"B";
-        pgn += std::to_string(game_index);
-        pgn += "\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Nf3 Nc6 1-0\n\n";
+        pgn += fmt::format(
+            "[Event \"Long Import {}\"]\n[Site \"?\"]\n[Date \"2024.01.01\"]\n[Round \"{}\"]\n"
+            "[White \"A{}\"]\n[Black \"B{}\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Nf3 Nc6 1-0\n\n",
+            game_index,
+            game_index + 1,
+            game_index,
+            game_index);
     }
     return pgn;
 }
@@ -394,7 +464,7 @@ void run_http_position_search_perf_test()
     latencies_us.reserve(sample_hashes->size());
 
     for (auto const hash : *sample_hashes) {
-        auto const path = std::string {"/api/positions/"} + std::to_string(hash);
+        auto const path = fmt::format("/api/positions/{}", hash);
         auto const start = std::chrono::steady_clock::now();
         auto const res = cli.Get(path);
         auto const stop = std::chrono::steady_clock::now();
@@ -432,13 +502,20 @@ void run_http_position_search_perf_test()
         .max_us = latencies_us.back(),
     };
 
-    std::cout << "\n=== position search HTTP endpoint ===\n"
-              << "  queries:      " << result.num_queries << "\n"
-              << "  total:        " << result.total_ms << " ms\n"
-              << "  p50:          " << result.p50_us << " us\n"
-              << "  p99:          " << result.p99_us << " us\n"
-              << "  min:          " << result.min_us << " us\n"
-              << "  max:          " << result.max_us << " us\n";
+    fmt::print(stdout,
+               "\n=== position search HTTP endpoint ===\n"
+               "  queries:      {}\n"
+               "  total:        {} ms\n"
+               "  p50:          {} us\n"
+               "  p99:          {} us\n"
+               "  min:          {} us\n"
+               "  max:          {} us\n",
+               result.num_queries,
+               result.total_ms,
+               result.p50_us,
+               result.p99_us,
+               result.min_us,
+               result.max_us);
 
     CHECK(result.p99_us < perf_p99_limit_us);
 }
@@ -481,7 +558,7 @@ void run_http_opening_stats_perf_test()
     latencies_us.reserve(sample_hashes->size());
 
     for (auto const hash : *sample_hashes) {
-        auto const path = std::string {"/api/openings/"} + std::to_string(hash) + "/stats";
+        auto const path = fmt::format("/api/openings/{}/stats", hash);
         auto const start = std::chrono::steady_clock::now();
         auto const res = cli.Get(path);
         auto const stop = std::chrono::steady_clock::now();
@@ -519,13 +596,20 @@ void run_http_opening_stats_perf_test()
         .max_us = latencies_us.back(),
     };
 
-    std::cout << "\n=== opening stats HTTP endpoint ===\n"
-              << "  queries:      " << result.num_queries << "\n"
-              << "  total:        " << result.total_ms << " ms\n"
-              << "  p50:          " << result.p50_us << " us\n"
-              << "  p99:          " << result.p99_us << " us\n"
-              << "  min:          " << result.min_us << " us\n"
-              << "  max:          " << result.max_us << " us\n";
+    fmt::print(stdout,
+               "\n=== opening stats HTTP endpoint ===\n"
+               "  queries:      {}\n"
+               "  total:        {} ms\n"
+               "  p50:          {} us\n"
+               "  p99:          {} us\n"
+               "  min:          {} us\n"
+               "  max:          {} us\n",
+               result.num_queries,
+               result.total_ms,
+               result.p50_us,
+               result.p99_us,
+               result.min_us,
+               result.max_us);
 
     CHECK(result.p99_us < opening_stats_perf_p99_limit_us);
 }
@@ -1102,6 +1186,10 @@ TEST_CASE("server: opening stats returns continuations for populated DB", "[moti
     REQUIRE(e4_move.has_value());
     chesslib::move_maker {board, *e4_move}.make();
     auto const after_e4_hash = board.hash();
+    auto e5_move = chesslib::san::from_string(board, "e5");
+    REQUIRE(e5_move.has_value());
+    chesslib::move_maker {board, *e5_move}.make();
+    auto const expected_result_hash = board.hash();
 
     constexpr std::uint16_t test_port {18097};
     motif::http::server srv {*db_res};
@@ -1109,7 +1197,7 @@ TEST_CASE("server: opening stats returns continuations for populated DB", "[moti
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const path = std::string {"/api/openings/"} + std::to_string(after_e4_hash) + "/stats";
+    auto const path = fmt::format("/api/openings/{}/stats", after_e4_hash);
     auto const start = std::chrono::steady_clock::now();
     auto const res = cli.Get(path);
     auto const stop = std::chrono::steady_clock::now();
@@ -1130,6 +1218,51 @@ TEST_CASE("server: opening stats returns continuations for populated DB", "[moti
     CHECK(body.contains(R"("black_wins")"));
     CHECK(body.contains(R"("average_white_elo")"));
     CHECK(body.contains(R"("average_black_elo")"));
+    CHECK(body.contains(fmt::format(R"("result_hash":"{}")", expected_result_hash)));
+    CHECK_FALSE(body.contains(fmt::format(R"("result_hash":{})", expected_result_hash)));
+}
+
+TEST_CASE("server: opening stats includes eco and opening_name when game has them", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"ostats_eco"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "ostats-eco-db");
+    REQUIRE(db_res.has_value());
+
+    motif::db::game test_game {};
+    test_game.white = {.name = "Alice", .elo = std::nullopt, .title = std::nullopt, .country = std::nullopt};
+    test_game.black = {.name = "Bob", .elo = std::nullopt, .title = std::nullopt, .country = std::nullopt};
+    test_game.result = "0-1";
+    test_game.eco = "C00";
+    test_game.extra_tags = {{"Opening", "French Defense"}};
+    test_game.moves = encode_moves_for_game({"e4", "e6", "d4"});
+
+    auto inserted = db_res->store().insert(test_game);
+    REQUIRE(inserted.has_value());
+    auto rebuilt = db_res->rebuild_position_store();
+    REQUIRE(rebuilt.has_value());
+
+    auto board = chesslib::board {};
+    auto e4_move = chesslib::san::from_string(board, "e4");
+    REQUIRE(e4_move.has_value());
+    chesslib::move_maker {board, *e4_move}.make();
+    auto const after_e4_hash = board.hash();
+
+    constexpr std::uint16_t test_port {18098};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get(fmt::format("/api/openings/{}/stats", after_e4_hash));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+    auto const& body = res->body;
+    CHECK(body.contains(R"("eco":"C00")"));
+    CHECK(body.contains(R"("opening_name":"French Defense")"));
 }
 
 // NOLINTEND(readability-function-cognitive-complexity)
@@ -1193,7 +1326,7 @@ TEST_CASE("server: game list populated DB returns required fields", "[motif-http
     CHECK(res->status == 200);
     auto const& body = res->body;
     CHECK(body.front() == '[');
-    CHECK(body.contains(R"("id":)" + std::to_string(game_id)));
+    CHECK(body.contains(fmt::format(R"("id":{})", game_id)));
     CHECK(body.contains(R"("white":"Magnus Carlsen")"));
     CHECK(body.contains(R"("black":"Ian Nepomniachtchi")"));
     CHECK(body.contains(R"("result":"1-0")"));
@@ -1252,7 +1385,7 @@ TEST_CASE("server: game list filters by player and result", "[motif-http]")
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
     CHECK(count_game_list_ids(res->body) == 1);
-    CHECK(res->body.contains(R"("id":)" + std::to_string(expected_id)));
+    CHECK(res->body.contains(fmt::format(R"("id":{})", expected_id)));
     CHECK(res->body.contains(R"("white":"Levon Aronian")"));
     CHECK(res->body.contains(R"("black":"Magnus Carlsen")"));
 }
@@ -1283,7 +1416,7 @@ TEST_CASE("server: game list applies limit and offset", "[motif-http]")
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
     CHECK(count_game_list_ids(res->body) == 1);
-    CHECK(res->body.contains(R"("id":)" + std::to_string(expected_id)));
+    CHECK(res->body.contains(fmt::format(R"("id":{})", expected_id)));
 }
 
 TEST_CASE("server: game list clamps oversized limit", "[motif-http]")
@@ -1294,7 +1427,7 @@ TEST_CASE("server: game list clamps oversized limit", "[motif-http]")
     auto db_res = motif::db::database_manager::create(tdir.path, "games-limit-clamp-db");
     REQUIRE(db_res.has_value());
     for (std::size_t game_index = 0; game_index < inserted_games; ++game_index) {
-        auto const suffix = std::to_string(game_index);
+        auto const suffix = fmt::format("{}", game_index);
         insert_http_game(*db_res,
                          http_game_seed {
                              .white = "White " + suffix,
@@ -1390,7 +1523,7 @@ TEST_CASE("server: single game returns complete payload", "[motif-http]")
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get("/api/games/" + std::to_string(game_id));
+    auto const res = cli.Get(fmt::format("/api/games/{}", game_id));
 
     srv.stop();
     server_thread.join();
@@ -1398,7 +1531,7 @@ TEST_CASE("server: single game returns complete payload", "[motif-http]")
     REQUIRE(res != nullptr);
     REQUIRE(res->status == 200);
     auto const& body = res->body;
-    CHECK(body.contains(R"("id":)" + std::to_string(game_id)));
+    CHECK(body.contains(fmt::format(R"("id":{})", game_id)));
     CHECK(body.contains(R"("white")"));
     CHECK(body.contains(R"("black")"));
     CHECK(body.contains(R"("event")"));
@@ -1422,8 +1555,8 @@ TEST_CASE("server: single game returns complete payload", "[motif-http]")
     CHECK(body.contains("Opening"));
     CHECK(body.contains("Ruy Lopez"));
     CHECK(body.contains("Round"));
-    CHECK(body.contains(std::to_string(moves.at(0))));
-    CHECK(body.contains(std::to_string(moves.at(1))));
+    CHECK(body.contains(fmt::format("{}", moves.at(0))));
+    CHECK(body.contains(fmt::format("{}", moves.at(1))));
 }
 
 TEST_CASE("server: single game maps missing and invalid IDs", "[motif-http]")
@@ -1601,4 +1734,213 @@ TEST_CASE("server: import SSE streams progress and completion events", "[motif-h
 TEST_CASE("server: import DELETE requests cancellation", "[motif-http]")
 {
     run_import_delete_test();
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: second POST while import active returns 409 immediately", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"import_conflict2"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "import-conflict2");
+    REQUIRE(db_res.has_value());
+
+    auto const pgn_path = write_pgn_fixture(tdir.path, make_repeated_pgn(long_import_game_count));
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18116};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const first_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+    REQUIRE(first_res != nullptr);
+    REQUIRE(first_res->status == 202);
+
+    // Second POST before first completes — conflict check must fire before any
+    // heap allocation for session or pipeline (AC 6).
+    auto const second_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+    REQUIRE(second_res != nullptr);
+    CHECK(second_res->status == 409);
+    CHECK(second_res->body.contains("import already running"));
+
+    auto const import_id = extract_import_id(first_res->body);
+    auto const del_res = cli.Delete("/api/imports/" + import_id);
+    REQUIRE(del_res != nullptr);
+    CHECK(del_res->status == 200);
+
+    std::string collected_events;
+    cli.Get("/api/imports/" + import_id + "/progress",
+            httplib::Headers {},
+            [&collected_events](const char* data, size_t size) -> bool
+            {
+                collected_events.append(data, size);
+                return true;
+            });
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: import worker start failure returns 500 and does not block later imports", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"import_worker_start_failure"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "import-worker-start-failure");
+    REQUIRE(db_res.has_value());
+
+    auto const pgn_path = write_pgn_fixture(tdir.path, three_game_pgn_content);
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18119};
+    auto fail_start = env_flag_scope {fail_next_import_worker_start_env};
+    motif::http::server srv {*db_res};
+    fail_start.clear();
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const failed_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+    REQUIRE(failed_res != nullptr);
+    CHECK(failed_res->status == 500);
+    CHECK(failed_res->body.contains("failed to start import worker"));
+
+    auto const retry_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+    REQUIRE(retry_res != nullptr);
+    REQUIRE(retry_res->status == 202);
+
+    auto const import_id = extract_import_id(retry_res->body);
+    cli.Get(
+        "/api/imports/" + import_id + "/progress", httplib::Headers {}, [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: SSE error event data field is valid JSON even with special characters", "[motif-http]")
+{
+    // The error message format embeds the error code inside literal quotes
+    // (e.g. import failed: "io_failure"), which would break the old raw
+    // fmt::format approach.  After the glaze fix the data field must round-trip
+    // through JSON.parse without throwing.
+    auto const tdir = tmp_dir {"import_sse_error_escape"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "import-sse-escape");
+    REQUIRE(db_res.has_value());
+
+    auto const pgn_path = write_pgn_fixture(tdir.path, three_game_pgn_content);
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18117};
+    auto fail_run = env_flag_scope {fail_next_import_worker_run_env};
+    motif::http::server srv {*db_res};
+    fail_run.clear();
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const post_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 202);
+    auto const import_id = extract_import_id(post_res->body);
+
+    std::string collected_events;
+    cli.Get("/api/imports/" + import_id + "/progress",
+            httplib::Headers {},
+            [&collected_events](const char* data, size_t size) -> bool
+            {
+                collected_events.append(data, size);
+                return true;
+            });
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+
+    CHECK(collected_events.contains("event: error"));
+    CHECK(collected_events.contains(R"("error":"import failed: \"invalid_state\"")"));
+
+    // Every "data:" line in the SSE stream must carry parseable JSON.
+    auto pos = std::size_t {0};
+    auto data_line_count = std::size_t {0};
+    while (pos < collected_events.size()) {
+        auto const newline_pos = collected_events.find('\n', pos);
+        auto const line = collected_events.substr(pos, newline_pos == std::string::npos ? std::string::npos : newline_pos - pos);
+        pos = (newline_pos == std::string::npos) ? collected_events.size() : newline_pos + 1;
+
+        if (!line.starts_with("data: ")) {
+            continue;
+        }
+        auto const json_str = line.substr(6);  // strip "data: "
+        ++data_line_count;
+
+        motif_http_test::sse_event_payload payload;
+        auto const parse_result = glz::read_json(payload, json_str);
+        CHECK(!parse_result);  // must parse without error
+    }
+    CHECK(data_line_count > 0);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: completed sessions remain queryable up to bounded count", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"import_session_pruning"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "import-pruning");
+    REQUIRE(db_res.has_value());
+
+    auto const pgn_path = write_pgn_fixture(tdir.path, three_game_pgn_content);
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18118};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const run_one_import = [&]() -> std::string
+    {
+        auto const post_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+        REQUIRE(post_res != nullptr);
+        REQUIRE(post_res->status == 202);
+        auto const iid = extract_import_id(post_res->body);
+        // Drain SSE to completion so the worker finishes and the session is done.
+        cli.Get(
+            "/api/imports/" + iid + "/progress", httplib::Headers {}, [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
+        return iid;
+    };
+
+    auto import_ids = std::vector<std::string> {};
+    constexpr std::size_t imports_to_trigger_eviction {66};
+    import_ids.reserve(imports_to_trigger_eviction);
+    for (std::size_t index = 0; index < imports_to_trigger_eviction; ++index) {
+        import_ids.push_back(run_one_import());
+    }
+
+    auto const oldest_res = cli.Get("/api/imports/" + import_ids.front() + "/progress");
+    REQUIRE(oldest_res != nullptr);
+    CHECK(oldest_res->status == 404);
+
+    auto recent_events = std::string {};
+    auto const recent_ok = cli.Get("/api/imports/" + import_ids.back() + "/progress",
+                                   httplib::Headers {},
+                                   [&recent_events](const char* data, size_t size) -> bool
+                                   {
+                                       recent_events.append(data, size);
+                                       return true;
+                                   });
+    CHECK(recent_ok);
+    CHECK(recent_events.contains("event: complete"));
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
 }
