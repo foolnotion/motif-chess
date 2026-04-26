@@ -44,8 +44,21 @@
           };
           inherit (pkgs.llvmPackages_21) stdenv;
           mkShell = pkgs.mkShell.override { inherit stdenv; };
-          glaze-no-ssl = pkgs.glaze.overrideAttrs (old: {
-            cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DGLZ_ENABLE_SSL=OFF" ];
+          glaze-simd-no-ssl = pkgs.glaze.overrideAttrs (old: {
+            cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+              "-DGLZ_DISABLE_SIMD=OFF"
+              "-DGLZ_ENABLE_SSL=OFF"
+            ];
+            postInstall =
+              (old.postInstall or "")
+              + ''
+                substituteInPlace "$out/share/glaze/glazeConfig.cmake" \
+                  --replace 'set(_glaze_ENABLE_SSL "TRUE")' 'set(_glaze_ENABLE_SSL "FALSE")'
+
+                substituteInPlace "$out/share/glaze/glazeTargets.cmake" \
+                  --replace 'INTERFACE_COMPILE_DEFINITIONS "GLZ_DISABLE_SIMD;GLZ_ENABLE_SSL"' 'INTERFACE_COMPILE_DEFINITIONS ""' \
+                  --replace 'INTERFACE_LINK_LIBRARIES "OpenSSL::SSL;OpenSSL::Crypto"' 'INTERFACE_LINK_LIBRARIES ""'
+              '';
           });
         in
         rec {
@@ -67,7 +80,7 @@
               # core deps (design doc)
               cpptrace
               fmt
-              glaze-no-ssl
+              glaze-simd-no-ssl
               libassert
               libdwarf
               magic-enum
