@@ -66,6 +66,27 @@ class game_store
     // Returns error_code::not_found if the id does not exist.
     auto remove(std::uint32_t game_id) -> result<void>;
 
+    // Retrieve only the provenance for a game (cheaper than full get()).
+    // Returns error_code::not_found if the id does not exist.
+    auto get_provenance(std::uint32_t game_id) const -> result<game_provenance>;
+
+    // Update editable metadata fields on a manually-added game.
+    // Returns error_code::not_found if the id does not exist.
+    // Returns error_code::not_editable if source_type != "manual".
+    // Returns error_code::duplicate if the patch would create an identity conflict.
+    auto patch_metadata(std::uint32_t game_id, game_patch const& patch) -> result<void>;
+
+    // Delete a manual game by id; rejects imported/reference games.
+    // Returns error_code::not_found if the id does not exist.
+    // Returns error_code::not_editable if source_type != "manual".
+    auto remove_user_game(std::uint32_t game_id) -> result<void>;
+
+    // Mark a just-inserted game as manually-added (source_type = 'manual').
+    // Used after import_worker::process() to flip the default 'imported' provenance.
+    // Returns error_code::not_found if the id does not exist.
+    auto set_manual_provenance(std::uint32_t game_id, std::optional<std::string> const& source_label, std::string const& review_status)
+        -> result<void>;
+
   private:
     sqlite3* db_;
     gtl::flat_hash_map<std::string, std::int64_t> player_id_cache_;

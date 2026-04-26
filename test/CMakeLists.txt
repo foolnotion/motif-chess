@@ -53,6 +53,13 @@ target_compile_definitions(
 )
 catch_discover_tests(motif_search_test)
 
+add_executable(motif_engine_test
+    source/motif_engine/engine_manager_test.cpp
+)
+target_link_libraries(motif_engine_test PRIVATE motif_engine Catch2::Catch2WithMain)
+target_compile_features(motif_engine_test PRIVATE cxx_std_23)
+catch_discover_tests(motif_engine_test)
+
 add_executable(motif_http_test
     source/motif_http/http_server_test.cpp
 )

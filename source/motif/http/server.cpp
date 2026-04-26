@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -25,10 +26,17 @@
 
 #include "motif/http/server.hpp"
 
+#include <chesslib/board/board.hpp>
+#include <chesslib/board/move_generator.hpp>
+#include <chesslib/core/types.hpp>
+#include <chesslib/util/fen.hpp>
+#include <chesslib/util/san.hpp>
+#include <chesslib/util/uci.hpp>
 #include <fmt/format.h>
 #include <glaze/json/read.hpp>
 #include <glaze/json/write.hpp>
 #include <httplib.h>
+#include <pgnlib/pgnlib.hpp>
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
@@ -37,6 +45,7 @@
 #include "motif/http/error.hpp"
 #include "motif/import/error.hpp"
 #include "motif/import/import_pipeline.hpp"
+#include "motif/import/import_worker.hpp"
 #include "motif/search/opening_stats.hpp"
 #include "motif/search/position_search.hpp"
 
@@ -76,6 +85,13 @@ struct game_tag_response
     std::string value;
 };
 
+struct game_provenance_response
+{
+    std::string source_type;
+    std::optional<std::string> source_label;
+    std::string review_status;
+};
+
 struct game_response
 {
     std::uint32_t id {};
@@ -87,6 +103,52 @@ struct game_response
     std::optional<std::string> eco;
     std::vector<game_tag_response> tags;
     std::vector<std::uint16_t> moves;
+    game_provenance_response provenance;
+};
+
+struct game_list_entry_response
+{
+    std::uint32_t id {};
+    std::string white;
+    std::string black;
+    std::string result;
+    std::string event;
+    std::string date;
+    std::string eco;
+    std::string source_type;
+    std::optional<std::string> source_label;
+    std::string review_status;
+};
+
+struct create_game_request
+{
+    std::string pgn;
+    std::optional<std::string> source_label;
+    std::optional<std::string> review_status;
+};
+
+struct create_game_response
+{
+    std::uint32_t id {};
+    std::string source_type;
+    std::optional<std::string> source_label;
+    std::string review_status;
+};
+
+struct patch_game_request
+{
+    std::optional<std::string> white_name;
+    std::optional<std::int32_t> white_elo;
+    std::optional<std::string> black_name;
+    std::optional<std::int32_t> black_elo;
+    std::optional<std::string> event;
+    std::optional<std::string> site;
+    std::optional<std::string> date;
+    std::optional<std::string> result;
+    std::optional<std::string> eco;
+    std::optional<std::string> source_label;
+    std::optional<std::string> review_status;
+    std::optional<std::string> notes;
 };
 
 struct opening_continuation_response
@@ -118,6 +180,48 @@ struct import_request_body
     std::string path;
 };
 
+struct legal_move_response
+{
+    std::string uci;
+    std::string san;
+    std::string from;
+    std::string to;
+    std::optional<std::string> promotion;
+};
+
+struct legal_moves_response
+{
+    std::string fen;
+    std::vector<legal_move_response> legal_moves;
+};
+
+struct apply_move_request
+{
+    std::string fen;
+    std::string uci;
+};
+
+struct apply_move_response
+{
+    std::string uci;
+    std::string san;
+    std::string fen;
+};
+
+struct start_analysis_request
+{
+    std::string fen;
+    std::string engine;
+    std::optional<int> multipv;
+    std::optional<int> depth;
+    std::optional<int> movetime_ms;
+};
+
+struct start_analysis_response
+{
+    std::string analysis_id;
+};
+
 struct import_session
 {
     std::unique_ptr<motif::import::import_pipeline> pipeline;
@@ -140,11 +244,27 @@ namespace
 {
 
 constexpr int http_ok {200};
+constexpr int http_created {201};
+constexpr int http_no_content {204};
 constexpr int http_accepted {202};
 constexpr int http_bad_request {400};
-constexpr int http_conflict {409};
 constexpr int http_not_found {404};
+constexpr int http_conflict {409};
+constexpr int http_not_implemented {501};
 constexpr int http_internal_error {500};
+
+constexpr std::array valid_results {"1-0", "0-1", "1/2-1/2", "*"};
+constexpr std::array valid_review_statuses {"new", "needs_review", "studied", "archived"};
+
+auto is_valid_result(std::string_view const val) -> bool
+{
+    return std::ranges::any_of(valid_results, [&](std::string_view entry) -> bool { return entry == val; });
+}
+
+auto is_valid_review_status(std::string_view const val) -> bool
+{
+    return std::ranges::any_of(valid_review_statuses, [&](std::string_view entry) -> bool { return entry == val; });
+}
 
 constexpr std::chrono::milliseconds sse_poll_interval {250};
 constexpr std::chrono::minutes sse_max_wait {30};
@@ -243,6 +363,28 @@ auto to_game_response(std::uint32_t const game_id, motif::db::game const& source
         .eco = source.eco,
         .tags = std::move(tags),
         .moves = source.moves,
+        .provenance =
+            detail::game_provenance_response {
+                .source_type = source.provenance.source_type,
+                .source_label = source.provenance.source_label,
+                .review_status = source.provenance.review_status,
+            },
+    };
+}
+
+auto to_game_list_entry_response(motif::db::game_list_entry const& src) -> detail::game_list_entry_response
+{
+    return detail::game_list_entry_response {
+        .id = src.id,
+        .white = src.white,
+        .black = src.black,
+        .result = src.result,
+        .event = src.event,
+        .date = src.date,
+        .eco = src.eco,
+        .source_type = src.source_type,
+        .source_label = src.source_label,
+        .review_status = src.review_status,
     };
 }
 
@@ -287,13 +429,92 @@ auto generate_import_id() -> std::string
     return fmt::format("{:016x}{:016x}", high, low);
 }
 
-void register_cors(httplib::Server& svr)
+auto generate_analysis_id() -> std::string
+{
+    static std::mutex rng_mutex;
+    static std::mt19937_64 rng {std::random_device {}()};
+    std::uint64_t high {};
+    std::uint64_t low {};
+    {
+        std::scoped_lock const lock {rng_mutex};
+        high = rng();
+        low = rng();
+    }
+    return fmt::format("{:016x}{:016x}", high, low);
+}
+
+// Extract "from" and "to" square names from a UCI string (e.g. "e2e4" → "e2", "e4").
+// Returns nullopt if the UCI string is too short to be valid.
+auto uci_squares(std::string const& uci_str) -> std::optional<std::pair<std::string, std::string>>
+{
+    if (uci_str.size() < 4) {
+        return std::nullopt;
+    }
+    return std::pair<std::string, std::string> {uci_str.substr(0, 2), uci_str.substr(2, 2)};
+}
+
+// Extract promotion character from UCI string if present (5th char: q/r/b/n).
+auto uci_promotion(std::string const& uci_str) -> std::optional<std::string>
+{
+    constexpr std::size_t uci_promotion_length {5};
+    constexpr std::size_t uci_promotion_index {4};
+    if (uci_str.size() >= uci_promotion_length) {
+        return std::string {uci_str[uci_promotion_index]};
+    }
+    return std::nullopt;
+}
+
+auto is_valid_uci_syntax(std::string const& uci_str) -> bool
+{
+    constexpr std::size_t uci_move_length {4};
+    constexpr std::size_t uci_promotion_length {5};
+    auto const is_file = [](char const value) -> bool { return value >= 'a' && value <= 'h'; };
+    auto const is_rank = [](char const value) -> bool { return value >= '1' && value <= '8'; };
+    auto const is_promotion = [](char const value) -> bool { return value == 'q' || value == 'r' || value == 'b' || value == 'n'; };
+
+    if (uci_str.size() != uci_move_length && uci_str.size() != uci_promotion_length) {
+        return false;
+    }
+    if (!is_file(uci_str[0]) || !is_rank(uci_str[1]) || !is_file(uci_str[2]) || !is_rank(uci_str[3])) {
+        return false;
+    }
+    return uci_str.size() == uci_move_length || is_promotion(uci_str[uci_move_length]);
+}
+
+auto to_legal_move_response(chesslib::board const& board, chesslib::move const mov) -> detail::legal_move_response
+{
+    auto const uci_str = chesslib::uci::to_string(mov);
+    auto const san_str = chesslib::san::to_string(board, mov);
+    auto const squares = uci_squares(uci_str);
+    auto const from_sq = squares ? squares->first : std::string {};
+    auto const to_sq = squares ? squares->second : std::string {};
+    return detail::legal_move_response {
+        .uci = uci_str,
+        .san = san_str,
+        .from = from_sq,
+        .to = to_sq,
+        .promotion = uci_promotion(uci_str),
+    };
+}
+
+void register_cors(httplib::Server& svr, std::vector<std::string> const& allowed_origins)
 {
     svr.set_post_routing_handler(
-        [](httplib::Request const& /*req*/, httplib::Response& res) -> void
+        [allowed_origins](httplib::Request const& req, httplib::Response& res) -> void
         {
-            res.set_header("Access-Control-Allow-Origin", "*");
-            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            if (allowed_origins.empty()) {
+                res.set_header("Access-Control-Allow-Origin", "*");
+            } else {
+                auto const origin_header = req.get_header_value("Origin");
+                if (!origin_header.empty()) {
+                    auto const found = std::ranges::find(allowed_origins, origin_header);
+                    if (found != allowed_origins.end()) {
+                        res.set_header("Access-Control-Allow-Origin", origin_header);
+                        res.set_header("Vary", "Origin");
+                    }
+                }
+            }
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
             res.set_header("Access-Control-Allow-Headers", "Content-Type");
         });
 
@@ -318,6 +539,7 @@ struct server::impl
     std::atomic<bool> fail_next_import_worker_run_for_test {false};
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     motif::db::database_manager& database;
+    std::vector<std::string> allowed_origins;
 
     explicit impl(motif::db::database_manager& mgr);
     ~impl();
@@ -340,7 +562,7 @@ server::impl::impl(motif::db::database_manager& mgr)
     , fail_next_import_worker_run_for_test {env_flag_enabled(fail_next_import_worker_run_env)}
     , database {mgr}
 {
-    register_cors(svr);
+    register_cors(svr, {});
     setup_routes();
 }
 
@@ -405,6 +627,92 @@ void server::impl::setup_routes()
                 res.set_content(body, "application/json");
                 res.status = http_ok;
             });
+
+    svr.Get("/api/positions/legal-moves",
+            [](httplib::Request const& req, httplib::Response& res) -> void
+            {
+                auto const fen_param = req.get_param_value("fen");
+                if (fen_param.empty()) {
+                    set_json_error(res, http_bad_request, "invalid fen");
+                    return;
+                }
+
+                auto board_result = chesslib::fen::read(fen_param);
+                if (!board_result) {
+                    set_json_error(res, http_bad_request, "invalid fen");
+                    return;
+                }
+
+                auto const& board = *board_result;
+                auto const moves = chesslib::legal_moves(board);
+                auto move_responses = std::vector<detail::legal_move_response> {};
+                move_responses.reserve(moves.size());
+                for (auto const& mov : moves) {
+                    move_responses.push_back(to_legal_move_response(board, mov));
+                }
+
+                std::string body {};
+                [[maybe_unused]] auto const err = glz::write_json(
+                    detail::legal_moves_response {
+                        .fen = chesslib::fen::write(board),
+                        .legal_moves = std::move(move_responses),
+                    },
+                    body);
+                res.set_content(body, "application/json");
+                res.status = http_ok;
+            });
+
+    svr.Post("/api/positions/apply-move",
+             [](httplib::Request const& req, httplib::Response& res) -> void
+             {
+                 detail::apply_move_request req_body;
+                 if (auto parse_err = glz::read_json(req_body, req.body); parse_err) {
+                     set_json_error(res, http_bad_request, "invalid request body");
+                     return;
+                 }
+
+                 if (req_body.fen.empty()) {
+                     set_json_error(res, http_bad_request, "invalid fen");
+                     return;
+                 }
+                 if (req_body.uci.empty()) {
+                     set_json_error(res, http_bad_request, "invalid uci");
+                     return;
+                 }
+                 if (!is_valid_uci_syntax(req_body.uci)) {
+                     set_json_error(res, http_bad_request, "invalid uci");
+                     return;
+                 }
+
+                 auto board_result = chesslib::fen::read(req_body.fen);
+                 if (!board_result) {
+                     set_json_error(res, http_bad_request, "invalid fen");
+                     return;
+                 }
+
+                 auto& board = *board_result;
+                 auto move_result = chesslib::uci::from_string(board, req_body.uci);
+                 if (!move_result) {
+                     set_json_error(res, http_bad_request, "illegal move");
+                     return;
+                 }
+
+                 auto const accepted_uci = chesslib::uci::to_string(*move_result);
+                 auto const accepted_san = chesslib::san::to_string(board, *move_result);
+                 chesslib::move_maker {board, *move_result}.make();
+                 auto const result_fen = chesslib::fen::write(board);
+
+                 std::string body {};
+                 [[maybe_unused]] auto const err = glz::write_json(
+                     detail::apply_move_response {
+                         .uci = accepted_uci,
+                         .san = accepted_san,
+                         .fen = result_fen,
+                     },
+                     body);
+                 res.set_content(body, "application/json");
+                 res.status = http_ok;
+             });
 
     auto const invalid_hash_handler = [](httplib::Request const& /*req*/, httplib::Response& res) -> void
     { set_json_error(res, http_bad_request, "invalid zobrist hash"); };
@@ -566,8 +874,14 @@ void server::impl::setup_routes()
                     return;
                 }
 
+                auto responses = std::vector<detail::game_list_entry_response> {};
+                responses.reserve(games->size());
+                for (auto const& entry : *games) {
+                    responses.push_back(to_game_list_entry_response(entry));
+                }
+
                 std::string body {};
-                [[maybe_unused]] auto const err = glz::write_json(*games, body);
+                [[maybe_unused]] auto const err = glz::write_json(responses, body);
                 res.set_content(body, "application/json");
                 res.status = http_ok;
             });
@@ -575,6 +889,204 @@ void server::impl::setup_routes()
     svr.Get("/api/games/",
             [](httplib::Request const& /*req*/, httplib::Response& res) -> void
             { set_json_error(res, http_bad_request, "invalid game id"); });
+
+    svr.Post("/api/games",
+             [this](httplib::Request const& req, httplib::Response& res) -> void
+             {
+                 detail::create_game_request req_body;
+                 if (auto parse_err = glz::read_json(req_body, req.body); parse_err) {
+                     set_json_error(res, http_bad_request, "invalid request body");
+                     return;
+                 }
+                 if (req_body.pgn.empty()) {
+                     set_json_error(res, http_bad_request, "pgn is required");
+                     return;
+                 }
+
+                 auto const review_status = req_body.review_status.value_or(std::string {"new"});
+                 if (!is_valid_review_status(review_status)) {
+                     set_json_error(res, http_bad_request, "invalid review_status; allowed: new, needs_review, studied, archived");
+                     return;
+                 }
+
+                 auto parse_result = pgn::parse_string(req_body.pgn);
+                 if (!parse_result) {
+                     set_json_error(res, http_bad_request, "pgn parse error: invalid PGN syntax");
+                     return;
+                 }
+                 auto const& games = *parse_result;
+                 if (games.empty()) {
+                     set_json_error(res, http_bad_request, "no game found in PGN");
+                     return;
+                 }
+                 if (games.size() > 1) {
+                     set_json_error(res, http_bad_request, "only one game per request is supported");
+                     return;
+                 }
+
+                 auto const& pgn_game = games.front();
+
+                 std::uint32_t game_id {};
+                 {
+                     std::scoped_lock const lock {database_mutex};
+                     motif::import::import_worker worker {database.store(), database.positions()};
+                     auto worker_result = worker.process(pgn_game);
+
+                     if (!worker_result) {
+                         if (worker_result.error() == motif::import::error_code::duplicate) {
+                             set_json_error(res, http_conflict, "duplicate game");
+                             return;
+                         }
+                         if (worker_result.error() == motif::import::error_code::parse_error) {
+                             set_json_error(res, http_bad_request, "pgn parse error: invalid SAN move");
+                             return;
+                         }
+                         set_json_error(res, http_internal_error, "game creation failed");
+                         return;
+                     }
+
+                     game_id = worker_result->game_id;
+
+                     // import_worker inserts with source_type='imported' (schema default);
+                     // flip to 'manual' provenance now.
+                     auto prov_res = database.store().set_manual_provenance(game_id, req_body.source_label, review_status);
+                     if (!prov_res) {
+                         static_cast<void>(database.store().remove(game_id));
+                         set_json_error(res, http_internal_error, "game creation failed");
+                         return;
+                     }
+                 }
+
+                 std::string body {};
+                 [[maybe_unused]] auto const err = glz::write_json(
+                     detail::create_game_response {
+                         .id = game_id,
+                         .source_type = "manual",
+                         .source_label = req_body.source_label,
+                         .review_status = review_status,
+                     },
+                     body);
+                 res.set_content(body, "application/json");
+                 res.status = http_created;
+             });
+
+    svr.Patch("/api/games/:id",
+              [this](httplib::Request const& req, httplib::Response& res) -> void
+              {
+                  auto const& id_str = req.path_params.at("id");
+                  auto const game_id = parse_game_id(id_str);
+                  if (!game_id) {
+                      set_json_error(res, http_bad_request, "invalid game id");
+                      return;
+                  }
+
+                  detail::patch_game_request req_body;
+                  if (auto parse_err = glz::read_json(req_body, req.body); parse_err) {
+                      set_json_error(res, http_bad_request, "invalid request body");
+                      return;
+                  }
+
+                  if (req_body.result.has_value() && !is_valid_result(*req_body.result)) {
+                      set_json_error(res, http_bad_request, "invalid result; allowed: 1-0, 0-1, 1/2-1/2, *");
+                      return;
+                  }
+
+                  if (req_body.review_status.has_value() && !is_valid_review_status(*req_body.review_status)) {
+                      set_json_error(res, http_bad_request, "invalid review_status; allowed: new, needs_review, studied, archived");
+                      return;
+                  }
+
+                  auto db_patch = motif::db::game_patch {
+                      .white_name = req_body.white_name,
+                      .white_elo = req_body.white_elo,
+                      .black_name = req_body.black_name,
+                      .black_elo = req_body.black_elo,
+                      .event = req_body.event,
+                      .site = req_body.site,
+                      .date = req_body.date,
+                      .result = req_body.result,
+                      .eco = req_body.eco,
+                      .source_label = req_body.source_label,
+                      .review_status = req_body.review_status,
+                      .notes = req_body.notes,
+                  };
+
+                  auto patch_result = [this, &game_id, &db_patch]() -> motif::db::result<void>
+                  {
+                      std::scoped_lock const lock {database_mutex};
+                      return database.store().patch_metadata(*game_id, db_patch);
+                  }();
+
+                  if (!patch_result) {
+                      if (patch_result.error() == motif::db::error_code::not_found) {
+                          set_json_error(res, http_not_found, "not_found");
+                          return;
+                      }
+                      if (patch_result.error() == motif::db::error_code::not_editable) {
+                          set_json_error(res, http_conflict, "game is not user-added and cannot be modified");
+                          return;
+                      }
+                      if (patch_result.error() == motif::db::error_code::duplicate) {
+                          set_json_error(res, http_conflict, "patch would create a duplicate game");
+                          return;
+                      }
+                      set_json_error(res, http_internal_error, "patch failed");
+                      return;
+                  }
+
+                  auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
+                  {
+                      std::scoped_lock const lock {database_mutex};
+                      return database.store().get(*game_id);
+                  }();
+                  if (!game_result) {
+                      set_json_error(res, http_internal_error, "game retrieval failed after patch");
+                      return;
+                  }
+
+                  std::string body {};
+                  if (auto const err = glz::write_json(to_game_response(*game_id, *game_result), body); err) {
+                      set_json_error(res, http_internal_error, "game retrieval failed after patch");
+                      return;
+                  }
+                  res.set_content(body, "application/json");
+                  res.status = http_ok;
+              });
+
+    svr.Delete("/api/games/:id",
+               [this](httplib::Request const& req, httplib::Response& res) -> void
+               {
+                   auto const& id_str = req.path_params.at("id");
+                   auto const game_id = parse_game_id(id_str);
+                   if (!game_id) {
+                       set_json_error(res, http_bad_request, "invalid game id");
+                       return;
+                   }
+
+                   {
+                       std::scoped_lock const lock {database_mutex};
+                       auto delete_result = database.store().remove_user_game(*game_id);
+
+                       if (!delete_result) {
+                           if (delete_result.error() == motif::db::error_code::not_found) {
+                               set_json_error(res, http_not_found, "not_found");
+                               return;
+                           }
+                           if (delete_result.error() == motif::db::error_code::not_editable) {
+                               set_json_error(res, http_conflict, "game is not user-added and cannot be deleted");
+                               return;
+                           }
+                           set_json_error(res, http_internal_error, "delete failed");
+                           return;
+                       }
+
+                       // Rebuild DuckDB position store to remove deleted game's position rows.
+                       // position_store has no delete-by-game-id API; rebuild is the safe path (NFR09).
+                       static_cast<void>(database.rebuild_position_store(/*sort_by_zobrist=*/false));
+                   }
+
+                   res.status = http_no_content;
+               });
 
     svr.Get("/api/games/:id",
             [this](httplib::Request const& req, httplib::Response& res) -> void
@@ -608,6 +1120,72 @@ void server::impl::setup_routes()
                 res.set_content(body, "application/json");
                 res.status = http_ok;
             });
+
+    // Engine analysis routes — exact path before parameterized paths.
+    svr.Post("/api/engine/analyses",
+             [](httplib::Request const& req, httplib::Response& res) -> void
+             {
+                 detail::start_analysis_request req_body;
+                 if (auto parse_err = glz::read_json(req_body, req.body); parse_err) {
+                     set_json_error(res, http_bad_request, "invalid request body");
+                     return;
+                 }
+
+                 if (req_body.fen.empty()) {
+                     set_json_error(res, http_bad_request, "missing fen");
+                     return;
+                 }
+
+                 if (!chesslib::fen::read(req_body.fen)) {
+                     set_json_error(res, http_bad_request, "invalid fen");
+                     return;
+                 }
+
+                 auto const has_depth = req_body.depth.has_value();
+                 auto const has_movetime = req_body.movetime_ms.has_value();
+                 if (has_depth == has_movetime) {
+                     set_json_error(res, http_bad_request, "provide exactly one of depth or movetime_ms");
+                     return;
+                 }
+
+                 constexpr int multipv_min {1};
+                 constexpr int multipv_max {5};
+                 auto const multipv = req_body.multipv.value_or(1);
+                 if (multipv < multipv_min || multipv > multipv_max) {
+                     set_json_error(res, http_bad_request, "multipv must be between 1 and 5");
+                     return;
+                 }
+
+                 constexpr int depth_min {1};
+                 constexpr int depth_max {100};
+                 if (has_depth && (*req_body.depth < depth_min || *req_body.depth > depth_max)) {
+                     set_json_error(res, http_bad_request, "depth must be between 1 and 100");
+                     return;
+                 }
+
+                 constexpr int movetime_min {1};
+                 constexpr int movetime_max {300000};
+                 if (has_movetime && (*req_body.movetime_ms < movetime_min || *req_body.movetime_ms > movetime_max)) {
+                     set_json_error(res, http_bad_request, "movetime_ms must be between 1 and 300000");
+                     return;
+                 }
+
+                 auto const analysis_id = generate_analysis_id();
+                 std::string body {};
+                 [[maybe_unused]] auto const err = glz::write_json(detail::start_analysis_response {analysis_id}, body);
+                 res.set_content(body, "application/json");
+                 res.status = http_accepted;
+             });
+
+    // GET /api/engine/analyses/:analysis_id/stream — SSE body is Phase 2 work.
+    svr.Get("/api/engine/analyses/:analysis_id/stream",
+            [](httplib::Request const& /*req*/, httplib::Response& res) -> void
+            { set_json_error(res, http_not_implemented, "engine analysis not yet implemented"); });
+
+    // DELETE /api/engine/analyses/:analysis_id — stop logic is Phase 2 work.
+    svr.Delete("/api/engine/analyses/:analysis_id",
+               [](httplib::Request const& /*req*/, httplib::Response& res) -> void
+               { set_json_error(res, http_not_implemented, "engine analysis not yet implemented"); });
 
     svr.Post("/api/imports",
              [this](httplib::Request const& req, httplib::Response& res) -> void
@@ -821,12 +1399,20 @@ server::server(motif::db::database_manager& database)
 
 server::~server() = default;
 
-auto server::start(std::uint16_t port) -> result<void>
+auto server::start(std::string const& host, std::uint16_t const port, std::vector<std::string> const& allowed_origins) -> result<void>
 {
-    if (!impl_->svr.listen("0.0.0.0", port)) {
+    impl_->allowed_origins = allowed_origins;
+    // Re-register CORS with the configured origins.
+    register_cors(impl_->svr, allowed_origins);
+    if (!impl_->svr.listen(host, port)) {
         return tl::unexpected {error_code::listen_failed};
     }
     return {};
+}
+
+auto server::start(std::uint16_t const port) -> result<void>
+{
+    return start(std::string {default_host}, port, {});
 }
 
 auto server::stop() -> void
