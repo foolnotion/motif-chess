@@ -737,6 +737,60 @@ So that I can view full game metadata and move data from any frontend.
 **When** the endpoint is called
 **Then** HTTP 400 is returned with an error message
 
+### Story 4b.7: OpenAPI Specification
+
+As a developer integrating with the motif-chess HTTP API,
+I want a versioned OpenAPI 3.1 specification document,
+So that I have a machine-readable and human-readable contract for all endpoints that serves as the epic's exit artifact.
+
+**Acceptance Criteria:**
+
+**Given** all six Epic 4b endpoints are implemented
+**When** the spec file at `docs/api/openapi.yaml` is loaded by any OpenAPI 3.1-compliant tool (e.g., Swagger UI, Redoc, openapi-generator)
+**Then** it validates without errors and documents all 8 routes: `GET /health`, `GET /api/positions/{zobrist_hash}`, `GET /api/openings/{zobrist_hash}/stats`, `POST /api/imports`, `GET /api/imports/{import_id}/progress`, `DELETE /api/imports/{import_id}`, `GET /api/games`, `GET /api/games/{id}`
+
+**Given** each documented endpoint
+**When** the spec is reviewed
+**Then** every route includes: HTTP method, path, summary, all path/query parameters with types and constraints, request body schema (where applicable), all documented response codes with schema, and at least one example
+
+**Given** the spec is committed
+**When** `cmake --preset=dev && cmake --build build/dev && ctest --test-dir build/dev` is run
+**Then** all existing tests continue to pass (no regressions)
+
+---
+
+## Epic 4c: HTTP API Contract Hardening
+
+Before a separate web frontend consumes the local HTTP API, the API contract must be hardened around frontend-safe data representation and consistent formatting. This is a follow-up to Epic 4b, not the start of the deferred Qt desktop epic.
+
+### Story 4c.1: HTTP API Contract Hardening
+
+As a developer building a separate web frontend against the motif-chess HTTP API,
+I want hash values and formatting behavior to be consistent and frontend-safe,
+So that API clients can consume the contract without integer precision loss or representation drift.
+
+**Acceptance Criteria:**
+
+**Given** any HTTP response field exposes a Zobrist or resulting-position hash
+**When** JSON is serialized
+**Then** the hash is emitted as a JSON string, regardless of numeric magnitude
+**And** internal C++ domain/search types continue to store hashes as `std::uint64_t`
+
+**Given** `GET /api/openings/{zobrist_hash}/stats` returns continuations
+**When** the response contains `result_hash`
+**Then** every `result_hash` value is serialized as a decimal JSON string
+**And** tests assert the quoted string form for a known computed hash
+
+**Given** `docs/api/openapi.yaml` is used by the web frontend
+**When** the OpenAPI schemas and examples are reviewed
+**Then** every externally exposed hash field is documented as `type: string`
+**And** examples use quoted decimal strings
+
+**Given** HTTP production code or HTTP tests intentionally format strings or write console output
+**When** the code is reviewed
+**Then** it uses `fmt::format` for string construction and `fmt::print` for stdout/stderr output
+**And** new or touched HTTP files do not use `std::cout`, `std::cerr`, `std::ostringstream`, or `std::to_string`
+
 ---
 
 ## Epic 4: Desktop Application *(DEFERRED — Epic 4b takes priority)*

@@ -1,0 +1,633 @@
+openapi: 3.1.0
+
+info:
+  title: motif-chess API
+  version: 0.1.0
+  description: HTTP API for the motif-chess position database and PGN import pipeline.
+
+servers:
+  - url: http://localhost:8080
+    description: local dev
+
+security: []
+
+paths:
+
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      responses:
+        '200':
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                ok:
+                  value:
+                    status: ok
+
+  /api/positions/{zobrist_hash}:
+    get:
+      operationId: searchPositions
+      summary: Find games containing a position by Zobrist hash
+      parameters:
+        - name: zobrist_hash
+          in: path
+          required: true
+          description: >-
+            Unsigned 64-bit Zobrist hash of the position as a decimal string.
+            Valid range is 0..18446744073709551615; overflow returns 400.
+          schema:
+            type: string
+            pattern: '^\d+$'
+            maxLength: 20
+          examples:
+            typical:
+              value: '11122233344455566'
+        - name: offset
+          in: query
+          description: Number of results to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum results to return (server caps at 500)
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Array of position hits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PositionHit'
+              examples:
+                typical:
+                  value:
+                    - game_id: 1
+                      ply: 10
+                      result: 1
+                      white_elo: 1800
+                      black_elo: 1750
+        '400':
+          description: Invalid hash or pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_hash:
+                  value:
+                    error: invalid zobrist hash
+                invalid_pagination:
+                  value:
+                    error: invalid pagination parameters
+
+  /api/openings/{zobrist_hash}/stats:
+    get:
+      operationId: getOpeningStats
+      summary: Get opening continuation statistics for a position
+      parameters:
+        - name: zobrist_hash
+          in: path
+          required: true
+          description: >-
+            Unsigned 64-bit Zobrist hash of the position as a decimal string.
+            Valid range is 0..18446744073709551615; overflow returns 400.
+          schema:
+            type: string
+            pattern: '^\d+$'
+            maxLength: 20
+          examples:
+            typical:
+              value: '11122233344455566'
+      responses:
+        '200':
+          description: Opening continuation statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpeningStats'
+              examples:
+                typical:
+                  value:
+                    continuations:
+                      - san: e4
+                        result_hash: '9999999999999'
+                        frequency: 150
+                        white_wins: 70
+                        draws: 40
+                        black_wins: 40
+                        average_white_elo: 1750.5
+                        average_black_elo: 1720.0
+                        eco: B20
+                        opening_name: Sicilian Defense
+        '400':
+          description: Invalid Zobrist hash
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_hash:
+                  value:
+                    error: invalid zobrist hash
+
+  /api/imports:
+    post:
+      operationId: startImport
+      summary: Start a PGN import
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                  description: Absolute filesystem path to the PGN file
+            examples:
+              typical:
+                value:
+                  path: /home/user/games.pgn
+      responses:
+        '202':
+          description: Import started; use the returned import_id to stream progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportStartResponse'
+              examples:
+                typical:
+                  value:
+                    import_id: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+        '400':
+          description: Invalid request body, file not found, or file not readable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_request_body:
+                  value:
+                    error: invalid request body
+                not_readable:
+                  value:
+                    error: file not found or not readable
+        '409':
+          description: Another import is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                conflict:
+                  value:
+                    error: import already running
+
+  /api/imports/{import_id}/progress:
+    get:
+      operationId: streamImportProgress
+      summary: Stream import progress as Server-Sent Events
+      parameters:
+        - name: import_id
+          in: path
+          required: true
+          description: Import session ID returned by POST /api/imports
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{32}$'
+            minLength: 32
+            maxLength: 32
+          examples:
+            typical:
+              value: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+      responses:
+        '200':
+          description: |
+            Server-Sent Events stream. The connection stays open until the import completes.
+
+            **Progress event** (emitted every ~250 ms while the import runs):
+            ```
+            data: {"games_processed":500,"games_committed":490,"games_skipped":10,"elapsed_seconds":1.234}
+            ```
+
+            **Completion event** (final event on success, named `complete`):
+            ```
+            event: complete
+            data: {"total_attempted":1000,"committed":980,"skipped":20,"errors":0,"elapsed_ms":12345}
+            ```
+
+            **Error event** (final event on failure, named `error`):
+            ```
+            event: error
+            data: {"error":"import failed"}
+            ```
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                progress_event:
+                  summary: Progress event emitted every ~250 ms
+                  value: 'data: {"games_processed":500,"games_committed":490,"games_skipped":10,"elapsed_seconds":1.234}'
+                complete_event:
+                  summary: Final event on successful import
+                  value: |
+                    event: complete
+                    data: {"total_attempted":1000,"committed":980,"skipped":20,"errors":0,"elapsed_ms":12345}
+                error_event:
+                  summary: Final event on failed import
+                  value: |
+                    event: error
+                    data: {"error":"import failed"}
+        '404':
+          description: Import session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: import not found
+
+  /api/imports/{import_id}:
+    delete:
+      operationId: cancelImport
+      summary: Cancel an in-progress import
+      parameters:
+        - name: import_id
+          in: path
+          required: true
+          description: Import session ID to cancel
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{32}$'
+            minLength: 32
+            maxLength: 32
+          examples:
+            typical:
+              value: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+      responses:
+        '200':
+          description: Cancellation requested; checkpoint is preserved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelResponse'
+              examples:
+                ok:
+                  value:
+                    status: cancellation_requested
+        '404':
+          description: Import session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: import not found
+
+  /api/games:
+    get:
+      operationId: listGames
+      summary: List games with optional filters
+      parameters:
+        - name: player
+          in: query
+          description: Filter by player name (matches white or black)
+          schema:
+            type: string
+          examples:
+            typical:
+              value: Magnus Carlsen
+        - name: result
+          in: query
+          description: Filter by game result
+          schema:
+            type: string
+            enum: ['1-0', '0-1', '1/2-1/2']
+          examples:
+            white_wins:
+              value: '1-0'
+        - name: offset
+          in: query
+          description: Number of results to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum results to return (server caps at 200)
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Paginated list of games
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameListEntry'
+              examples:
+                typical:
+                  value:
+                    - id: 1
+                      white: Magnus Carlsen
+                      black: Fabiano Caruana
+                      result: '1-0'
+                      event: World Championship 2018
+                      date: '2018.11.28'
+                      eco: C67
+        '400':
+          description: Invalid pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_pagination:
+                  value:
+                    error: invalid pagination parameters
+
+  /api/games/{id}:
+    get:
+      operationId: getGame
+      summary: Retrieve a single game by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Game ID (unsigned 32-bit integer, 1–4294967295)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4294967295
+          examples:
+            typical:
+              value: 42
+      responses:
+        '200':
+          description: Full game record with moves and metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameFull'
+              examples:
+                typical:
+                  value:
+                    id: 42
+                    white:
+                      name: Magnus Carlsen
+                      elo: 2882
+                      title: GM
+                      country: NOR
+                    black:
+                      name: Fabiano Caruana
+                      elo: 2832
+                      title: GM
+                      country: USA
+                    event:
+                      name: World Championship 2018
+                      site: London ENG
+                      date: '2018.11.28'
+                    date: '2018.11.28'
+                    result: '1-0'
+                    eco: C67
+                    tags: []
+                    moves: [20289, 20546, 16900]
+        '400':
+          description: Invalid game ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_id:
+                  value:
+                    error: invalid game id
+        '404':
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: not_found
+
+components:
+  schemas:
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    CancelResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [cancellation_requested]
+
+    PositionHit:
+      type: object
+      required: [game_id, ply, result]
+      properties:
+        game_id:
+          type: integer
+          description: Database ID of the game
+        ply:
+          type: integer
+          description: Half-move number at which the position occurs
+        result:
+          type: integer
+          description: Encoded game result (1 = white wins, -1 = black wins, 0 = draw)
+        white_elo:
+          type: integer
+          description: White player's Elo rating; omitted when not recorded
+        black_elo:
+          type: integer
+          description: Black player's Elo rating; omitted when not recorded
+
+    OpeningStats:
+      type: object
+      required: [continuations]
+      properties:
+        continuations:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpeningContinuation'
+
+    OpeningContinuation:
+      type: object
+      required: [san, result_hash, frequency, white_wins, draws, black_wins]
+      properties:
+        san:
+          type: string
+          description: SAN notation of the continuation move
+        result_hash:
+          type: string
+          description: Decimal unsigned 64-bit Zobrist hash of the resulting position after this move.
+          pattern: '^\d+$'
+          maxLength: 20
+        frequency:
+          type: integer
+          description: Number of games containing this continuation
+        white_wins:
+          type: integer
+        draws:
+          type: integer
+        black_wins:
+          type: integer
+        average_white_elo:
+          type: number
+          description: Average white Elo in games with this continuation; omitted when unavailable
+        average_black_elo:
+          type: number
+          description: Average black Elo in games with this continuation; omitted when unavailable
+        eco:
+          type: string
+          description: ECO code of the resulting opening; omitted when unknown
+        opening_name:
+          type: string
+          description: Name of the resulting opening; omitted when unknown
+
+    GameListEntry:
+      type: object
+      required: [id, white, black, result]
+      properties:
+        id:
+          type: integer
+        white:
+          type: string
+          description: White player name
+        black:
+          type: string
+          description: Black player name
+        result:
+          type: string
+          description: Game result string (e.g. 1-0, 0-1, 1/2-1/2)
+        event:
+          type: string
+          description: Tournament or event name; may be empty string when unrecorded
+        date:
+          type: string
+          description: Game date in YYYY.MM.DD format; may be empty string when unrecorded
+        eco:
+          type: string
+          description: ECO opening code; may be empty string when unrecorded
+
+    GamePlayer:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        elo:
+          type: integer
+          description: Player's Elo rating; omitted when not recorded
+        title:
+          type: string
+          description: FIDE title (e.g. GM, IM); omitted when not recorded
+        country:
+          type: string
+          description: Three-letter country code; omitted when not recorded
+
+    GameEvent:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        site:
+          type: string
+          description: Event site; omitted when not recorded
+        date:
+          type: string
+          description: Event date; omitted when not recorded
+
+    GameTag:
+      type: object
+      required: [key, value]
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+
+    GameFull:
+      type: object
+      required: [id, white, black, result, moves]
+      properties:
+        id:
+          type: integer
+        white:
+          $ref: '#/components/schemas/GamePlayer'
+        black:
+          $ref: '#/components/schemas/GamePlayer'
+        event:
+          $ref: '#/components/schemas/GameEvent'
+          description: Tournament or match event; omitted when not recorded
+        date:
+          type: string
+          description: Game date; omitted when not recorded
+        result:
+          type: string
+        eco:
+          type: string
+          description: ECO opening code; omitted when not recorded
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameTag'
+          description: Additional PGN tags not mapped to named fields
+        moves:
+          type: array
+          items:
+            type: integer
+          description: Move sequence as 16-bit encoded integers
+
+    ImportStartResponse:
+      type: object
+      required: [import_id]
+      properties:
+        import_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+          minLength: 32
+          maxLength: 32
+          description: Opaque session identifier; use with /api/imports/{import_id}/progress
