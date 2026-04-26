@@ -1,5 +1,5 @@
 # generated: 2026-04-14
-# last_updated: 2026-04-25  # 4b-6 code review done
+# last_updated: 2026-04-26
 # project: motif-chess
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-25  # 4b-6 code review done
+last_updated: 2026-04-26  # 4-1 story created
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -74,18 +74,25 @@ development_status:
   epic-3-retrospective: done
 
   # ─── Epic 4b: HTTP API Layer ───────────────────────────────────────────────
-  epic-4b: in-progress
+  epic-4b: done
   4b-1-http-server-scaffold: done
   4b-2-position-search-endpoint: done
   4b-3-opening-stats-endpoint: done
   4b-4-import-trigger-sse-progress-stream: done
   4b-5-game-list-endpoint: done
   4b-6-single-game-retrieval-endpoint: done
-  epic-4b-retrospective: optional
+  4b-7-openapi-spec: done
+  epic-4b-retrospective: done
+
+  # ─── Epic 4c: HTTP API Contract Hardening ───────────────────────────────────
+  epic-4c: done
+  4c-1-http-api-contract-hardening: done
+  4c-2-import-sse-lifecycle-hardening: done
+  epic-4c-retrospective: done
 
   # ─── Epic 4: Desktop Application (DEFERRED — Epic 4b takes priority) ───────
-  epic-4: backlog
-  4-1-application-shell-config-pgn-file-handler: backlog
+  epic-4: in-progress
+  4-1-application-shell-config-pgn-file-handler: ready-for-dev
   4-2-chessboard-widget-game-navigation: backlog
   4-3-game-list-browser: backlog
   4-4-pgn-import-dialog: backlog
