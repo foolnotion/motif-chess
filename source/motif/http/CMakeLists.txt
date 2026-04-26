@@ -20,6 +20,7 @@ target_link_libraries(motif_http
     PRIVATE
         motif_search
         motif_import
+        motif_engine
 )
 
 target_compile_features(motif_http PUBLIC cxx_std_23)

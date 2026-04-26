@@ -180,6 +180,7 @@ TEST_CASE("database_manager::open does not recreate tables (idempotent open)", "
         .eco = {},
         .moves = {},
         .extra_tags = {},
+        .provenance = {},
     };
 
     std::uint32_t game_id {};
@@ -219,6 +220,7 @@ TEST_CASE("database_manager: bundle copied to another directory opens successful
         .eco = {},
         .moves = {},
         .extra_tags = {},
+        .provenance = {},
     };
 
     std::uint32_t game_id {};
@@ -331,6 +333,7 @@ TEST_CASE("database_manager::rebuild_position_store after N-move game returns N 
         .eco = {},
         .moves = moves,
         .extra_tags = {},
+        .provenance = {},
     };
 
     auto mgr = motif::db::database_manager::create(tdir.path, "nmove-db");
@@ -367,6 +370,7 @@ TEST_CASE("database_manager::rebuild_position_store is idempotent", "[motif-db][
         .eco = {},
         .moves = {chesslib::codec::encode(e2e4)},
         .extra_tags = {},
+        .provenance = {},
     };
 
     auto mgr = motif::db::database_manager::create(tdir.path, "idem-db");
@@ -404,6 +408,7 @@ TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo", "
         .eco = {},
         .moves = {chesslib::codec::encode(e2e4)},
         .extra_tags = {},
+        .provenance = {},
     };
 
     auto mgr = motif::db::database_manager::create(tdir.path, "elo-range-db");
@@ -440,6 +445,7 @@ TEST_CASE("database_manager::rebuild_position_store defaults to sorted-by-zobris
         .eco = {},
         .moves = {chesslib::codec::encode(e2e4)},
         .extra_tags = {},
+        .provenance = {},
     };
 
     motif::db::game const test_game_b {
@@ -451,6 +457,7 @@ TEST_CASE("database_manager::rebuild_position_store defaults to sorted-by-zobris
         .eco = {},
         .moves = {chesslib::codec::encode(d2d4)},
         .extra_tags = {},
+        .provenance = {},
     };
 
     auto mgr = motif::db::database_manager::create(tdir.path, "sorted-default-db");

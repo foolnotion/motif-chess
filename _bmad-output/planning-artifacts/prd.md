@@ -104,6 +104,8 @@ This is a personal tool and open-source project; "business success" means:
 
 **Explicit Phase 1 exclusions:** statistical analysis and visualization, UCI engine integration, online game fetch, repertoire manager, advanced filters.
 
+**Course correction — 2026-04-26:** Web frontend design introduced a local API consumer before the Qt GUI is complete. This does not change the product into a hosted web application, but it does make two backend API prerequisites explicit: legal move generation from FEN for interactive board highlighting, and a backend-mediated UCI engine analysis stream because browsers cannot talk to local engine processes directly.
+
 ### Phase 2 — Growth
 
 - Statistical analysis and visualization — performance by opening, phase, time pressure, opponent rating
@@ -258,7 +260,8 @@ The gap: no open-source, ergonomic, high-performance chess database with deep pe
 - **Primary:** Linux (NixOS). All development and initial release targets Linux exclusively.
 - **Phase 2:** macOS (Nix build) and Windows (vcpkg) once the Linux version is feature-complete. Binary releases and installers planned for both.
 - **Qt 6** as the UI framework ensures platform portability.
-- No web or mobile targets.
+- No hosted web or mobile product targets. A local web frontend may consume the motif-chess HTTP API as an experimental or development UI, but the application remains offline-first and local-first.
+- Local web frontend deployment targets `localhost:8080` with no auth, no multi-tenancy, no CDN, and no remote data transfer. CORS is required for the frontend development origin only; privacy comes from all data and engine processes remaining on the user's machine.
 
 ### System Integration
 

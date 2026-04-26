@@ -149,7 +149,7 @@ _No UX Design document exists. GUI is deferred to spec 004 (Phase 1 MVP, later s
 - FR18: Epic 3 — navigate opening tree with per-node statistics
 - FR19: Epic 3 — lazy opening tree traversal
 - FR20: Epic 2 — position index populated automatically during import
-- FR21: Epic 4 — chessboard widget displaying current position
+- FR21: Epic 4 — chessboard widget displaying current position | Epic 4d — legal moves and move validation endpoints for interactive board rendering
 - FR22: Epic 4 — move-by-move game navigation
 - FR23: Epic 4 — game tree view with variations
 - FR24: Epic 4 — initiate PGN import and monitor progress from UI
@@ -157,9 +157,9 @@ _No UX Design document exists. GUI is deferred to spec 004 (Phase 1 MVP, later s
 - FR26: Epic 4 — game list browser with filtering | Epic 4b — HTTP endpoint GET /games
 - FR27: Epic 4 — high-DPI display support
 - FR28: Epic 4 — full keyboard navigation
-- FR29: Epic 5 — configure UCI engine by executable path
-- FR30: Epic 5 — start/stop engine analysis
-- FR31: Epic 5 — view real-time engine output
+- FR29: Epic 5 — configure UCI engine by executable path | Epic 4d — engine API contract
+- FR30: Epic 5 — start/stop engine analysis | Epic 4d — HTTP start/stop contract
+- FR31: Epic 5 — view real-time engine output | Epic 4d — SSE stream contract
 - FR32: Epic 5 — engine crash isolation
 - FR33: Epic 6 — performance statistics by opening
 - FR34: Epic 6 — error distribution by game phase
@@ -213,13 +213,19 @@ An HTTP API layer between motif-chess and any future frontend (Qt, web, or exper
 **NFRs covered:** NFR01, NFR02, NFR10
 **Dependencies:** All met — `position_search`, `opening_stats`, `opening_tree`, `import_pipeline`, `database_manager` are stable and tested.
 
-### Epic 4: Desktop Application *(DEFERRED — Epic 4b takes priority)*
+### Epic 4d: Web Frontend API Prerequisites
+Before interactive web UI work depends on the local HTTP API, the backend exposes the missing chessboard, engine-analysis, and personal-game management prerequisites: legal moves and move validation/application for a FEN position, a stable HTTP/SSE contract for UCI engine analysis, and a domain-native CRUD API for user-added games.
+**FRs covered:** FR02, FR05, FR06, FR09, FR21, FR24, FR26, FR29–FR31
+**NFRs covered:** NFR05, NFR09, NFR10, NFR18, NFR19
+**Dependencies:** Epic 4c complete; `chesslib` owns move legality/SAN/FEN; `ucilib` owns UCI subprocess lifecycle.
+
+### Epic 4: Desktop Application *(DEFERRED — API prerequisites take priority)*
 Users interact with the full database through a native Qt 6 desktop GUI — browsing games, navigating positions on a chessboard, running imports, searching positions, and configuring the application — all keyboard-accessible on high-DPI displays.
 **FRs covered:** FR21–FR28, FR39–FR40, FR42
 **NFRs covered:** NFR05, NFR06
 
 ### Epic 5: Engine Integration *(Phase 2)*
-Users can configure UCI engines and run real-time analysis on any position; engine crashes are isolated and never affect the application.
+Users can configure UCI engines and run real-time analysis on any position through backend-owned engine lifecycle APIs; engine crashes are isolated and never affect the application or connected frontend.
 **FRs covered:** FR29–FR32
 **NFRs covered:** NFR18
 
@@ -793,7 +799,115 @@ So that API clients can consume the contract without integer precision loss or r
 
 ---
 
-## Epic 4: Desktop Application *(DEFERRED — Epic 4b takes priority)*
+## Epic 4d: Web Frontend API Prerequisites
+
+Before the separate web frontend implements interactive board movement or engine analysis panels, the local HTTP API must expose two missing backend surfaces: legal move generation plus move validation/application from a FEN position, and an engine analysis contract that lets the browser receive streamed UCI output through the motif-chess backend.
+
+### Story 4d.1: Legal Moves and Move Validation Endpoints
+
+As a developer building an interactive web chessboard,
+I want HTTP endpoints that return legal moves for a FEN position and validate/apply a candidate move,
+So that a display-only frontend board can highlight legal destinations and update only after the backend confirms the move.
+
+**Acceptance Criteria:**
+
+**Given** the server is running
+**When** `GET /api/positions/legal-moves?fen=<url-encoded-fen>` is called with a valid FEN
+**Then** HTTP 200 is returned with the canonical FEN and a `legal_moves` array
+**And** each move contains at minimum `uci`, `san`, `from`, `to`, and optional `promotion`
+**And** SAN/FEN parsing and move legality are delegated to `chesslib`; motif-chess does not reimplement chess rules (NFR19)
+
+**Given** the frontend board has a FEN and a candidate drag/drop move
+**When** `POST /api/positions/apply-move` is called with the FEN and candidate move in UCI notation
+**Then** a legal move returns HTTP 200 with the accepted `uci`, `san`, and resulting FEN
+**And** an illegal move returns HTTP 400 with a JSON error response
+**And** the frontend can keep the board renderer free of chess logic by updating only from the returned FEN
+
+**Given** the FEN is missing, malformed, or illegal
+**When** the endpoint is called
+**Then** HTTP 400 is returned with a JSON error response
+**And** no undefined behavior, exception escape, or process crash occurs (NFR10)
+
+**Given** `docs/api/openapi.yaml` is updated
+**When** the OpenAPI document is reviewed
+**Then** the legal moves and apply-move routes, query/body constraints, response schemas, error schemas, and examples are documented
+**And** C++ integration tests cover initial position moves, castling availability, promotion moves, invalid FEN, and check-constrained moves
+**And** apply-move tests cover legal moves, illegal moves, promotions, and resulting-FEN correctness
+
+### Story 4d.2: Engine Analysis API Contract
+
+As a developer building a browser-based engine analysis panel,
+I want a documented HTTP/SSE contract for starting, streaming, and stopping UCI engine analysis,
+So that frontend work can proceed against a stable backend boundary before engine implementation details are finalized.
+
+**Acceptance Criteria:**
+
+**Given** the API contract is documented
+**When** a frontend wants to start analysis
+**Then** `POST /api/engine/analyses` accepts a JSON body containing FEN, engine selection or default engine, `multipv` in the range 1–5, and exactly one bounded analysis limit (`depth` or `movetime_ms`)
+**And** the response returns HTTP 202 with an opaque `analysis_id`
+
+**Given** analysis has started
+**When** `GET /api/engine/analyses/{analysis_id}/stream` is called
+**Then** the endpoint is documented as `text/event-stream`
+**And** normal events include depth, optional seldepth, multipv index, score (`cp` or `mate`), `pv_uci`, and `pv_san`
+**And** final `complete` and `error` event shapes are documented
+**And** the frontend consumption model states that engine streaming should run from a Web Worker or equivalent off-main-thread client path
+
+**Given** analysis is active
+**When** `DELETE /api/engine/analyses/{analysis_id}` is called
+**Then** the contract documents cancellation semantics and the expected success/error responses
+
+**Given** this story is complete
+**When** implementation stories are created
+**Then** they preserve module ownership: `motif_engine` uses `ucilib` for subprocess lifecycle, `motif_http` owns HTTP/SSE session management, and `chesslib` owns PV conversion to SAN
+**And** they preserve local deployment constraints: API target `localhost:8080`, no auth, no multi-tenancy, no CDN, CORS for the frontend dev origin, and no data leaving the machine
+
+### Story 4d.3: Personal Games CRUD API and LAN Support
+
+As a developer building motif-chess-web as a domain-native replacement for a required CRUD exercise,
+I want backend endpoints for user-added personal games plus simple trusted-LAN configuration,
+So that the web frontend can add, list/search, open, edit, and delete chess games without inventing a non-chess TODO feature.
+
+**Acceptance Criteria:**
+
+**Given** the server is running with an open database
+**When** `POST /api/games` is called with pasted single-game PGN text
+**Then** the PGN is parsed through the existing PGN/chess libraries, persisted through the SQLite/DuckDB storage path, and HTTP 201 returns the created game ID plus normalized metadata
+**And** the created game is marked as user/manual provenance for safe future edits/deletes
+**And** malformed PGN or invalid SAN returns a user-readable HTTP 400 JSON error
+
+**Given** game responses are returned by `GET /api/games` or `GET /api/games/{id}`
+**When** the OpenAPI/API response is reviewed
+**Then** user-added game provenance is represented in API responses and imported/reference games are distinguishable from manual games
+
+**Given** a user-added game exists
+**When** `PATCH /api/games/{id}` is called with valid editable metadata/status fields
+**Then** HTTP 200 returns the updated game
+**And** editable fields are limited to supported metadata/status fields, including `review_status` values `new`, `needs_review`, `studied`, and `archived`
+**And** invalid IDs/fields/status values return 400 and missing games return 404
+
+**Given** a non-user-added imported/reference game exists
+**When** `PATCH /api/games/{id}` or `DELETE /api/games/{id}` is called
+**Then** HTTP 409 is returned and no imported/reference corpus data is changed
+
+**Given** a user-added game exists
+**When** `DELETE /api/games/{id}` is called
+**Then** HTTP 204 is returned, SQLite game/tag rows are removed, and DuckDB derived position data is removed or rebuilt so position search/opening stats no longer include the deleted game
+
+**Given** motif-chess-web may run on a trusted LAN during development
+**When** the HTTP server starts
+**Then** bind host/port and explicit CORS allowed origins are configurable while default local development remains `localhost:8080`
+**And** no authentication, multi-user support, public-network hardening, engine analysis, or frontend UI is added in this story
+
+**Given** `docs/api/openapi.yaml` is updated
+**When** the document is reviewed
+**Then** it documents create, patch, delete, provenance fields, schemas, error cases, and examples
+**And** integration tests cover create/read/list/patch/delete/error cases, imported/reference mutation rejection, PGN parse errors, and SQLite/DuckDB consistency
+
+---
+
+## Epic 4: Desktop Application *(DEFERRED — API prerequisites take priority)*
 
 Users interact with the full database through a native Qt 6 desktop GUI — browsing games, navigating positions on a chessboard, running imports, searching positions, and configuring the application — all keyboard-accessible on high-DPI displays.
 
@@ -917,8 +1031,8 @@ Users can configure UCI engines and run real-time analysis on any position; engi
 ### Story 5.1: Engine Configuration & Lifecycle
 
 As a user,
-I want to configure one or more UCI chess engines by executable path and start/stop analysis on the current position,
-So that I can get engine evaluations without leaving the application.
+I want to configure one or more UCI chess engines by executable path and start/stop analysis on a FEN position,
+So that any motif-chess frontend can get engine evaluations without managing engine processes directly.
 
 **Acceptance Criteria:**
 
@@ -926,31 +1040,33 @@ So that I can get engine evaluations without leaving the application.
 **When** they specify an executable path for a UCI engine
 **Then** the engine path is saved to `config.json` and the engine is listed as available (FR29)
 
-**Given** an engine is configured and a position is on the board
-**When** the user starts analysis
-**Then** `engine_manager` launches the engine subprocess via `ucilib`, sends the current FEN, and begins receiving info lines (FR30)
+**Given** an engine is configured and a valid FEN is provided by a frontend
+**When** analysis starts
+**Then** `engine_manager` launches the engine subprocess via `ucilib`, sends the FEN, applies bounded analysis parameters, and begins receiving info lines (FR30)
 **And** `ucilib` owns all engine subprocess lifecycle — motif-chess does not interact with the engine process directly (NFR18)
 
-**Given** the user stops analysis
+**Given** the frontend stops analysis or the analysis limit is reached
 **When** stop is triggered
-**Then** the engine subprocess receives a `stop` command and output ceases; the UI returns to idle state (FR30)
+**Then** the engine subprocess receives a `stop` command, output ceases, and the analysis session transitions to a terminal state (FR30)
 
 ### Story 5.2: Real-Time Engine Output & Crash Isolation
 
 As a user,
-I want to see engine depth, score, and principal variation updating in real time, and have engine crashes never crash the application,
-So that I can analyze positions safely even with unstable third-party engines.
+I want to see engine depth, score, and principal variation updating in real time through a streaming backend API, and have engine crashes never crash motif-chess,
+So that I can analyze positions safely from desktop or web frontends even with unstable third-party engines.
 
 **Acceptance Criteria:**
 
 **Given** engine analysis is running
 **When** the engine emits `info` lines
-**Then** depth, score (centipawns/mate), and principal variation (SAN) are displayed updating in real time via Qt signals (FR31, NFR05)
+**Then** depth, score (centipawns/mate), multipv index, and principal variation are emitted as normalized analysis updates
+**And** principal variations are exposed in UCI form and SAN form where SAN conversion succeeds (FR31, NFR19)
+**And** the HTTP adapter streams those updates via the contract defined in Story 4d.2
 
 **Given** the engine process crashes or exits unexpectedly
 **When** `engine_manager` detects the crash
-**Then** the UI displays an error indicator; motif-chess continues running normally (FR32)
-**And** the user can restart the engine without relaunching the application (FR32)
+**Then** the session emits an error state; motif-chess continues running normally (FR32)
+**And** the user can restart analysis without relaunching the application or backend (FR32)
 
 ---
 

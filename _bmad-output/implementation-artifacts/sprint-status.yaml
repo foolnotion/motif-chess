@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-26  # 4-1 story created
+last_updated: 2026-04-26  # done: 4d-3 personal games CRUD API and LAN support
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -90,7 +90,14 @@ development_status:
   4c-2-import-sse-lifecycle-hardening: done
   epic-4c-retrospective: done
 
-  # ─── Epic 4: Desktop Application (DEFERRED — Epic 4b takes priority) ───────
+  # ─── Epic 4d: Web Frontend API Prerequisites ────────────────────────────────
+  epic-4d: done
+  4d-1-legal-moves-and-move-validation-endpoints: done
+  4d-2-engine-analysis-api-contract: done
+  4d-3-personal-games-crud-api-and-lan-support: done
+  epic-4d-retrospective: optional
+
+  # ─── Epic 4: Desktop Application (DEFERRED — API prerequisites take priority)
   epic-4: in-progress
   4-1-application-shell-config-pgn-file-handler: ready-for-dev
   4-2-chessboard-widget-game-navigation: backlog

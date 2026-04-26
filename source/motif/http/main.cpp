@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #include <fmt/base.h>
 #include <spdlog/logger.h>
@@ -26,7 +27,9 @@ constexpr std::uint16_t max_valid_port {65535U};
 struct cli_args
 {
     std::filesystem::path db_path;
+    std::string host {motif::http::server::default_host};
     std::uint16_t port {motif::http::server::default_port};
+    std::vector<std::string> allowed_origins;
 };
 
 auto parse_port(std::string_view text) -> std::optional<std::uint16_t>
@@ -44,6 +47,7 @@ auto parse_port(std::string_view text) -> std::optional<std::uint16_t>
     return static_cast<std::uint16_t>(value);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 auto parse_args(std::span<char const* const> argv) -> std::optional<cli_args>
 {
     cli_args args;
@@ -59,6 +63,10 @@ auto parse_args(std::span<char const* const> argv) -> std::optional<cli_args>
                 return std::nullopt;
             }
             args.port = *port_opt;
+        } else if (arg == "--host" && i + 1 < argv.size()) {
+            args.host = argv[++i];
+        } else if (arg == "--cors-origin" && i + 1 < argv.size()) {
+            args.allowed_origins.emplace_back(argv[++i]);
         }
     }
 
@@ -76,6 +84,34 @@ auto parse_args(std::span<char const* const> argv) -> std::optional<cli_args>
         if (auto const* env_port = std::getenv("MOTIF_HTTP_PORT")) {
             if (auto const port_opt = parse_port(std::string_view {env_port})) {
                 args.port = *port_opt;
+            }
+        }
+    }
+
+    if (std::string(motif::http::server::default_host) == args.host) {
+        // Called before any threads start.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe)
+        if (auto const* env_host = std::getenv("MOTIF_HTTP_HOST")) {
+            args.host = env_host;
+        }
+    }
+
+    if (args.allowed_origins.empty()) {
+        // Called before any threads start.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe)
+        if (auto const* env_origins = std::getenv("MOTIF_HTTP_CORS_ORIGINS")) {
+            // Comma-separated list of allowed origins.
+            std::string_view origins_sv {env_origins};
+            while (!origins_sv.empty()) {
+                auto const comma = origins_sv.find(',');
+                auto const origin = origins_sv.substr(0, comma);
+                if (!origin.empty()) {
+                    args.allowed_origins.emplace_back(origin);
+                }
+                if (comma == std::string_view::npos) {
+                    break;
+                }
+                origins_sv = origins_sv.substr(comma + 1);
             }
         }
     }
@@ -120,10 +156,13 @@ auto main(int argc, char** argv) -> int
     }
 
     motif::http::server srv {*db_result};
-    logger->info("listening on port {}", args.port);
-    auto const start_result = srv.start(args.port);
+    logger->info("listening on {}:{}", args.host, args.port);
+    if (!args.allowed_origins.empty()) {
+        logger->info("CORS allowed origins: {} configured", args.allowed_origins.size());
+    }
+    auto const start_result = srv.start(args.host, args.port, args.allowed_origins);
     if (!start_result) {
-        logger->error("server failed to start on port {}", args.port);
+        logger->error("server failed to start on {}:{}", args.host, args.port);
         return EXIT_FAILURE;
     }
 

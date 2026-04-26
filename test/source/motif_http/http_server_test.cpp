@@ -23,6 +23,7 @@
 #include <fmt/base.h>
 #include <fmt/format.h>
 #include <glaze/json/read.hpp>
+#include <glaze/json/write.hpp>
 #include <httplib.h>
 // NOLINTNEXTLINE(hicpp-deprecated-headers,modernize-deprecated-headers) -- POSIX setenv/unsetenv are declared here.
 #include <stdlib.h>
@@ -54,6 +55,40 @@ struct sse_event_payload
     std::optional<std::size_t> errors;
     std::optional<std::size_t> elapsed_ms;
     std::optional<std::string> error;
+};
+
+struct start_analysis_response
+{
+    std::string analysis_id;
+};
+
+struct provenance_response
+{
+    std::string source_type;
+    std::optional<std::string> source_label;
+    std::string review_status;
+};
+
+struct create_game_response
+{
+    std::uint32_t id {};
+    std::string source_type;
+    std::optional<std::string> source_label;
+    std::string review_status;
+};
+
+struct game_response
+{
+    std::uint32_t id {};
+    std::string result;
+    provenance_response provenance;
+};
+
+struct game_list_entry_response
+{
+    std::uint32_t id {};
+    std::string source_type;
+    std::string review_status;
 };
 
 }  // namespace motif_http_test
@@ -272,6 +307,7 @@ auto insert_http_game(motif::db::database_manager& dbmgr, http_game_seed seed) -
         .eco = std::move(seed.eco),
         .moves = {seed.move_seed},
         .extra_tags = {},
+        .provenance = {},
     };
     auto inserted = dbmgr.store().insert(game);
     REQUIRE(inserted.has_value());
@@ -309,6 +345,7 @@ auto insert_detailed_http_game(motif::db::database_manager& dbmgr) -> std::pair<
         .eco = "C88",
         .moves = moves,
         .extra_tags = {{"Opening", "Ruy Lopez"}, {"Round", "6"}},
+        .provenance = {},
     };
     auto inserted = dbmgr.store().insert(game);
     REQUIRE(inserted.has_value());
@@ -760,7 +797,7 @@ TEST_CASE("server: CORS headers present on health response", "[motif-http]")
 
     REQUIRE(res != nullptr);
     CHECK(res->get_header_value("Access-Control-Allow-Origin") == "*");
-    CHECK(res->get_header_value("Access-Control-Allow-Methods") == "GET, POST, DELETE, OPTIONS");
+    CHECK(res->get_header_value("Access-Control-Allow-Methods") == "GET, POST, PATCH, DELETE, OPTIONS");
     CHECK(res->get_header_value("Access-Control-Allow-Headers") == "Content-Type");
 }
 
@@ -1888,6 +1925,34 @@ TEST_CASE("server: SSE error event data field is valid JSON even with special ch
     CHECK(data_line_count > 0);
 }
 
+// Helpers for legal-moves and apply-move response structs used only in test scope.
+namespace motif_http_test
+{
+
+struct legal_move_entry
+{
+    std::string uci;
+    std::string san;
+    std::string from;
+    std::string to;
+    std::optional<std::string> promotion;
+};
+
+struct legal_moves_response
+{
+    std::string fen;
+    std::vector<legal_move_entry> legal_moves;
+};
+
+struct apply_move_response
+{
+    std::string uci;
+    std::string san;
+    std::string fen;
+};
+
+}  // namespace motif_http_test
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("server: completed sessions remain queryable up to bounded count", "[motif-http]")
 {
@@ -1944,3 +2009,1060 @@ TEST_CASE("server: completed sessions remain queryable up to bounded count", "[m
     server_thread.join();
     logging.shutdown();
 }
+
+// ─── Legal moves endpoint tests ──────────────────────────────────────────────
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: legal-moves initial position returns 200 with 20 moves", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"legal_moves_initial"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "legal-moves-initial");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18120};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    constexpr std::string_view initial_fen {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"};
+    auto const encoded_fen = httplib::encode_query_component(std::string {initial_fen});
+    auto const res = cli.Get("/api/positions/legal-moves?fen=" + encoded_fen);
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+    auto const& body = res->body;
+    CHECK(body.contains(R"("fen")"));
+    CHECK(body.contains(R"("legal_moves")"));
+    CHECK(body.contains(R"("uci":"e2e4")"));
+    CHECK(body.contains(R"("san":"e4")"));
+    CHECK(body.contains(R"("from":"e2")"));
+    CHECK(body.contains(R"("to":"e4")"));
+
+    motif_http_test::legal_moves_response parsed;
+    auto const parse_err = glz::read_json(parsed, body);
+    REQUIRE(!parse_err);
+    CHECK(parsed.legal_moves.size() == 20);
+    auto const has_e2e4 = std::ranges::any_of(
+        parsed.legal_moves, [](auto const& move_entry) -> bool { return move_entry.uci == "e2e4" && move_entry.san == "e4"; });
+    CHECK(has_e2e4);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: legal-moves castling position includes castling moves", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"legal_moves_castle"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "legal-moves-castle");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18121};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    constexpr std::string_view castle_fen {"r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"};
+    auto const encoded_fen = httplib::encode_query_component(std::string {castle_fen});
+    auto const res = cli.Get("/api/positions/legal-moves?fen=" + encoded_fen);
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+
+    motif_http_test::legal_moves_response parsed;
+    auto const parse_err = glz::read_json(parsed, res->body);
+    REQUIRE(!parse_err);
+
+    auto const has_kingside_castle = std::ranges::any_of(
+        parsed.legal_moves, [](auto const& move_entry) -> bool { return move_entry.uci == "e1g1" && move_entry.san == "O-O"; });
+    auto const has_queenside_castle = std::ranges::any_of(
+        parsed.legal_moves, [](auto const& move_entry) -> bool { return move_entry.uci == "e1c1" && move_entry.san == "O-O-O"; });
+    CHECK(has_kingside_castle);
+    CHECK(has_queenside_castle);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: legal-moves promotion position includes all promotion suffixes", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"legal_moves_promo"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "legal-moves-promo");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18122};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    constexpr std::string_view promo_fen {"8/P7/8/8/8/8/8/4k2K w - - 0 1"};
+    auto const encoded_fen = httplib::encode_query_component(std::string {promo_fen});
+    auto const res = cli.Get("/api/positions/legal-moves?fen=" + encoded_fen);
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+
+    motif_http_test::legal_moves_response parsed;
+    auto const parse_err = glz::read_json(parsed, res->body);
+    REQUIRE(!parse_err);
+
+    auto has_suffix = [&](std::string const& suffix) -> bool
+    {
+        return std::ranges::any_of(parsed.legal_moves,
+                                   [&](auto const& move_entry) -> bool
+                                   { return move_entry.promotion.has_value() && *move_entry.promotion == suffix; });
+    };
+    CHECK(has_suffix("q"));
+    CHECK(has_suffix("r"));
+    CHECK(has_suffix("b"));
+    CHECK(has_suffix("n"));
+    auto const non_promo_has_field = std::ranges::any_of(
+        parsed.legal_moves, [](auto const& move_entry) -> bool { return !move_entry.promotion.has_value() && move_entry.uci.size() > 4; });
+    CHECK_FALSE(non_promo_has_field);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: legal-moves check-constrained position excludes non-evasion moves", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"legal_moves_check"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "legal-moves-check");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18123};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    // White king on e1 in check from black queen on e8 — white pawn on a2 cannot move
+    constexpr std::string_view check_fen {"4q3/8/8/8/8/8/P7/4K2k w - - 0 1"};
+    auto const encoded_fen = httplib::encode_query_component(std::string {check_fen});
+    auto const res = cli.Get("/api/positions/legal-moves?fen=" + encoded_fen);
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+
+    motif_http_test::legal_moves_response parsed;
+    auto const parse_err = glz::read_json(parsed, res->body);
+    REQUIRE(!parse_err);
+
+    // Pawn on a2 cannot move (it doesn't block check)
+    auto const a2_pawn_moves =
+        std::ranges::any_of(parsed.legal_moves, [](auto const& move_entry) -> bool { return move_entry.from == "a2"; });
+    CHECK_FALSE(a2_pawn_moves);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: legal-moves missing fen returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"legal_moves_no_fen"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "legal-moves-no-fen");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18124};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const no_param = cli.Get("/api/positions/legal-moves");
+    auto const empty_param = cli.Get("/api/positions/legal-moves?fen=");
+    auto const malformed = cli.Get("/api/positions/legal-moves?fen=not_a_fen");
+    auto const few_fields = cli.Get("/api/positions/legal-moves?fen=rnbqkbnr%2F8");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(no_param != nullptr);
+    REQUIRE(empty_param != nullptr);
+    REQUIRE(malformed != nullptr);
+    REQUIRE(few_fields != nullptr);
+    CHECK(no_param->status == 400);
+    CHECK(empty_param->status == 400);
+    CHECK(malformed->status == 400);
+    CHECK(few_fields->status == 400);
+    CHECK(no_param->body.contains(R"("error")"));
+    CHECK(empty_param->body.contains(R"("error")"));
+    CHECK(malformed->body.contains(R"("error")"));
+    CHECK(few_fields->body.contains(R"("error")"));
+}
+
+// ─── Apply-move endpoint tests ────────────────────────────────────────────────
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: apply-move legal move returns 200 with san and resulting fen", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"apply_move_legal"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "apply-move-legal");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18125};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    constexpr std::string_view body_json {R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","uci":"e2e4"})"};
+    auto const res = cli.Post("/api/positions/apply-move", std::string {body_json}, "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+
+    motif_http_test::apply_move_response parsed;
+    auto const parse_err = glz::read_json(parsed, res->body);
+    REQUIRE(!parse_err);
+    CHECK(parsed.uci == "e2e4");
+    CHECK(parsed.san == "e4");
+    CHECK(parsed.fen == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: apply-move illegal move returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"apply_move_illegal"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "apply-move-illegal");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18126};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const illegal_move = cli.Post("/api/positions/apply-move",
+                                       R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","uci":"e2e5"})",
+                                       "application/json");
+    auto const bad_uci = cli.Post("/api/positions/apply-move",
+                                  R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","uci":"notauci"})",
+                                  "application/json");
+    auto const bad_promotion_suffix = cli.Post("/api/positions/apply-move",
+                                               R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","uci":"e2e4x"})",
+                                               "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(illegal_move != nullptr);
+    REQUIRE(bad_uci != nullptr);
+    REQUIRE(bad_promotion_suffix != nullptr);
+    CHECK(illegal_move->status == 400);
+    CHECK(bad_uci->status == 400);
+    CHECK(bad_promotion_suffix->status == 400);
+    CHECK(illegal_move->body.contains(R"("error")"));
+    CHECK(bad_uci->body.contains(R"("error")"));
+    CHECK(bad_promotion_suffix->body.contains(R"("error")"));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: apply-move promotion returns 200 with promotion san and correct fen", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"apply_move_promo"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "apply-move-promo");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18127};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/positions/apply-move", R"({"fen":"8/P7/8/8/8/8/8/4k2K w - - 0 1","uci":"a7a8q"})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+
+    motif_http_test::apply_move_response parsed;
+    auto const parse_err = glz::read_json(parsed, res->body);
+    REQUIRE(!parse_err);
+    CHECK(parsed.uci == "a7a8q");
+    CHECK(parsed.san.contains("=Q"));
+    CHECK(parsed.fen == "Q7/8/8/8/8/8/8/4k2K b - - 0 1");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: apply-move bad request body returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"apply_move_bad_body"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "apply-move-bad-body");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18128};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const missing_uci =
+        cli.Post("/api/positions/apply-move", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"})", "application/json");
+    auto const bad_fen = cli.Post("/api/positions/apply-move", R"({"fen":"notafen","uci":"e2e4"})", "application/json");
+    auto const not_json = cli.Post("/api/positions/apply-move", "not json at all", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(missing_uci != nullptr);
+    REQUIRE(bad_fen != nullptr);
+    REQUIRE(not_json != nullptr);
+    CHECK(missing_uci->status == 400);
+    CHECK(bad_fen->status == 400);
+    CHECK(not_json->status == 400);
+}
+
+// ---------------------------------------------------------------------------
+// Engine analysis route tests (AC 1, 3, 7 — Story 4d.2)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("server: POST /api/engine/analyses valid body returns 202 with analysis_id", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_valid"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-valid");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18130};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post(
+        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":20})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 202);
+
+    motif_http_test::start_analysis_response parsed;
+    auto const parse_err = glz::read_json(parsed, res->body);
+    REQUIRE(!parse_err);
+    CHECK(!parsed.analysis_id.empty());
+}
+
+TEST_CASE("server: POST /api/engine/analyses missing fen returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_no_fen"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-no-fen");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18131};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/engine/analyses", R"({"depth":20})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/engine/analyses invalid fen returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_invalid_fen"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-invalid-fen");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18138};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/engine/analyses", R"({"fen":"not_a_fen","depth":20})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/engine/analyses with both depth and movetime_ms returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_both_limits"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-both-limits");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18132};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/engine/analyses",
+                              R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":20,"movetime_ms":5000})",
+                              "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/engine/analyses with neither depth nor movetime_ms returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_no_limit"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-no-limit");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18133};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res =
+        cli.Post("/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/engine/analyses with multipv=0 returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_multipv_low"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-multipv-low");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18134};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/engine/analyses",
+                              R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":10,"multipv":0})",
+                              "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/engine/analyses with multipv=6 returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_multipv_high"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-multipv-high");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18135};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/engine/analyses",
+                              R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":10,"multipv":6})",
+                              "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: GET /api/engine/analyses/unknown-id/stream returns 404 or 501", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_stream_unknown"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-stream-unknown");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18136};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get("/api/engine/analyses/unknown-id/stream");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK((res->status == 404 || res->status == 501));
+}
+
+TEST_CASE("server: DELETE /api/engine/analyses/unknown-id returns 404 or 501", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_delete_unknown"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-delete-unknown");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18137};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Delete("/api/engine/analyses/unknown-id");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK((res->status == 404 || res->status == 501));
+}
+
+// ── CRUD game tests (Story 4d.3) ─────────────────────────────────────────────
+// NOLINTBEGIN(readability-function-cognitive-complexity) -- Catch2 macros inflate complexity
+
+namespace
+{
+
+constexpr std::string_view single_game_pgn = R"pgn(
+[Event "Test Event"]
+[Site "Test Site"]
+[Date "2024.06.01"]
+[Round "1"]
+[White "Alice"]
+[Black "Bob"]
+[Result "1-0"]
+[WhiteElo "1800"]
+[BlackElo "1750"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 1-0
+)pgn";
+
+constexpr std::string_view another_game_pgn = R"pgn(
+[Event "Another Event"]
+[Site "?"]
+[Date "2024.07.01"]
+[Round "1"]
+[White "Charlie"]
+[Black "Diana"]
+[Result "0-1"]
+
+1. d4 d5 2. c4 c6 3. Nc3 Nf6 0-1
+)pgn";
+
+constexpr std::string_view malformed_pgn = R"pgn(
+[Event "Bad Game"]
+this is not valid PGN text at all
+)pgn";
+
+constexpr std::string_view invalid_san_pgn = R"pgn(
+[Event "Bad Moves"]
+[White "X"]
+[Black "Y"]
+[Result "1-0"]
+
+1. e4 e5 2. ZZ99 1-0
+)pgn";
+
+}  // namespace
+
+TEST_CASE("server: POST /api/games creates manual game returns 201", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_create"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-create-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18140};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const body = fmt::format(R"({{"pgn":{},"source_label":"test-client","review_status":"new"}})",
+                                  glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const res = cli.Post("/api/games", body, "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 201);
+    CHECK(res->body.contains(R"("source_type":"manual")"));
+    CHECK(res->body.contains(R"("source_label":"test-client")"));
+    CHECK(res->body.contains(R"("review_status":"new")"));
+
+    motif_http_test::create_game_response parsed;
+    auto const err = glz::read_json(parsed, res->body);
+    CHECK(!err);
+    CHECK(parsed.source_type == "manual");
+    CHECK(parsed.id > 0);
+}
+
+TEST_CASE("server: POST /api/games created game readable via GET", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_create_get"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-create-get-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18141};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+    REQUIRE(created.id > 0);
+
+    auto const get_res = cli.Get(fmt::format("/api/games/{}", created.id));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(get_res != nullptr);
+    CHECK(get_res->status == 200);
+    CHECK(get_res->body.contains(R"("source_type":"manual")"));
+    CHECK(get_res->body.contains(R"("review_status":"new")"));
+    CHECK(get_res->body.contains(R"("provenance")"));
+}
+
+TEST_CASE("server: POST /api/games created game visible in game list", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_create_list"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-create-list-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18142};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+
+    auto const list_res = cli.Get("/api/games");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(list_res != nullptr);
+    CHECK(list_res->status == 200);
+    CHECK(list_res->body.contains(R"("source_type":"manual")"));
+    CHECK(count_game_list_ids(list_res->body) == 1);
+}
+
+TEST_CASE("server: PATCH /api/games/{id} updates metadata returns 200", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_patch"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-patch-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18143};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+
+    auto const* const patch_body = R"({"review_status":"studied","source_label":"my-label"})";
+    auto const patch_res = cli.Patch(fmt::format("/api/games/{}", created.id), patch_body, "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(patch_res != nullptr);
+    CHECK(patch_res->status == 200);
+    CHECK(patch_res->body.contains(R"("review_status":"studied")"));
+    CHECK(patch_res->body.contains(R"("source_label":"my-label")"));
+}
+
+TEST_CASE("server: DELETE /api/games/{id} removes manual game returns 204", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_delete"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-delete-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18144};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+
+    auto const del_res = cli.Delete(fmt::format("/api/games/{}", created.id));
+    auto const get_res = cli.Get(fmt::format("/api/games/{}", created.id));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(del_res != nullptr);
+    CHECK(del_res->status == 204);
+    REQUIRE(get_res != nullptr);
+    CHECK(get_res->status == 404);
+}
+
+TEST_CASE("server: POST /api/games malformed PGN returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_bad_pgn"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-bad-pgn-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18145};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {malformed_pgn}).value_or("\"\""));
+    auto const res = cli.Post("/api/games", body, "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+    CHECK(res->body.contains("error"));
+}
+
+TEST_CASE("server: POST /api/games invalid SAN returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_bad_san"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-bad-san-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18146};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {invalid_san_pgn}).value_or("\"\""));
+    auto const res = cli.Post("/api/games", body, "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/games duplicate returns 409", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_dup"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-dup-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18147};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const first_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(first_res != nullptr);
+    REQUIRE(first_res->status == 201);
+    auto const dup_res = cli.Post("/api/games", post_body, "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(dup_res != nullptr);
+    CHECK(dup_res->status == 409);
+}
+
+TEST_CASE("server: PATCH /api/games/{id} invalid fields returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_patch_bad"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-patch-bad-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18148};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+
+    auto const bad_status = cli.Patch(fmt::format("/api/games/{}", created.id), R"({"review_status":"invalid_value"})", "application/json");
+    auto const bad_result = cli.Patch(fmt::format("/api/games/{}", created.id), R"({"result":"bad-result"})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(bad_status != nullptr);
+    CHECK(bad_status->status == 400);
+    REQUIRE(bad_result != nullptr);
+    CHECK(bad_result->status == 400);
+}
+
+TEST_CASE("server: PATCH /api/games/{id} missing game returns 404", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_patch_404"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-patch-404-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18149};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Patch("/api/games/99999", R"({"review_status":"new"})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 404);
+}
+
+TEST_CASE("server: PATCH/DELETE imported game returns 409", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_imported_409"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-imported-409-db");
+    REQUIRE(db_res.has_value());
+
+    // Seed an imported (non-manual) game directly via game_store.
+    constexpr std::uint16_t imported_seed_move {42};
+    auto imported_id = insert_http_game(*db_res,
+                                        {.white = "Imported",
+                                         .black = "Game",
+                                         .result = "1-0",
+                                         .event = "Import",
+                                         .date = "2024.01.01",
+                                         .eco = "A00",
+                                         .move_seed = imported_seed_move});
+
+    constexpr std::uint16_t test_port {18150};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const patch_res = cli.Patch(fmt::format("/api/games/{}", imported_id), R"({"review_status":"new"})", "application/json");
+    auto const del_res = cli.Delete(fmt::format("/api/games/{}", imported_id));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(patch_res != nullptr);
+    CHECK(patch_res->status == 409);
+    REQUIRE(del_res != nullptr);
+    CHECK(del_res->status == 409);
+}
+
+TEST_CASE("server: DELETE /api/games/{id} removes game from position search", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_delete_positions"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-delete-pos-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18151};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+
+    // Verify the game shows up.
+    auto const get_before = cli.Get(fmt::format("/api/games/{}", created.id));
+    REQUIRE(get_before != nullptr);
+    REQUIRE(get_before->status == 200);
+
+    auto const del_res = cli.Delete(fmt::format("/api/games/{}", created.id));
+    REQUIRE(del_res != nullptr);
+    REQUIRE(del_res->status == 204);
+
+    auto const get_after = cli.Get(fmt::format("/api/games/{}", created.id));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(get_after != nullptr);
+    CHECK(get_after->status == 404);
+}
+
+TEST_CASE("server: game list response includes provenance fields", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_list_provenance"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-list-prov-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18152};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+
+    // Insert imported game (direct store insert).
+    constexpr std::uint16_t imported_move_seed {11};
+    insert_http_game(*db_res,
+                     {.white = "Imp1",
+                      .black = "Imp2",
+                      .result = "1-0",
+                      .event = "Import",
+                      .date = "2024.01.01",
+                      .eco = "A00",
+                      .move_seed = imported_move_seed});
+
+    // Insert manual game via API.
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {another_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+
+    auto const list_res = cli.Get("/api/games");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(list_res != nullptr);
+    CHECK(list_res->status == 200);
+    CHECK(list_res->body.contains(R"("source_type":"imported")"));
+    CHECK(list_res->body.contains(R"("source_type":"manual")"));
+}
+
+TEST_CASE("server: POST /api/games empty pgn returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_empty_pgn"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-empty-pgn-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18153};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/games", R"({"pgn":""})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/games invalid review_status returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_bad_review"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-bad-review-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18154};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body =
+        fmt::format(R"({{"pgn":{},"review_status":"bad_value"}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const res = cli.Post("/api/games", post_body, "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: CORS with configured origins echoes matching origin", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"cors_configured"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "cors-configured-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18155};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {
+        [&]() -> void
+        { [[maybe_unused]] auto start_res = srv.start("localhost", test_port, {"http://localhost:3000", "http://127.0.0.1:5173"}); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_default_headers({{"Origin", "http://localhost:3000"}});
+    auto const res = cli.Get("/health");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 200);
+    CHECK(res->get_header_value("Access-Control-Allow-Origin") == "http://localhost:3000");
+}
+
+TEST_CASE("server: CORS with configured origins rejects non-matching origin", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"cors_reject"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "cors-reject-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18156};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void
+                               { [[maybe_unused]] auto start_res = srv.start("localhost", test_port, {"http://localhost:3000"}); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_default_headers({{"Origin", "http://evil.example.com"}});
+    auto const res = cli.Get("/health");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 200);
+    CHECK(res->get_header_value("Access-Control-Allow-Origin").empty());
+}
+
+// NOLINTEND(readability-function-cognitive-complexity)

@@ -99,6 +99,7 @@ struct db_fixture
         .eco = std::nullopt,
         .moves = {move_a, move_b, move_c},
         .extra_tags = {},
+        .provenance = {},
     };
 }
 
