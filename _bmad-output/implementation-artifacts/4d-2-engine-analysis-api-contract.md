@@ -14,12 +14,12 @@ So that frontend work can proceed against a stable backend boundary before engin
 
 1. **Given** the API contract is documented
    **When** a frontend wants to start analysis
-   **Then** `POST /api/engine/analyses` accepts a JSON body with: required `fen` (string), optional `engine` (string, defaults to first configured engine), `multipv` (integer 1–5, default 1), and exactly one bounded limit — either `depth` (integer 1–100) or `movetime_ms` (integer 1–300000)
+   **Then** `POST /api/engine/analyzes` accepts a JSON body with: required `fen` (string), optional `engine` (string, defaults to first configured engine), `multipv` (integer 1–5, default 1), and exactly one bounded limit — either `depth` (integer 1–100) or `movetime_ms` (integer 1–300000)
    **And** the response returns HTTP 202 with an opaque string `analysis_id`
    **And** missing FEN, invalid FEN format, invalid multipv range, both/neither limit provided, or invalid limit values return HTTP 400 with a JSON error response
 
 2. **Given** analysis has started
-   **When** `GET /api/engine/analyses/{analysis_id}/stream` is called
+   **When** `GET /api/engine/analyzes/{analysis_id}/stream` is called
    **Then** the endpoint produces `text/event-stream` via chunked transfer encoding
    **And** normal `info` events carry: required `depth` (int), optional `seldepth` (int), required `multipv` (int, 1-based), required `score` object (`type`: `"cp"` or `"mate"`, `value`: int), `pv_uci` (array of UCI strings), `pv_san` (array of SAN strings where conversion succeeds, otherwise omitted or empty), and optional `nodes` (int64), `nps` (int), `time_ms` (int)
    **And** a terminal `complete` event is emitted when the engine sends `bestmove`, carrying `best_move_uci` (string) and `ponder_uci` (optional string)
@@ -27,8 +27,8 @@ So that frontend work can proceed against a stable backend boundary before engin
    **And** an unknown `analysis_id` returns HTTP 404
 
 3. **Given** analysis is active
-   **When** `DELETE /api/engine/analyses/{analysis_id}` is called
-   **Then** the contract documents that the backend sends `stop` to the engine and the session transitions to a cancelled terminal state
+   **When** `DELETE /api/engine/analyzes/{analysis_id}` is called
+   **Then** the contract documents that the backend sends `stop` to the engine and the session transitions to a canceled terminal state
    **And** HTTP 204 is returned on success
    **And** an unknown `analysis_id` returns HTTP 404
    **And** a session already in a terminal state returns HTTP 409 with a JSON error
@@ -58,11 +58,11 @@ So that frontend work can proceed against a stable backend boundary before engin
 ## Tasks / Subtasks
 
 - [x] Task 1: Design and document the engine analysis contract in `docs/api/openapi.yaml` (AC: 1, 2, 3, 5, 6)
-  - [x] Add `POST /api/engine/analyses` route with `StartAnalysisRequest` body and `StartAnalysisResponse` (HTTP 202) plus 400 error cases
-  - [x] Add `GET /api/engine/analyses/{analysis_id}/stream` as `text/event-stream` with `AnalysisInfoEvent`, `AnalysisCompleteEvent`, `AnalysisErrorEvent` documented as SSE event shapes (not JSON response schemas)
-  - [x] Add `DELETE /api/engine/analyses/{analysis_id}` with 204 success and 404/409 error cases
+  - [x] Add `POST /api/engine/analyzes` route with `StartAnalysisRequest` body and `StartAnalysisResponse` (HTTP 202) plus 400 error cases
+  - [x] Add `GET /api/engine/analyzes/{analysis_id}/stream` as `text/event-stream` with `AnalysisInfoEvent`, `AnalysisCompleteEvent`, `AnalysisErrorEvent` documented as SSE event shapes (not JSON response schemas)
+  - [x] Add `DELETE /api/engine/analyzes/{analysis_id}` with 204 success and 404/409 error cases
   - [x] Define `ScoreObject` component schema with `type` (`"cp"` | `"mate"`) and `value` (int)
-  - [x] Include examples: starting analysis from the initial position with `depth: 20`, a sample `info` event with `pv_san`, a `complete` event, an `error` event, a 400 error for missing FEN, and a 409 error for already-cancelled session
+  - [x] Include examples: starting analysis from the initial position with `depth: 20`, a sample `info` event with `pv_san`, a `complete` event, an `error` event, a 400 error for missing FEN, and a 409 error for already-canceled session
   - [x] Add prose notes in the description fields: SSE event ordering guarantee (info* → complete|error), Web Worker consumption requirement, `pv_san` omission rule, and `analysis_id` opacity guarantee
 
 - [x] Task 2: Add `motif_engine` headers — `engine_manager.hpp` and `error.hpp` — as the contract stub (AC: 4)
@@ -74,21 +74,21 @@ So that frontend work can proceed against a stable backend boundary before engin
 
 - [x] Task 3: Add HTTP route stubs in `source/motif/http/server.cpp` returning documented responses (AC: 1, 2, 3)
   - [x] Add `StartAnalysisRequest` and `StartAnalysisResponse` DTOs to `motif::http::detail`
-  - [x] Register `POST /api/engine/analyses`: validate body fields (FEN present, multipv 1–5, exactly one of depth/movetime_ms), return HTTP 400 on validation failure, return HTTP 202 with `{"analysis_id": "<opaque-string>"}` stub (the opaque string can be a UUID or random hex — use `<random>` already included, not a new dep)
-  - [x] Register `GET /api/engine/analyses/:analysis_id/stream`: return HTTP 501 Not Implemented with JSON error `{"error":"engine analysis not yet implemented"}` — this route must exist and be documented; the SSE body is Phase 2 work
-  - [x] Register `DELETE /api/engine/analyses/:analysis_id`: return HTTP 501 Not Implemented with JSON error — same rationale
-  - [x] All three routes must appear in the correct order (exact paths before parameterised paths); register engine routes after the legal-moves routes from Story 4d.1 and before any catch-all routes
+  - [x] Register `POST /api/engine/analyzes`: validate body fields (FEN present, multipv 1–5, exactly one of depth/movetime_ms), return HTTP 400 on validation failure, return HTTP 202 with `{"analysis_id": "<opaque-string>"}` stub (the opaque string can be a UUID or random hex — use `<random>` already included, not a new dep)
+  - [x] Register `GET /api/engine/analyzes/:analysis_id/stream`: return HTTP 501 Not Implemented with JSON error `{"error":"engine analysis not yet implemented"}` — this route must exist and be documented; the SSE body is Phase 2 work
+  - [x] Register `DELETE /api/engine/analyzes/:analysis_id`: return HTTP 501 Not Implemented with JSON error — same rationale
+  - [x] All three routes must appear in the correct order (exact paths before parameterized paths); register engine routes after the legal-moves routes from Story 4d.1 and before any catch-all routes
 
 - [x] Task 4: Add integration tests for the contract surface (AC: 1, 3, 7)
   - [x] Add tests to `test/source/motif_http/http_server_test.cpp` following existing patterns (unused ports, `wait_for_ready`, `httplib::Client`)
-  - [x] Test `POST /api/engine/analyses` with a valid body returns HTTP 202 and a non-empty `analysis_id` string
-  - [x] Test `POST /api/engine/analyses` with missing `fen` returns HTTP 400
-  - [x] Test `POST /api/engine/analyses` with invalid `fen` returns HTTP 400
-  - [x] Test `POST /api/engine/analyses` with both `depth` and `movetime_ms` provided returns HTTP 400
-  - [x] Test `POST /api/engine/analyses` with neither `depth` nor `movetime_ms` provided returns HTTP 400
-  - [x] Test `POST /api/engine/analyses` with `multipv` out of range (0 or 6) returns HTTP 400
-  - [x] Test `GET /api/engine/analyses/unknown-id/stream` returns HTTP 404 or HTTP 501 (match what stub returns)
-  - [x] Test `DELETE /api/engine/analyses/unknown-id` returns HTTP 404 or HTTP 501 (match what stub returns)
+  - [x] Test `POST /api/engine/analyzes` with a valid body returns HTTP 202 and a non-empty `analysis_id` string
+  - [x] Test `POST /api/engine/analyzes` with missing `fen` returns HTTP 400
+  - [x] Test `POST /api/engine/analyzes` with invalid `fen` returns HTTP 400
+  - [x] Test `POST /api/engine/analyzes` with both `depth` and `movetime_ms` provided returns HTTP 400
+  - [x] Test `POST /api/engine/analyzes` with neither `depth` nor `movetime_ms` provided returns HTTP 400
+  - [x] Test `POST /api/engine/analyzes` with `multipv` out of range (0 or 6) returns HTTP 400
+  - [x] Test `GET /api/engine/analyzes/unknown-id/stream` returns HTTP 404 or HTTP 501 (match what stub returns)
+  - [x] Test `DELETE /api/engine/analyzes/unknown-id` returns HTTP 404 or HTTP 501 (match what stub returns)
   - [x] Add direct `motif_engine` stub API tests for `start_analysis`, `stop_analysis`, and `subscribe`
   - [x] Do NOT write SSE streaming tests — that is Phase 2 implementation work
 
@@ -197,9 +197,9 @@ The route implementation lives entirely in `source/motif/http/server.cpp`. Patte
 - `glz::read_json` / `glz::write_json` for JSON I/O.
 - DTOs must be in `motif::http::detail` namespace (glaze reflection requires named namespace).
 - `database_mutex` must NOT be acquired by engine routes — engine analysis is independent of the database.
-- Route registration order matters: exact/static paths before parameterised paths.
-- `POST /api/engine/analyses` is an exact path, safe to register anywhere before the generic catch-all (none exists currently, but maintain the ordering discipline).
-- `GET /api/engine/analyses/:analysis_id/stream` is parameterised — register after the exact POST route.
+- Route registration order matters: exact/static paths before parameterized paths.
+- `POST /api/engine/analyzes` is an exact path, safe to register anywhere before the generic catch-all (none exists currently, but maintain the ordering discipline).
+- `GET /api/engine/analyzes/:analysis_id/stream` is parameterized — register after the exact POST route.
 
 ### Existing SSE Pattern
 
@@ -301,16 +301,16 @@ SSE `error` event data:
 
 Story 4d.1 (legal moves and move validation) established:
 - `set_json_error(res, status, msg)` for all error responses — use this, do not inline error JSON.
-- Route ordering discipline: exact static paths before parameterised catch-alls.
+- Route ordering discipline: exact static paths before parameterized catch-alls.
 - DTOs in `motif::http::detail` with glaze reflection.
 - `database_mutex` is for DB/search operations only — engine endpoints must NOT acquire it.
-- JSON DTOs use `std::optional<std::string>` for optional fields; glaze serialises these consistently.
+- JSON DTOs use `std::optional<std::string>` for optional fields; glaze serializes these consistently.
 - OpenAPI updates are always in the same story as route implementation.
 - Test file: `test/source/motif_http/http_server_test.cpp` using `httplib::Client`, `wait_for_ready`, hardcoded ports, `tmp_dir`.
 
 Epic 4b established SSE streaming via `res.set_chunked_content_provider("text/event-stream", ...)` with a polling loop using `condition_variable` and `sse_poll_interval`. The engine SSE will follow the same pattern.
 
-Epic 4c established: HTTP 409 for "wrong state" transitions (e.g., cancelling an already-cancelled session). Use this for `DELETE` on a terminal session.
+Epic 4c established: HTTP 409 for "wrong state" transitions (e.g., canceling an already-canceled session). Use this for `DELETE` on a terminal session.
 
 ### Module Boundary Reminder
 
@@ -331,7 +331,7 @@ motif_engine → (ucilib only — Phase 2)
 - [Source: `CONVENTIONS.md` — fmt, naming, module boundaries, error handling]
 - [Source: `source/motif/http/server.cpp` — SSE pattern, route ordering, DTOs, set_json_error, database_mutex]
 - [Source: `source/motif/engine/CMakeLists.txt` and `motif_engine.cpp` — current stub state]
-- [Source: `docs/api/openapi.yaml` — current OpenAPI organisation to extend]
+- [Source: `docs/api/openapi.yaml` — current OpenAPI organization to extend]
 - [Source: `/nix/store/4mg6mh4aclbzykpv7mb9a62yx59f5vzq-ucilib/include/ucilib/engine.hpp` and `types.hpp` — ucilib API]
 - [Source: `test/source/motif_http/http_server_test.cpp` — HTTP integration test patterns]
 
@@ -353,7 +353,7 @@ Claude Sonnet 4.6
 
 - Task 1: Added three engine routes to `docs/api/openapi.yaml` with all required schemas (`StartAnalysisRequest`, `StartAnalysisResponse`, `ScoreObject`, `AnalysisInfoEvent`, `AnalysisCompleteEvent`, `AnalysisErrorEvent`), examples, and prose notes for SSE event ordering, Web Worker requirement, `pv_san` omission rule, and `analysis_id` opacity.
 - Task 2: Created `source/motif/engine/error.hpp` with `error_code` enum (4 values) and `source/motif/engine/engine_manager.hpp` with full contract interface. Updated `motif_engine.cpp` with Phase 2 stub implementations. Added `tl-expected` link to `motif_engine` CMakeLists. Added `motif_engine` to `motif_http` PRIVATE link list.
-- Task 3: Added `start_analysis_request` / `start_analysis_response` DTOs to `motif::http::detail`. Added `http_not_implemented` constant. Registered all three engine routes with full validation for POST (FEN presence, multipv range 1–5, exactly one limit, limit range bounds) and 501 stubs for GET stream and DELETE. Route ordering: exact POST before parameterised GET/DELETE.
+- Task 3: Added `start_analysis_request` / `start_analysis_response` DTOs to `motif::http::detail`. Added `http_not_implemented` constant. Registered all three engine routes with full validation for POST (FEN presence, multipv range 1–5, exactly one limit, limit range bounds) and 501 stubs for GET stream and DELETE. Route ordering: exact POST before parameterized GET/DELETE.
 - Task 4: Added 9 integration tests using ports 18130–18138. All test cases use the established `tmp_dir` / `wait_for_ready` / `httplib::Client` pattern. Added `start_analysis_response` DTO to `motif_http_test` namespace for JSON parsing. Added direct `motif_engine` API stub tests.
 - Task 5: All 193 tests pass on both `dev` and `dev-sanitize` presets. Zero ASan/UBSan violations. clang-format applied; rebuild clean with no new warnings.
 

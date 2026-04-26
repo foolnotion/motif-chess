@@ -573,14 +573,14 @@ paths:
                   value:
                     error: duplicate game
 
-  /api/engine/analyses:
+  /api/engine/analyzes:
     post:
       operationId: startAnalysis
       summary: Start a UCI engine analysis session
       description: |-
         Accepts a FEN position and bounded analysis parameters, starts an engine
         analysis session, and returns an opaque `analysis_id`. The caller must
-        subsequently connect to `GET /api/engine/analyses/{analysis_id}/stream`
+        subsequently connect to `GET /api/engine/analyzes/{analysis_id}/stream`
         to receive SSE events.
 
         Exactly one of `depth` or `movetime_ms` must be provided.
@@ -595,13 +595,13 @@ paths:
               $ref: '#/components/schemas/StartAnalysisRequest'
             examples:
               depth_20:
-                summary: Analyse starting position to depth 20
+                summary: Analyze starting position to depth 20
                 value:
                   fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
                   multipv: 3
                   depth: 20
               movetime:
-                summary: Analyse for 5 seconds
+                summary: Analyze for 5 seconds
                 value:
                   fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
                   movetime_ms: 5000
@@ -642,7 +642,7 @@ paths:
                   value:
                     error: provide exactly one of depth or movetime_ms
 
-  /api/engine/analyses/{analysis_id}/stream:
+  /api/engine/analyzes/{analysis_id}/stream:
     get:
       operationId: streamAnalysis
       summary: Stream engine analysis events as Server-Sent Events
@@ -668,7 +668,7 @@ paths:
         - name: analysis_id
           in: path
           required: true
-          description: Opaque analysis session ID returned by POST /api/engine/analyses
+          description: Opaque analysis session ID returned by POST /api/engine/analyzes
           schema:
             type: string
       responses:
@@ -711,25 +711,25 @@ paths:
                   value:
                     error: analysis not found
 
-  /api/engine/analyses/{analysis_id}:
+  /api/engine/analyzes/{analysis_id}:
     delete:
       operationId: stopAnalysis
       summary: Stop an active engine analysis session
       description: |-
         Sends `stop` to the engine subprocess and transitions the session to a
-        cancelled terminal state. Only active (non-terminal) sessions can be
-        cancelled; attempting to cancel a session already in a terminal state
+        canceled terminal state. Only active (non-terminal) sessions can be
+        canceled; attempting to cancel a session already in a terminal state
         returns HTTP 409.
       parameters:
         - name: analysis_id
           in: path
           required: true
-          description: Opaque analysis session ID returned by POST /api/engine/analyses
+          description: Opaque analysis session ID returned by POST /api/engine/analyzes
           schema:
             type: string
       responses:
         '204':
-          description: Session cancelled successfully
+          description: Session canceled successfully
         '404':
           description: Unknown analysis_id
           content:
@@ -741,7 +741,7 @@ paths:
                   value:
                     error: analysis not found
         '409':
-          description: Session is already in a terminal state (complete, error, or cancelled)
+          description: Session is already in a terminal state (complete, error, or canceled)
           content:
             application/json:
               schema:
@@ -1331,7 +1331,7 @@ components:
       properties:
         fen:
           type: string
-          description: FEN string of the position to analyse
+          description: FEN string of the position to analyze
         engine:
           type: string
           description: Engine identifier; defaults to the first configured engine when omitted
