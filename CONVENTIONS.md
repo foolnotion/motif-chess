@@ -69,6 +69,20 @@ Treating a duplicate as a fatal error is a bug.
 
 ---
 
+## Formatting and console output
+
+Use `fmt` for string formatting and console output:
+
+- `fmt::format(...)` for string construction.
+- `fmt::print(stdout, ...)` for normal console output.
+- `fmt::print(stderr, ...)` for error output.
+
+Avoid `std::format`, `std::to_string`, `std::ostringstream`, `std::cout`, and `std::cerr` in new or
+touched code. Iostreams are acceptable only when a library API or file/stream abstraction requires
+them, such as `std::ifstream`/`std::ofstream` for file IO.
+
+---
+
 ## SQL
 
 SQL belongs in **raw string literals**:

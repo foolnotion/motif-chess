@@ -80,3 +80,26 @@
 
 - `glz::write_json` error discarded — serialization failure returns 200 with empty body [server.cpp:199] — pre-existing pattern, all route handlers in server.cpp use the same `[[maybe_unused]]` suppression
 - Server thread may outlive `srv` on `wait_for_ready` failure [http_server_test.cpp] — pre-existing test pattern, `std::terminate` hazard on REQUIRE failure before join
+
+## Deferred from: code review of 4b-7-openapi-spec (2026-04-26)
+
+- Missing 500 responses on multiple endpoints — server.cpp can return 500 on internal errors; internal errors are generally not spec'd in OpenAPI
+- result type inconsistency across endpoints — PositionHit.result is integer (int8_t encoded), GameListEntry/GameFull.result is string; pre-existing C++ design
+- result enum/int8_t no constraint — PositionHit.result and game result query param lack enum constraints; pre-existing C++ types
+- moves array lacks 16-bit range constraint — nice-to-have but not caused by this change
+- anyOf vs type array style inconsistency — GameFull.event uses anyOf, other nullable fields use type: ['X', 'null']; cosmetic
+- searchPositions operationId naming subjective — not a bug
+- GameFull.date duplicates GameEvent.date — pre-existing C++ struct design accurately reflected
+- Bare array responses — pre-existing API design
+- Cancel on completed import returns 200 — server behavior issue, spec accurately documents what the server returns
+- SSE reconnect replays final event — server behavior, not a spec accuracy issue
+- result query param not validated server-side — server issue, spec documents intended enum
+- import_id no format/pattern — opaque by design, 32-char random hex
+
+## Deferred from: code review of 4c-1-http-api-contract-hardening (2026-04-26)
+
+- `glz::write_json` error suppressed on opening-stats route — pre-existing pattern across all server.cpp routes (lines 337, 408, 442, 503, 600); serialization failure returns 200 with empty body
+- `CHECK_FALSE` negative assertion on numeric result_hash form is marginally weak — vacuously passes if field is absent; covered by the positive quoted-form CHECK
+- Exact continuation count not asserted in opening-stats populated-DB test — test would pass even with duplicate or phantom continuations
+- `fmt::format("{}", game_index)` + `operator+` string concatenation in clamp-limit test — inconsistent with the `fmt::format` inline pattern used in `make_repeated_pgn`; cosmetic
+- `to_opening_stats_response` copies `san`, `eco`, `opening_name` strings from `const&` source — move-from-value alternative not exploited; micro-optimization
