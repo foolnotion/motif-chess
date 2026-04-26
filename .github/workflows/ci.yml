@@ -124,51 +124,36 @@ jobs:
 
   test:
     needs: [lint]
-    if: false # vcpkg sync deferred
 
-    strategy:
-      matrix:
-        os: [macos-14, ubuntu-24.04, windows-2022]
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install LLVM 21
-      if: matrix.os == 'ubuntu-24.04'
-      uses: KyleMayes/install-llvm-action@v2
-      with: { version: "21" }
-
-    - name: Install static analyzers
-      if: matrix.os == 'ubuntu-24.04'
-      run: |
-        sudo apt-get install cppcheck -y -q
-        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy "$(which clang-tidy-21)" 210
-
-    - name: Install vcpkg
-      uses: friendlyanon/setup-vcpkg@v1
-      with: { committish: "${{ env.VCPKG_COMMIT }}" }
-
-    - name: Setup MultiToolTask
-      if: matrix.os == 'windows-2022'
-      run: |
-        Add-Content "$env:GITHUB_ENV" 'UseMultiToolTask=true'
-        Add-Content "$env:GITHUB_ENV" 'EnforceProcessCountAcrossBuilds=true'
+    - name: Install Nix
+      uses: cachix/install-nix-action@v30
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Configure
-      shell: pwsh
-      run: cmake "--preset=ci-$("${{ matrix.os }}".split("-")[0])"
+      run: >
+        nix develop --command cmake
+        -S .
+        -B build/ci-fast
+        -DCMAKE_BUILD_TYPE=Debug
+        -Dmotif_DEVELOPER_MODE=ON
 
     - name: Build
-      run: cmake --build build --config Release -j 2
+      run: nix develop --command cmake --build build/ci-fast -j 2
 
-    - name: Install
-      run: cmake --install build --config Release --prefix prefix
-
-    - name: Test
-      working-directory: build
-      run: ctest --output-on-failure --no-tests=error -C Release -j 2
+    - name: Fast tests
+      run: >
+        nix develop --command ctest
+        --test-dir build/ci-fast
+        --output-on-failure
+        --no-tests=error
+        -j 2
+        -E "(performance|perf|latency target|query_latency)"
 
   docs:
     # Deploy docs only when builds succeed
