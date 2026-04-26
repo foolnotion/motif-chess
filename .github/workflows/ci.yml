@@ -132,6 +132,8 @@ jobs:
 
     - name: Install Nix
       uses: cachix/install-nix-action@v30
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Configure
       run: nix develop --command cmake --preset=dev
