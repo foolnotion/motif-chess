@@ -136,15 +136,20 @@ jobs:
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Configure
-      run: nix develop --command cmake --preset=dev
+      run: >
+        nix develop --command cmake
+        -S .
+        -B build/ci-fast
+        -DCMAKE_BUILD_TYPE=Debug
+        -Dmotif_DEVELOPER_MODE=ON
 
     - name: Build
-      run: nix develop --command cmake --build build/dev -j 2
+      run: nix develop --command cmake --build build/ci-fast -j 2
 
     - name: Fast tests
       run: >
         nix develop --command ctest
-        --test-dir build/dev
+        --test-dir build/ci-fast
         --output-on-failure
         --no-tests=error
         -j 2
