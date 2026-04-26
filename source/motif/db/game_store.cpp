@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -884,7 +884,8 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
     bind_optional_text(stmt->get(), list_param::result_is_null, query.result);
     bind_optional_text(stmt->get(), list_param::result, query.result);
     if (sqlite3_bind_int64(stmt->get(), list_param::limit, static_cast<sqlite3_int64>(query.limit)) != SQLITE_OK
-        || sqlite3_bind_int64(stmt->get(), list_param::offset, static_cast<sqlite3_int64>(query.offset)) != SQLITE_OK) {
+        || sqlite3_bind_int64(stmt->get(), list_param::offset, static_cast<sqlite3_int64>(query.offset)) != SQLITE_OK)
+    {
         return tl::unexpected {error_code::io_failure};
     }
 
