@@ -29,6 +29,127 @@ paths:
                   value:
                     status: ok
 
+  /api/positions/legal-moves:
+    get:
+      operationId: getLegalMoves
+      summary: Get all legal moves for a position
+      description: >-
+        Returns the canonical FEN and the full list of legal moves for the given position.
+        Move legality, FEN parsing, SAN, and UCI are delegated entirely to chesslib (NFR19).
+      parameters:
+        - name: fen
+          in: query
+          required: true
+          description: URL-encoded FEN string of the position to query
+          schema:
+            type: string
+          examples:
+            initial:
+              value: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+      responses:
+        '200':
+          description: Legal moves for the position
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalMovesResponse'
+              examples:
+                initial_position:
+                  summary: Initial position — 20 legal moves
+                  value:
+                    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+                    legal_moves:
+                      - uci: e2e4
+                        san: e4
+                        from: e2
+                        to: e4
+                      - uci: d2d4
+                        san: d4
+                        from: d2
+                        to: d4
+                promotion_move:
+                  summary: Promotion move with promotion field
+                  value:
+                    fen: '8/P7/8/8/8/8/8/4k2K w - - 0 1'
+                    legal_moves:
+                      - uci: a7a8q
+                        san: a8=Q
+                        from: a7
+                        to: a8
+                        promotion: q
+        '400':
+          description: Missing, malformed, or illegal FEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_fen:
+                  value:
+                    error: invalid fen
+                malformed_fen:
+                  value:
+                    error: invalid fen
+
+  /api/positions/apply-move:
+    post:
+      operationId: applyMove
+      summary: Validate and apply a candidate move to a position
+      description: >-
+        Validates the candidate move in UCI notation against the given FEN position.
+        Returns the accepted move in SAN and the resulting FEN on success (HTTP 200),
+        or HTTP 400 if the move is illegal or the FEN is invalid.
+        The frontend can update the board solely from the returned FEN, keeping
+        the board renderer free of chess logic.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyMoveRequest'
+            examples:
+              e2e4:
+                summary: Apply 1.e4 from the initial position
+                value:
+                  fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+                  uci: e2e4
+              promotion:
+                summary: Pawn promotion to queen
+                value:
+                  fen: '8/P7/8/8/8/8/8/4k2K w - - 0 1'
+                  uci: a7a8q
+      responses:
+        '200':
+          description: Move accepted; returns SAN and resulting FEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyMoveResponse'
+              examples:
+                e2e4:
+                  value:
+                    uci: e2e4
+                    san: e4
+                    fen: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1'
+                promotion:
+                  value:
+                    uci: a7a8q
+                    san: a8=Q
+                    fen: 'Q7/8/8/8/8/8/8/4k2K b - - 0 1'
+        '400':
+          description: Invalid FEN, malformed UCI, or illegal move
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                illegal_move:
+                  value:
+                    error: illegal move
+                invalid_fen:
+                  value:
+                    error: invalid fen
+
   /api/positions/{zobrist_hash}:
     get:
       operationId: searchPositions
@@ -359,6 +480,9 @@ paths:
                       event: World Championship 2018
                       date: '2018.11.28'
                       eco: C67
+                      provenance:
+                        source_type: imported
+                        review_status: new
         '400':
           description: Invalid pagination parameters
           content:
@@ -369,6 +493,263 @@ paths:
                 invalid_pagination:
                   value:
                     error: invalid pagination parameters
+
+    post:
+      operationId: createGame
+      summary: Add a personal game by PGN text
+      description: |-
+        Accepts a single PGN game, inserts it with `source_type: manual`, and
+        returns the new game ID along with the full `GameFull` record.
+
+        - Duplicate games (same moves and metadata as an existing manual game)
+          return HTTP 409.
+        - Malformed or multi-game PGN returns HTTP 400.
+        - The optional `review_status` field must be one of `new`, `reviewed`,
+          or `needs_review`; defaults to `new` when omitted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGameRequest'
+            examples:
+              typical:
+                summary: Add a short personal game
+                value:
+                  pgn: |
+                    [Event "Casual"]
+                    [White "Alice"]
+                    [Black "Bob"]
+                    [Result "1-0"]
+
+                    1.e4 e5 2.Nf3 Nc6 3.Bc4 Bc5 4.b4 Bxb4 5.c3 Ba5 6.d4 exd4 7.O-O 1-0
+                  review_status: new
+      responses:
+        '201':
+          description: Game created; returns the new game ID and full record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateGameResponse'
+              examples:
+                typical:
+                  value:
+                    id: 99
+                    game:
+                      id: 99
+                      white:
+                        name: Alice
+                      black:
+                        name: Bob
+                      result: '1-0'
+                      moves: [20289]
+                      provenance:
+                        source_type: manual
+                        review_status: new
+        '400':
+          description: Missing or malformed PGN, invalid SAN, or invalid review_status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                malformed_pgn:
+                  value:
+                    error: malformed pgn
+                invalid_san:
+                  value:
+                    error: invalid san in pgn
+                invalid_review_status:
+                  value:
+                    error: invalid review_status
+        '409':
+          description: A game with identical moves and metadata already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                duplicate:
+                  value:
+                    error: duplicate game
+
+  /api/engine/analyses:
+    post:
+      operationId: startAnalysis
+      summary: Start a UCI engine analysis session
+      description: |-
+        Accepts a FEN position and bounded analysis parameters, starts an engine
+        analysis session, and returns an opaque `analysis_id`. The caller must
+        subsequently connect to `GET /api/engine/analyses/{analysis_id}/stream`
+        to receive SSE events.
+
+        Exactly one of `depth` or `movetime_ms` must be provided.
+
+        Target: `localhost:8080` — no authentication, no multi-tenancy, no data
+        leaves the machine.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartAnalysisRequest'
+            examples:
+              depth_20:
+                summary: Analyse starting position to depth 20
+                value:
+                  fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+                  multipv: 3
+                  depth: 20
+              movetime:
+                summary: Analyse for 5 seconds
+                value:
+                  fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+                  movetime_ms: 5000
+      responses:
+        '202':
+          description: Analysis session started; connect to the stream endpoint to receive events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartAnalysisResponse'
+              examples:
+                started:
+                  value:
+                    analysis_id: a3f1c2d4e5b6a7c8d9e0f1a2b3c4d5e6
+        '400':
+          description: |-
+            Validation error. Triggered by any of:
+            - Missing or invalid FEN
+            - `multipv` outside 1–5
+            - Both `depth` and `movetime_ms` provided
+            - Neither `depth` nor `movetime_ms` provided
+            - `depth` outside 1–100 or `movetime_ms` outside 1–300000
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_fen:
+                  value:
+                    error: missing fen
+                invalid_multipv:
+                  value:
+                    error: multipv must be between 1 and 5
+                both_limits:
+                  value:
+                    error: provide exactly one of depth or movetime_ms
+                neither_limit:
+                  value:
+                    error: provide exactly one of depth or movetime_ms
+
+  /api/engine/analyses/{analysis_id}/stream:
+    get:
+      operationId: streamAnalysis
+      summary: Stream engine analysis events as Server-Sent Events
+      description: |-
+        Produces a `text/event-stream` via chunked transfer encoding. Events are
+        ordered: zero or more `info` events, followed by exactly one terminal
+        `complete` or `error` event.
+
+        **Web Worker requirement:** consume this stream from a Web Worker or
+        equivalent off-main-thread path to avoid blocking the UI thread.
+
+        **`pv_san` omission rule:** if SAN conversion fails for any move in the
+        PV, the array is truncated at that point. If the first move fails, the
+        `pv_san` field is omitted entirely from the event.
+
+        **`analysis_id` opacity guarantee:** treat the value as an opaque string;
+        do not parse or construct it.
+
+        **SSE event ordering guarantee:** `info` events always precede the
+        terminal `complete` or `error` event. No events are emitted after the
+        terminal event.
+      parameters:
+        - name: analysis_id
+          in: path
+          required: true
+          description: Opaque analysis session ID returned by POST /api/engine/analyses
+          schema:
+            type: string
+      responses:
+        '200':
+          description: |-
+            Server-Sent Events stream. Event types:
+              - `info`: analysis update (see AnalysisInfoEvent schema for data field shape)
+              - `complete`: engine finished (see AnalysisCompleteEvent)
+              - `error`: engine failed (see AnalysisErrorEvent)
+            Consume from a Web Worker or equivalent off-main-thread path.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Raw SSE stream; see event schemas in components.
+              examples:
+                info_event:
+                  summary: Analysis info event
+                  value: |
+                    event: info
+                    data: {"depth":12,"seldepth":18,"multipv":1,"score":{"type":"cp","value":32},"pv_uci":["e2e4","e7e5","g1f3"],"pv_san":["e4","e5","Nf3"],"nodes":1234567,"nps":987654,"time_ms":1250}
+                complete_event:
+                  summary: Terminal complete event
+                  value: |
+                    event: complete
+                    data: {"best_move_uci":"e2e4","ponder_uci":"e7e5"}
+                error_event:
+                  summary: Terminal error event
+                  value: |
+                    event: error
+                    data: {"message":"engine process terminated unexpectedly"}
+        '404':
+          description: Unknown analysis_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: analysis not found
+
+  /api/engine/analyses/{analysis_id}:
+    delete:
+      operationId: stopAnalysis
+      summary: Stop an active engine analysis session
+      description: |-
+        Sends `stop` to the engine subprocess and transitions the session to a
+        cancelled terminal state. Only active (non-terminal) sessions can be
+        cancelled; attempting to cancel a session already in a terminal state
+        returns HTTP 409.
+      parameters:
+        - name: analysis_id
+          in: path
+          required: true
+          description: Opaque analysis session ID returned by POST /api/engine/analyses
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Session cancelled successfully
+        '404':
+          description: Unknown analysis_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: analysis not found
+        '409':
+          description: Session is already in a terminal state (complete, error, or cancelled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                already_terminal:
+                  value:
+                    error: analysis already in terminal state
 
   /api/games/{id}:
     get:
@@ -416,6 +797,9 @@ paths:
                     eco: C67
                     tags: []
                     moves: [20289, 20546, 16900]
+                    provenance:
+                      source_type: imported
+                      review_status: new
         '400':
           description: Invalid game ID
           content:
@@ -426,6 +810,161 @@ paths:
                 invalid_id:
                   value:
                     error: invalid game id
+        '404':
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: not_found
+
+    patch:
+      operationId: patchGame
+      summary: Update metadata of a user-added game
+      description: |-
+        Partially updates the metadata of a `manual` game. Only fields present
+        in the request body are changed; absent fields are left unchanged.
+
+        - Only games with `source_type: manual` may be patched; attempting to
+          patch an `imported` game returns HTTP 403.
+        - All string fields are trimmed; empty strings are rejected with HTTP 400.
+        - `result` must be one of `1-0`, `0-1`, `1/2-1/2`, or `*`.
+        - `review_status` must be one of `new`, `reviewed`, or `needs_review`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Game ID of the manual game to update
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4294967295
+          examples:
+            typical:
+              value: 99
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchGameRequest'
+            examples:
+              update_result:
+                summary: Correct the game result
+                value:
+                  result: '0-1'
+              add_notes:
+                summary: Add personal notes
+                value:
+                  notes: Blundered the queen on move 20
+              update_review:
+                summary: Mark game as reviewed
+                value:
+                  review_status: reviewed
+      responses:
+        '200':
+          description: Updated full game record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameFull'
+              examples:
+                updated:
+                  value:
+                    id: 99
+                    white:
+                      name: Alice
+                    black:
+                      name: Bob
+                    result: '0-1'
+                    moves: [20289]
+                    provenance:
+                      source_type: manual
+                      review_status: reviewed
+        '400':
+          description: Invalid game ID, empty string field, or invalid enum value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_id:
+                  value:
+                    error: invalid game id
+                invalid_result:
+                  value:
+                    error: invalid result
+                empty_field:
+                  value:
+                    error: white name must not be empty
+        '403':
+          description: Game is not user-added (source_type is not manual)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_editable:
+                  value:
+                    error: game is not editable
+        '404':
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: not_found
+
+    delete:
+      operationId: deleteGame
+      summary: Delete a user-added game
+      description: |-
+        Permanently removes a `manual` game and rebuilds the position store to
+        ensure DuckDB consistency.
+
+        - Only games with `source_type: manual` may be deleted; attempting to
+          delete an `imported` game returns HTTP 403.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Game ID of the manual game to delete
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4294967295
+          examples:
+            typical:
+              value: 99
+      responses:
+        '204':
+          description: Game deleted successfully
+        '400':
+          description: Invalid game ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_id:
+                  value:
+                    error: invalid game id
+        '403':
+          description: Game is not user-added (source_type is not manual)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_editable:
+                  value:
+                    error: game is not editable
         '404':
           description: Game not found
           content:
@@ -526,9 +1065,81 @@ components:
           type: string
           description: Name of the resulting opening; omitted when unknown
 
+    GameProvenance:
+      type: object
+      required: [source_type, review_status]
+      description: Tracks origin and review status of a game
+      properties:
+        source_type:
+          type: string
+          enum: [imported, manual]
+          description: >-
+            `imported` = loaded from a PGN file via POST /api/imports;
+            `manual` = added by the user via POST /api/games.
+        source_label:
+          type: string
+          description: Human-readable label for the import source; omitted for manual games
+        review_status:
+          type: string
+          enum: [new, reviewed, needs_review]
+          description: User-assigned review status; defaults to `new`
+
+    CreateGameRequest:
+      type: object
+      required: [pgn]
+      properties:
+        pgn:
+          type: string
+          description: PGN text of a single game
+        review_status:
+          type: string
+          enum: [new, reviewed, needs_review]
+          default: new
+          description: Initial review status; defaults to `new` when omitted
+
+    CreateGameResponse:
+      type: object
+      required: [id, game]
+      properties:
+        id:
+          type: integer
+          description: Database ID of the newly created game
+        game:
+          $ref: '#/components/schemas/GameFull'
+
+    PatchGameRequest:
+      type: object
+      description: |-
+        All fields are optional. Only fields present in the body are updated.
+        Only `manual` games may be patched.
+      properties:
+        white:
+          type: string
+          description: White player name; must be non-empty when provided
+        black:
+          type: string
+          description: Black player name; must be non-empty when provided
+        event:
+          type: string
+          description: Event name; must be non-empty when provided
+        date:
+          type: string
+          description: Game date in YYYY.MM.DD format; must be non-empty when provided
+        result:
+          type: string
+          enum: ['1-0', '0-1', '1/2-1/2', '*']
+          description: Game result
+        notes:
+          type: string
+          description: Personal notes stored as a reserved PGN tag
+        review_status:
+          type: string
+          enum: [new, reviewed, needs_review]
+          description: Review status to set
+
     GameListEntry:
       type: object
-      required: [id, white, black, result]
+      required: [id, white, black, result, provenance]
       properties:
         id:
           type: integer
@@ -550,6 +1161,8 @@ components:
         eco:
           type: string
           description: ECO opening code; may be empty string when unrecorded
+        provenance:
+          $ref: '#/components/schemas/GameProvenance'
 
     GamePlayer:
       type: object
@@ -591,7 +1204,7 @@ components:
 
     GameFull:
       type: object
-      required: [id, white, black, result, moves]
+      required: [id, white, black, result, moves, provenance]
       properties:
         id:
           type: integer
@@ -620,6 +1233,79 @@ components:
           items:
             type: integer
           description: Move sequence as 16-bit encoded integers
+        provenance:
+          $ref: '#/components/schemas/GameProvenance'
+
+    LegalMove:
+      type: object
+      required: [uci, san, from, to]
+      properties:
+        uci:
+          type: string
+          description: Move in UCI notation (e.g. "e2e4", "a7a8q")
+          examples:
+            - e2e4
+        san:
+          type: string
+          description: Move in Standard Algebraic Notation (e.g. "e4", "Nf3", "O-O", "a8=Q")
+          examples:
+            - e4
+        from:
+          type: string
+          description: Source square in algebraic notation (e.g. "e2")
+          minLength: 2
+          maxLength: 2
+          examples:
+            - e2
+        to:
+          type: string
+          description: Target square in algebraic notation (e.g. "e4")
+          minLength: 2
+          maxLength: 2
+          examples:
+            - e4
+        promotion:
+          type: string
+          description: Lowercase promotion piece character ("q", "r", "b", or "n"); omitted for non-promotion moves
+          enum: [q, r, b, 'n']
+
+    LegalMovesResponse:
+      type: object
+      required: [fen, legal_moves]
+      properties:
+        fen:
+          type: string
+          description: Canonical FEN of the queried position as returned by chesslib
+        legal_moves:
+          type: array
+          items:
+            $ref: '#/components/schemas/LegalMove'
+          description: All legal moves available in the position
+
+    ApplyMoveRequest:
+      type: object
+      required: [fen, uci]
+      properties:
+        fen:
+          type: string
+          description: FEN string of the current board position
+        uci:
+          type: string
+          description: Candidate move in UCI notation (e.g. "e2e4", "a7a8q")
+
+    ApplyMoveResponse:
+      type: object
+      required: [uci, san, fen]
+      properties:
+        uci:
+          type: string
+          description: Accepted move in UCI notation
+        san:
+          type: string
+          description: Accepted move in Standard Algebraic Notation
+        fen:
+          type: string
+          description: Canonical FEN of the resulting position after the move is applied
 
     ImportStartResponse:
       type: object
@@ -631,3 +1317,129 @@ components:
           minLength: 32
           maxLength: 32
           description: Opaque session identifier; use with /api/imports/{import_id}/progress
+
+    StartAnalysisRequest:
+      type: object
+      required: [fen]
+      oneOf:
+        - required: [depth]
+          not:
+            required: [movetime_ms]
+        - required: [movetime_ms]
+          not:
+            required: [depth]
+      properties:
+        fen:
+          type: string
+          description: FEN string of the position to analyse
+        engine:
+          type: string
+          description: Engine identifier; defaults to the first configured engine when omitted
+        multipv:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 1
+          description: Number of principal variations to return (1–5)
+        depth:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: >-
+            Search to this depth (half-moves). Provide exactly one of `depth`
+            or `movetime_ms`.
+        movetime_ms:
+          type: integer
+          minimum: 1
+          maximum: 300000
+          description: >-
+            Search for this many milliseconds. Provide exactly one of `depth`
+            or `movetime_ms`.
+
+    StartAnalysisResponse:
+      type: object
+      required: [analysis_id]
+      properties:
+        analysis_id:
+          type: string
+          description: >-
+            Opaque analysis session identifier. Treat as an opaque string; do
+            not parse or construct it.
+
+    ScoreObject:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [cp, mate]
+          description: >-
+            Score type: `cp` = centipawns (positive = white advantage),
+            `mate` = mate-in-N (positive = white mates, negative = black mates)
+        value:
+          type: integer
+          description: Score magnitude in centipawns or mate distance
+
+    AnalysisInfoEvent:
+      type: object
+      description: |-
+        Shape of the JSON in the `data` field of an SSE `info` event.
+        Required: `depth`, `multipv`, `score`.
+      required: [depth, multipv, score]
+      properties:
+        depth:
+          type: integer
+          description: Search depth reached (half-moves)
+        seldepth:
+          type: integer
+          description: Selective search depth; omitted when not reported by the engine
+        multipv:
+          type: integer
+          minimum: 1
+          description: 1-based principal variation index
+        score:
+          $ref: '#/components/schemas/ScoreObject'
+        pv_uci:
+          type: array
+          items:
+            type: string
+          description: Principal variation as UCI move strings from the starting position
+        pv_san:
+          type: array
+          items:
+            type: string
+          description: |-
+            Principal variation as SAN strings. Omitted or empty when SAN
+            conversion fails for the first move; truncated at the first failure
+            for subsequent moves.
+        nodes:
+          type: integer
+          format: int64
+          description: Total nodes searched; omitted when not reported
+        nps:
+          type: integer
+          description: Nodes per second; omitted when not reported
+        time_ms:
+          type: integer
+          description: Time elapsed in milliseconds; omitted when not reported
+
+    AnalysisCompleteEvent:
+      type: object
+      description: Shape of the JSON in the `data` field of a terminal SSE `complete` event.
+      required: [best_move_uci]
+      properties:
+        best_move_uci:
+          type: string
+          description: Best move chosen by the engine in UCI notation
+        ponder_uci:
+          type: string
+          description: Ponder move in UCI notation; omitted when not available
+
+    AnalysisErrorEvent:
+      type: object
+      description: Shape of the JSON in the `data` field of a terminal SSE `error` event.
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Human-readable description of the engine failure

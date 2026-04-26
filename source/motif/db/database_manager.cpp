@@ -342,9 +342,16 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
         sqlite3_close(conn);
         return tl::unexpected {ver_res.error()};
     }
-    if (*ver_res != schema::current_version) {
+    if (*ver_res > schema::current_version) {
         sqlite3_close(conn);
         return tl::unexpected {error_code::schema_mismatch};
+    }
+    if (*ver_res < schema::current_version) {
+        auto mig_res = schema::migrate(conn, *ver_res);
+        if (!mig_res) {
+            sqlite3_close(conn);
+            return tl::unexpected {mig_res.error()};
+        }
     }
 
     auto mf_res = read_manifest(manifest_path);

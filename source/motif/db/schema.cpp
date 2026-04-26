@@ -67,14 +67,17 @@ constexpr char const* ddl = R"sql(
     );
 
     CREATE TABLE IF NOT EXISTS game (
-        id       INTEGER PRIMARY KEY,
-        white_id INTEGER NOT NULL REFERENCES player(id),
-        black_id INTEGER NOT NULL REFERENCES player(id),
-        event_id INTEGER REFERENCES event(id),
-        date     TEXT,
-        result   TEXT NOT NULL,
-        eco      TEXT,
-        moves    BLOB NOT NULL
+        id            INTEGER PRIMARY KEY,
+        white_id      INTEGER NOT NULL REFERENCES player(id),
+        black_id      INTEGER NOT NULL REFERENCES player(id),
+        event_id      INTEGER REFERENCES event(id),
+        date          TEXT,
+        result        TEXT NOT NULL,
+        eco           TEXT,
+        moves         BLOB NOT NULL,
+        source_type   TEXT NOT NULL DEFAULT 'imported',
+        source_label  TEXT,
+        review_status TEXT NOT NULL DEFAULT 'new'
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS ux_game_identity ON game(
@@ -97,6 +100,13 @@ constexpr char const* ddl = R"sql(
         name       TEXT NOT NULL PRIMARY KEY,
         applied_at TEXT NOT NULL
     );
+)sql";
+
+// language=sql
+constexpr char const* migration_v1_to_v2 = R"sql(
+    ALTER TABLE game ADD COLUMN source_type   TEXT NOT NULL DEFAULT 'imported';
+    ALTER TABLE game ADD COLUMN source_label  TEXT;
+    ALTER TABLE game ADD COLUMN review_status TEXT NOT NULL DEFAULT 'new';
 )sql";
 
 }  // namespace
@@ -146,6 +156,26 @@ auto initialize(sqlite3* conn) -> result<void>
     }
 
     // Set schema version.
+    auto const ver_sql = fmt::format("PRAGMA user_version = {};", current_version);
+    return exec(conn, ver_sql.c_str());
+}
+
+auto migrate(sqlite3* conn, std::uint32_t const from_version) -> result<void>
+{
+    if (from_version > current_version) {
+        return tl::unexpected {error_code::schema_mismatch};
+    }
+    if (from_version == current_version) {
+        return {};
+    }
+
+    if (from_version < 2U) {
+        auto res = exec(conn, migration_v1_to_v2);
+        if (!res) {
+            return tl::unexpected {res.error()};
+        }
+    }
+
     auto const ver_sql = fmt::format("PRAGMA user_version = {};", current_version);
     return exec(conn, ver_sql.c_str());
 }

@@ -2,6 +2,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "motif/http/error.hpp"
 
@@ -19,6 +22,7 @@ class server
 {
   public:
     static constexpr std::uint16_t default_port {8080};
+    static constexpr std::string_view default_host {"localhost"};
 
     explicit server(motif::db::database_manager& database);
     ~server();
@@ -28,8 +32,16 @@ class server
     server(server&&) = delete;
     auto operator=(server&&) -> server& = delete;
 
-    // Starts listening on `port`. Blocks until stop() is called.
-    [[nodiscard]] auto start(std::uint16_t port = default_port) -> result<void>;
+    // Starts listening on `host`:`port`. Blocks until stop() is called.
+    // `allowed_origins` controls the CORS Access-Control-Allow-Origin header.
+    // An empty vector allows all origins ("*"); a non-empty vector echoes only
+    // the request's Origin header if it matches, otherwise omits the header.
+    [[nodiscard]] auto start(std::string const& host = std::string {default_host},
+                             std::uint16_t port = default_port,
+                             std::vector<std::string> const& allowed_origins = {}) -> result<void>;
+
+    // Convenience overload that binds to default_host with configurable port.
+    [[nodiscard]] auto start(std::uint16_t port) -> result<void>;
 
     // Signals the server to stop; safe to call from any thread.
     auto stop() -> void;

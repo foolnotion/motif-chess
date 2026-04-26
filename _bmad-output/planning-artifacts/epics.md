@@ -214,9 +214,9 @@ An HTTP API layer between motif-chess and any future frontend (Qt, web, or exper
 **Dependencies:** All met — `position_search`, `opening_stats`, `opening_tree`, `import_pipeline`, `database_manager` are stable and tested.
 
 ### Epic 4d: Web Frontend API Prerequisites
-Before interactive web UI work depends on the local HTTP API, the backend exposes the missing chessboard and engine-analysis prerequisites: legal moves and move validation/application for a FEN position, and a stable HTTP/SSE contract for UCI engine analysis.
-**FRs covered:** FR21, FR29–FR31
-**NFRs covered:** NFR05, NFR18, NFR19
+Before interactive web UI work depends on the local HTTP API, the backend exposes the missing chessboard, engine-analysis, and personal-game management prerequisites: legal moves and move validation/application for a FEN position, a stable HTTP/SSE contract for UCI engine analysis, and a domain-native CRUD API for user-added games.
+**FRs covered:** FR02, FR05, FR06, FR09, FR21, FR24, FR26, FR29–FR31
+**NFRs covered:** NFR05, NFR09, NFR10, NFR18, NFR19
 **Dependencies:** Epic 4c complete; `chesslib` owns move legality/SAN/FEN; `ucilib` owns UCI subprocess lifecycle.
 
 ### Epic 4: Desktop Application *(DEFERRED — API prerequisites take priority)*
@@ -862,6 +862,48 @@ So that frontend work can proceed against a stable backend boundary before engin
 **When** implementation stories are created
 **Then** they preserve module ownership: `motif_engine` uses `ucilib` for subprocess lifecycle, `motif_http` owns HTTP/SSE session management, and `chesslib` owns PV conversion to SAN
 **And** they preserve local deployment constraints: API target `localhost:8080`, no auth, no multi-tenancy, no CDN, CORS for the frontend dev origin, and no data leaving the machine
+
+### Story 4d.3: Personal Games CRUD API and LAN Support
+
+As a developer building motif-chess-web as a domain-native replacement for a required CRUD exercise,
+I want backend endpoints for user-added personal games plus simple trusted-LAN configuration,
+So that the web frontend can add, list/search, open, edit, and delete chess games without inventing a non-chess TODO feature.
+
+**Acceptance Criteria:**
+
+**Given** the server is running with an open database
+**When** `POST /api/games` is called with pasted single-game PGN text
+**Then** the PGN is parsed through the existing PGN/chess libraries, persisted through the SQLite/DuckDB storage path, and HTTP 201 returns the created game ID plus normalized metadata
+**And** the created game is marked as user/manual provenance for safe future edits/deletes
+**And** malformed PGN or invalid SAN returns a user-readable HTTP 400 JSON error
+
+**Given** game responses are returned by `GET /api/games` or `GET /api/games/{id}`
+**When** the OpenAPI/API response is reviewed
+**Then** user-added game provenance is represented in API responses and imported/reference games are distinguishable from manual games
+
+**Given** a user-added game exists
+**When** `PATCH /api/games/{id}` is called with valid editable metadata/status fields
+**Then** HTTP 200 returns the updated game
+**And** editable fields are limited to supported metadata/status fields, including `review_status` values `new`, `needs_review`, `studied`, and `archived`
+**And** invalid IDs/fields/status values return 400 and missing games return 404
+
+**Given** a non-user-added imported/reference game exists
+**When** `PATCH /api/games/{id}` or `DELETE /api/games/{id}` is called
+**Then** HTTP 409 is returned and no imported/reference corpus data is changed
+
+**Given** a user-added game exists
+**When** `DELETE /api/games/{id}` is called
+**Then** HTTP 204 is returned, SQLite game/tag rows are removed, and DuckDB derived position data is removed or rebuilt so position search/opening stats no longer include the deleted game
+
+**Given** motif-chess-web may run on a trusted LAN during development
+**When** the HTTP server starts
+**Then** bind host/port and explicit CORS allowed origins are configurable while default local development remains `localhost:8080`
+**And** no authentication, multi-user support, public-network hardening, engine analysis, or frontend UI is added in this story
+
+**Given** `docs/api/openapi.yaml` is updated
+**When** the document is reviewed
+**Then** it documents create, patch, delete, provenance fields, schemas, error cases, and examples
+**And** integration tests cover create/read/list/patch/delete/error cases, imported/reference mutation rejection, PGN parse errors, and SQLite/DuckDB consistency
 
 ---
 

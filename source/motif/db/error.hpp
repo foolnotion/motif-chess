@@ -16,6 +16,7 @@ enum class error_code : std::uint8_t
     schema_mismatch,
     io_failure,
     duplicate,
+    not_editable,
 };
 
 template<typename T>
@@ -34,6 +35,8 @@ using result = tl::expected<T, error_code>;
             return "io_failure";
         case error_code::duplicate:
             return "duplicate";
+        case error_code::not_editable:
+            return "not_editable";
     }
 
     return "unknown";

@@ -100,6 +100,17 @@ struct opening_context
     std::vector<std::uint16_t> moves;
 };
 
+// source_type values: "manual" (user-added via API), "imported" (bulk import).
+// Only "manual" games are editable or deletable.
+// Existing imported games without a stored source_type default to "imported".
+struct game_provenance
+{
+    std::string source_type {"imported"};
+    std::optional<std::string> source_label;
+    // review_status: "new" | "needs_review" | "studied" | "archived"
+    std::string review_status {"new"};
+};
+
 struct game_list_entry
 {
     std::uint32_t id {};
@@ -109,6 +120,9 @@ struct game_list_entry
     std::string event;
     std::string date;
     std::string eco;
+    std::string source_type {"imported"};
+    std::optional<std::string> source_label;
+    std::string review_status {"new"};
 };
 
 struct game_list_query
@@ -129,6 +143,26 @@ struct game
     std::optional<std::string> eco;
     std::vector<std::uint16_t> moves;
     std::vector<std::pair<std::string, std::string>> extra_tags;
+    game_provenance provenance;
+};
+
+// Fields that may be updated via PATCH /api/games/{id}.
+// Only user-added (manual) games can be patched.
+// nullopt fields are left unchanged.
+struct game_patch
+{
+    std::optional<std::string> white_name;
+    std::optional<std::int32_t> white_elo;
+    std::optional<std::string> black_name;
+    std::optional<std::int32_t> black_elo;
+    std::optional<std::string> event;
+    std::optional<std::string> site;
+    std::optional<std::string> date;
+    std::optional<std::string> result;
+    std::optional<std::string> eco;
+    std::optional<std::string> source_label;
+    std::optional<std::string> review_status;
+    std::optional<std::string> notes;
 };
 
 }  // namespace motif::db
