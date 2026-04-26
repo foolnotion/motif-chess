@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -139,6 +141,28 @@ constexpr int game_result = 12;
 constexpr int game_eco = 13;
 constexpr int game_moves = 14;
 }  // namespace get_col
+
+namespace list_col
+{
+constexpr int game_id = 0;
+constexpr int white = 1;
+constexpr int black = 2;
+constexpr int result = 3;
+constexpr int event = 4;
+constexpr int date = 5;
+constexpr int eco = 6;
+}  // namespace list_col
+
+namespace list_param
+{
+constexpr int player_is_null = 1;
+constexpr int white_player = 2;
+constexpr int black_player = 3;
+constexpr int result_is_null = 4;
+constexpr int result = 5;
+constexpr int limit = 6;
+constexpr int offset = 7;
+}  // namespace list_param
 
 // NOLINT(llvm-prefer-static-over-anonymous-namespace): conflicts with
 // misc-use-anonymous-namespace
@@ -817,6 +841,181 @@ auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) c
 
     if (step_rc != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};
+    }
+
+    return out;
+}
+
+auto game_store::list_games(game_list_query const& query) const -> result<std::vector<game_list_entry>>
+{
+    // language=sql
+    static constexpr char const* sql = R"sql(
+        SELECT
+            g.id,
+            w.name,
+            b.name,
+            COALESCE(g.result, ''),
+            COALESCE(e.name, ''),
+            COALESCE(g.date, ''),
+            COALESCE(g.eco, '')
+        FROM game g
+        JOIN player w ON w.id = g.white_id
+        JOIN player b ON b.id = g.black_id
+        LEFT JOIN event e ON e.id = g.event_id
+        WHERE (? IS NULL OR instr(lower(w.name), lower(?)) > 0 OR instr(lower(b.name), lower(?)) > 0)
+          AND (? IS NULL OR g.result = ?)
+        ORDER BY g.id ASC
+        LIMIT ? OFFSET ?
+    )sql";
+
+    auto stmt = prepare(db_, sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+
+    constexpr auto sqlite_max = static_cast<std::size_t>(std::numeric_limits<sqlite3_int64>::max());
+    if (query.limit > sqlite_max || query.offset > sqlite_max) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    bind_optional_text(stmt->get(), list_param::player_is_null, query.player);
+    bind_optional_text(stmt->get(), list_param::white_player, query.player);
+    bind_optional_text(stmt->get(), list_param::black_player, query.player);
+    bind_optional_text(stmt->get(), list_param::result_is_null, query.result);
+    bind_optional_text(stmt->get(), list_param::result, query.result);
+    if (sqlite3_bind_int64(stmt->get(), list_param::limit, static_cast<sqlite3_int64>(query.limit)) != SQLITE_OK
+        || sqlite3_bind_int64(stmt->get(), list_param::offset, static_cast<sqlite3_int64>(query.offset)) != SQLITE_OK)
+    {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto entries = std::vector<game_list_entry> {};
+    entries.reserve(std::min(query.limit, std::size_t {256}));
+
+    int step_rc = SQLITE_ROW;
+    while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
+        entries.push_back(game_list_entry {
+            .id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), list_col::game_id)),
+            .white = column_text(stmt->get(), list_col::white),
+            .black = column_text(stmt->get(), list_col::black),
+            .result = column_text(stmt->get(), list_col::result),
+            .event = column_text(stmt->get(), list_col::event),
+            .date = column_text(stmt->get(), list_col::date),
+            .eco = column_text(stmt->get(), list_col::eco),
+        });
+    }
+
+    if (step_rc != SQLITE_DONE) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    return entries;
+}
+
+auto game_store::get_continuation_contexts(std::vector<opening_move_stat> const& move_stats)
+    -> result<std::vector<game_continuation_context>>
+{
+    return const_cast<game_store const&>(*this).get_continuation_contexts(move_stats);
+}
+
+auto game_store::get_continuation_contexts(std::vector<opening_move_stat> const& move_stats) const
+    -> result<std::vector<game_continuation_context>>
+{
+    auto out = std::vector<game_continuation_context> {};
+    if (move_stats.empty()) {
+        return out;
+    }
+
+    constexpr std::size_t max_lookup_batch {300};
+    constexpr int row_index_col {0};
+    constexpr int game_id_col {1};
+    constexpr int ply_col {2};
+    constexpr int eco_col {3};
+    constexpr int opening_name_col {4};
+    constexpr int encoded_move_col {5};
+    out.reserve(move_stats.size());
+
+    for (std::size_t batch_begin = 0; batch_begin < move_stats.size(); batch_begin += max_lookup_batch) {
+        auto const batch_end = std::min(batch_begin + max_lookup_batch, move_stats.size());
+
+        auto sql = std::ostringstream {};
+        sql << R"sql(
+            WITH lookup(row_index, game_id, ply) AS (VALUES
+        )sql";
+        for (std::size_t index = batch_begin; index < batch_end; ++index) {
+            if (index > batch_begin) {
+                sql << ',';
+            }
+            sql << "(?, ?, ?)";
+        }
+        sql << R"sql(
+            )
+            SELECT
+                lookup.row_index,
+                lookup.game_id,
+                lookup.ply,
+                g.eco,
+                (
+                    SELECT gt.value
+                    FROM game_tag gt
+                    JOIN tag t ON t.id = gt.tag_id
+                    WHERE gt.game_id = g.id AND t.name = 'Opening'
+                    ORDER BY gt.rowid
+                    LIMIT 1
+                ) AS opening_name,
+                substr(g.moves, (CAST(lookup.ply AS INTEGER) * 2) + 1, 2) AS encoded_move
+            FROM lookup
+            JOIN game g ON g.id = lookup.game_id
+        )sql";
+
+        auto stmt = prepare(db_, sql.str().c_str());
+        if (!stmt) {
+            return tl::unexpected {stmt.error()};
+        }
+
+        int bind_index = 1;
+        for (std::size_t index = batch_begin; index < batch_end; ++index) {
+            auto const& move_stat = move_stats[index];
+            sqlite3_bind_int64(stmt->get(), bind_index++, static_cast<std::int64_t>(index));
+            sqlite3_bind_int64(stmt->get(), bind_index++, static_cast<std::int64_t>(move_stat.game_id));
+            sqlite3_bind_int64(stmt->get(), bind_index++, static_cast<std::int64_t>(move_stat.ply));
+        }
+
+        int step_rc = SQLITE_ROW;
+        while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
+            auto const row_index = static_cast<std::size_t>(sqlite3_column_int64(stmt->get(), row_index_col));
+            if (row_index >= move_stats.size()) {
+                return tl::unexpected {error_code::io_failure};
+            }
+
+            auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), encoded_move_col));
+            int const blob_bytes = sqlite3_column_bytes(stmt->get(), encoded_move_col);
+            if (blob_bytes == 0) {
+                continue;
+            }
+            if (std::cmp_not_equal(blob_bytes, sizeof(std::uint16_t)) || blob == nullptr) {
+                return tl::unexpected {error_code::io_failure};
+            }
+
+            std::uint16_t encoded_move {};
+            std::memcpy(&encoded_move, blob, sizeof(encoded_move));
+
+            auto const& move_stat = move_stats[row_index];
+            out.push_back(game_continuation_context {
+                .game_id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), game_id_col)),
+                .ply = static_cast<std::uint16_t>(sqlite3_column_int(stmt->get(), ply_col)),
+                .encoded_move = encoded_move,
+                .result = move_stat.result,
+                .white_elo = move_stat.white_elo,
+                .black_elo = move_stat.black_elo,
+                .eco = column_optional_text(stmt->get(), eco_col),
+                .opening_name = column_optional_text(stmt->get(), opening_name_col),
+            });
+        }
+
+        if (step_rc != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
     }
 
     return out;

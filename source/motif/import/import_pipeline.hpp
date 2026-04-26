@@ -60,6 +60,9 @@ class import_pipeline
     // Thread-safe snapshot of current progress.
     [[nodiscard]] auto progress() const noexcept -> import_progress;
 
+    // Signal a running import to stop after the current batch.
+    void request_stop() noexcept;
+
   private:
     [[nodiscard]] auto run_from(std::filesystem::path const& pgn_path,
                                 std::size_t start_offset,
@@ -76,6 +79,7 @@ class import_pipeline
     std::atomic<std::size_t> games_errored_ {0};
     std::atomic<std::size_t> total_games_ {0};
     std::atomic<std::int64_t> start_time_ns_ {0};
+    std::atomic<bool> stop_requested_ {false};
 };
 
 }  // namespace motif::import
