@@ -2,8 +2,11 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -23,8 +26,6 @@
 #include "motif/http/server.hpp"
 
 #include <fmt/format.h>
-#include <glaze/core/common.hpp>
-#include <glaze/core/meta.hpp>
 #include <glaze/json/read.hpp>
 #include <glaze/json/write.hpp>
 #include <httplib.h>
@@ -34,17 +35,10 @@
 #include "motif/db/error.hpp"
 #include "motif/db/types.hpp"
 #include "motif/http/error.hpp"
+#include "motif/import/error.hpp"
 #include "motif/import/import_pipeline.hpp"
 #include "motif/search/opening_stats.hpp"
 #include "motif/search/position_search.hpp"
-
-// stats has a user-declared default constructor (= default) which makes it
-// a non-aggregate in C++23, so glaze cannot reflect on it automatically.
-template<>
-struct glz::meta<motif::search::opening_stats::stats>
-{
-    static constexpr auto value = glz::object(&motif::search::opening_stats::stats::continuations);
-};
 
 // These structs must live in a named namespace — glaze reflection cannot
 // resolve types in anonymous namespaces (no external linkage).
@@ -95,6 +89,25 @@ struct game_response
     std::vector<std::uint16_t> moves;
 };
 
+struct opening_continuation_response
+{
+    std::string san;
+    std::string result_hash;
+    std::uint32_t frequency {};
+    std::uint32_t white_wins {};
+    std::uint32_t draws {};
+    std::uint32_t black_wins {};
+    std::optional<double> average_white_elo;
+    std::optional<double> average_black_elo;
+    std::optional<std::string> eco;
+    std::optional<std::string> opening_name;
+};
+
+struct opening_stats_response
+{
+    std::vector<opening_continuation_response> continuations;
+};
+
 struct import_response
 {
     std::string import_id;
@@ -107,13 +120,15 @@ struct import_request_body
 
 struct import_session
 {
-    std::filesystem::path pgn_path;
     std::unique_ptr<motif::import::import_pipeline> pipeline;
-    std::atomic<bool> cancel_requested {false};
     std::atomic<bool> done {false};
+    // Store with release so acquire on `done` forms a happens-before fence
+    // covering `error_message`, `summary`, and `failed`.
     std::atomic<bool> failed {false};
     motif::import::import_summary summary {};
     std::string error_message;
+    std::mutex cv_mutex;
+    std::condition_variable cv;
 };
 
 }  // namespace motif::http::detail
@@ -132,6 +147,18 @@ constexpr int http_not_found {404};
 constexpr int http_internal_error {500};
 
 constexpr std::chrono::milliseconds sse_poll_interval {250};
+constexpr std::chrono::minutes sse_max_wait {30};
+
+constexpr std::string_view fail_next_import_worker_start_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_START"};
+constexpr std::string_view fail_next_import_worker_run_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_RUN"};
+
+auto env_flag_enabled(std::string_view const name) -> bool
+{
+    auto const env_name = std::string {name};
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) -- read once during server construction.
+    auto const* const value = std::getenv(env_name.c_str());
+    return value != nullptr && std::string_view {value} == "1";
+}
 
 void set_json_error(httplib::Response& res, int const status, std::string_view const message)
 {
@@ -219,6 +246,33 @@ auto to_game_response(std::uint32_t const game_id, motif::db::game const& source
     };
 }
 
+[[nodiscard]] auto to_opening_continuation_response(motif::search::opening_stats::continuation const& source)
+    -> detail::opening_continuation_response
+{
+    return detail::opening_continuation_response {
+        .san = source.san,
+        .result_hash = fmt::format("{}", source.result_hash),
+        .frequency = source.frequency,
+        .white_wins = source.white_wins,
+        .draws = source.draws,
+        .black_wins = source.black_wins,
+        .average_white_elo = source.average_white_elo,
+        .average_black_elo = source.average_black_elo,
+        .eco = source.eco,
+        .opening_name = source.opening_name,
+    };
+}
+
+[[nodiscard]] auto to_opening_stats_response(motif::search::opening_stats::stats const& source) -> detail::opening_stats_response
+{
+    auto continuations = std::vector<detail::opening_continuation_response> {};
+    continuations.reserve(source.continuations.size());
+    for (auto const& continuation : source.continuations) {
+        continuations.push_back(to_opening_continuation_response(continuation));
+    }
+    return detail::opening_stats_response {.continuations = std::move(continuations)};
+}
+
 auto generate_import_id() -> std::string
 {
     static std::mutex rng_mutex;
@@ -256,7 +310,12 @@ struct server::impl
     std::mutex database_mutex;
     std::mutex sessions_mutex;
     std::unordered_map<std::string, std::shared_ptr<detail::import_session>> sessions;
-    std::vector<std::jthread> import_workers;
+    // Each entry pairs an import_id with its worker thread for lifecycle tracking.
+    std::deque<std::pair<std::string, std::jthread>> import_workers;
+    // Insertion-ordered list of completed import IDs, capped at max_completed_sessions.
+    std::deque<std::string> completed_session_ids;
+    std::atomic<bool> fail_next_import_worker_start_for_test {false};
+    std::atomic<bool> fail_next_import_worker_run_for_test {false};
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     motif::db::database_manager& database;
 
@@ -267,12 +326,19 @@ struct server::impl
     impl(impl&&) = delete;
     auto operator=(impl&&) -> impl& = delete;
 
+    // Join and remove workers for completed sessions; prune old completed
+    // session map entries beyond max_completed_sessions. Must be called while
+    // holding sessions_mutex.
+    void prune_completed();
+
     // NOLINTNEXTLINE(readability-function-cognitive-complexity)
     void setup_routes();
 };
 
 server::impl::impl(motif::db::database_manager& mgr)
-    : database {mgr}
+    : fail_next_import_worker_start_for_test {env_flag_enabled(fail_next_import_worker_start_env)}
+    , fail_next_import_worker_run_for_test {env_flag_enabled(fail_next_import_worker_run_env)}
+    , database {mgr}
 {
     register_cors(svr);
     setup_routes();
@@ -288,7 +354,43 @@ server::impl::~impl()
             if (session->pipeline) {
                 session->pipeline->request_stop();
             }
+            // Wake any SSE provider blocked in cv.wait_for so it can observe
+            // the server shutting down and exit cleanly.
+            session->cv.notify_all();
         }
+    }
+    // Explicitly join all worker threads before the destructor returns.
+    // Workers for sessions that are already done join immediately.
+    for (auto& [import_id, worker] : import_workers) {
+        static_cast<void>(import_id);
+        worker.join();
+    }
+    import_workers.clear();
+}
+
+void server::impl::prune_completed()
+{
+    // Called while holding sessions_mutex.
+    constexpr std::size_t max_completed_sessions {64};
+
+    // Separate active workers from completed ones, joining completed threads.
+    std::deque<std::pair<std::string, std::jthread>> active_workers;
+    for (auto& [import_id, worker] : import_workers) {
+        auto const sess_it = sessions.find(import_id);
+        bool const is_done = (sess_it != sessions.end()) && sess_it->second->done.load(std::memory_order_acquire);
+        if (is_done) {
+            completed_session_ids.push_back(import_id);
+            // jthread destructor joins; thread already exited so join is immediate.
+        } else {
+            active_workers.emplace_back(import_id, std::move(worker));
+        }
+    }
+    import_workers = std::move(active_workers);
+
+    // Evict oldest completed sessions beyond the cap.
+    while (completed_session_ids.size() > max_completed_sessions) {
+        sessions.erase(completed_session_ids.front());
+        completed_session_ids.pop_front();
     }
 }
 
@@ -404,7 +506,7 @@ void server::impl::setup_routes()
                 }
 
                 std::string body {};
-                [[maybe_unused]] auto const err = glz::write_json(*query_result, body);
+                [[maybe_unused]] auto const err = glz::write_json(to_opening_stats_response(*query_result), body);
                 res.set_content(body, "application/json");
                 res.status = http_ok;
             });
@@ -526,12 +628,12 @@ void server::impl::setup_routes()
                      return;
                  }
 
-                 auto session = std::make_shared<detail::import_session>();
-                 session->pipeline = std::make_unique<motif::import::import_pipeline>(database);
-
+                 // Conflict check runs before any heap allocation for session or pipeline (AC 6).
                  std::string import_id;
+                 std::shared_ptr<detail::import_session> session;
                  {
                      std::scoped_lock const lock {sessions_mutex};
+                     prune_completed();
                      auto const active_import = std::ranges::any_of(
                          sessions, [](auto const& entry) -> bool { return !entry.second->done.load(std::memory_order_acquire); });
                      if (active_import) {
@@ -542,23 +644,49 @@ void server::impl::setup_routes()
                      while (sessions.contains(import_id)) {
                          import_id = generate_import_id();
                      }
+                     session = std::make_shared<detail::import_session>();
+                     session->pipeline = std::make_unique<motif::import::import_pipeline>(database);
                      sessions.emplace(import_id, session);
                  }
 
-                 auto worker = std::jthread {[session, pgn_path]() -> void
-                                             {
-                                                 auto result = session->pipeline->run(pgn_path, {});
-                                                 if (result) {
-                                                     session->summary = *result;
-                                                 } else {
-                                                     session->failed.store(true, std::memory_order_relaxed);
-                                                     session->error_message = "import failed";
-                                                 }
-                                                 session->done.store(true, std::memory_order_release);
-                                             }};
-                 {
+                 // Construct jthread outside the lock; catch std::system_error and
+                 // clean up the session entry if the OS cannot create the thread (AC 1).
+                 auto const simulate_start_failure = fail_next_import_worker_start_for_test.exchange(false);
+                 auto const simulate_run_failure = fail_next_import_worker_run_for_test.exchange(false);
+                 try {
+                     if (simulate_start_failure) {
+                         throw std::system_error {std::make_error_code(std::errc::resource_unavailable_try_again),
+                                                  "simulated import worker start failure"};
+                     }
+                     auto worker = std::jthread {
+                         [session, pgn_path, simulate_run_failure]() -> void
+                         {
+                             auto result = simulate_run_failure ? motif::import::result<motif::import::import_summary> {tl::unexpected {
+                                                                      motif::import::error_code::invalid_state}}
+                                                                : session->pipeline->run(pgn_path, {});
+                             if (result) {
+                                 session->summary = *result;
+                             } else {
+                                 // Include error code in message so the SSE JSON
+                                 // escaping path is exercised when chars like '"'
+                                 // appear after further formatting.
+                                 session->error_message = fmt::format(R"(import failed: "{}")", motif::import::to_string(result.error()));
+                                 // Release store: pairs with acquire loads on done
+                                 // to make error_message visible.
+                                 session->failed.store(true, std::memory_order_release);
+                             }
+                             session->done.store(true, std::memory_order_release);
+                             session->cv.notify_all();
+                         }};
+                     {
+                         std::scoped_lock const lock {sessions_mutex};
+                         import_workers.emplace_back(import_id, std::move(worker));
+                     }
+                 } catch (std::system_error const&) {
                      std::scoped_lock const lock {sessions_mutex};
-                     import_workers.push_back(std::move(worker));
+                     sessions.erase(import_id);
+                     set_json_error(res, http_internal_error, "failed to start import worker");
+                     return;
                  }
 
                  std::string body {};
@@ -586,8 +714,20 @@ void server::impl::setup_routes()
                 res.set_header("X-Accel-Buffering", "no");
                 res.set_chunked_content_provider(
                     "text/event-stream",
-                    [session](size_t /*offset*/, httplib::DataSink& sink) -> bool
+                    [session, start_time = std::chrono::steady_clock::now()](size_t /*offset*/, httplib::DataSink& sink) -> bool
                     {
+                        // Null-pointer guard: pipeline should always be set, but
+                        // defend against future refactors (AC 7).
+                        if (!session->pipeline) {
+                            std::string error_json;
+                            [[maybe_unused]] auto const write_err =
+                                glz::write_json(detail::error_response {"pipeline unavailable"}, error_json);
+                            auto const error_event = fmt::format("event: error\ndata: {}\n\n", error_json);
+                            sink.write(error_event.data(), error_event.size());
+                            sink.done();
+                            return false;
+                        }
+
                         auto const prog = session->pipeline->progress();
                         auto const elapsed = static_cast<double>(prog.elapsed.count()) / 1000.0;
                         auto event = fmt::format(
@@ -600,11 +740,15 @@ void server::impl::setup_routes()
                             return false;
                         }
 
+                        // Acquire on `done` synchronizes with the release stores in the worker
+                        // (done, failed, error_message, summary) — all prior writes are visible here.
                         if (session->done.load(std::memory_order_acquire)) {
-                            if (session->failed.load(std::memory_order_relaxed)) {
-                                auto const error_event =
-                                    fmt::format("event: error\ndata: {{\"error\":\"{}\"}}\n\n",
-                                                session->error_message.empty() ? "import failed" : session->error_message);
+                            if (session->failed.load(std::memory_order_acquire)) {
+                                std::string error_json;
+                                [[maybe_unused]] auto const write_err = glz::write_json(
+                                    detail::error_response {session->error_message.empty() ? "import failed" : session->error_message},
+                                    error_json);
+                                auto const error_event = fmt::format("event: error\ndata: {}\n\n", error_json);
                                 sink.write(error_event.data(), error_event.size());
                                 sink.done();
                                 return false;
@@ -623,7 +767,25 @@ void server::impl::setup_routes()
                             return false;
                         }
 
-                        std::this_thread::sleep_for(sse_poll_interval);
+                        // Enforce a maximum wait to guard against an import thread that
+                        // never sets done (AC 10).
+                        if (std::chrono::steady_clock::now() - start_time >= sse_max_wait) {
+                            std::string error_json;
+                            [[maybe_unused]] auto const write_err =
+                                glz::write_json(detail::error_response {"timed out waiting for import"}, error_json);
+                            auto const error_event = fmt::format("event: error\ndata: {}\n\n", error_json);
+                            sink.write(error_event.data(), error_event.size());
+                            sink.done();
+                            return false;
+                        }
+
+                        // Use condition_variable so the final event is sent promptly
+                        // when the worker notifies rather than waiting a full poll interval (AC 5).
+                        {
+                            std::unique_lock<std::mutex> cv_lock {session->cv_mutex};
+                            session->cv.wait_for(
+                                cv_lock, sse_poll_interval, [&session]() -> bool { return session->done.load(std::memory_order_acquire); });
+                        }
                         return true;
                     });
             });
@@ -643,8 +805,9 @@ void server::impl::setup_routes()
                        session = session_iter->second;
                    }
 
-                   session->cancel_requested.store(true, std::memory_order_relaxed);
-                   session->pipeline->request_stop();
+                   if (session->pipeline) {
+                       session->pipeline->request_stop();
+                   }
 
                    res.set_content(R"({"status":"cancellation_requested"})", "application/json");
                    res.status = http_ok;
