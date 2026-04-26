@@ -1122,7 +1122,7 @@ void server::impl::setup_routes()
             });
 
     // Engine analysis routes — exact path before parameterized paths.
-    svr.Post("/api/engine/analyzes",
+    svr.Post("/api/engine/analyses",
              [](httplib::Request const& req, httplib::Response& res) -> void
              {
                  detail::start_analysis_request req_body;
@@ -1177,13 +1177,13 @@ void server::impl::setup_routes()
                  res.status = http_accepted;
              });
 
-    // GET /api/engine/analyzes/:analysis_id/stream — SSE body is Phase 2 work.
-    svr.Get("/api/engine/analyzes/:analysis_id/stream",
+    // GET /api/engine/analyses/:analysis_id/stream — SSE body is Phase 2 work.
+    svr.Get("/api/engine/analyses/:analysis_id/stream",
             [](httplib::Request const& /*req*/, httplib::Response& res) -> void
             { set_json_error(res, http_not_implemented, "engine analysis not yet implemented"); });
 
-    // DELETE /api/engine/analyzes/:analysis_id — stop logic is Phase 2 work.
-    svr.Delete("/api/engine/analyzes/:analysis_id",
+    // DELETE /api/engine/analyses/:analysis_id — stop logic is Phase 2 work.
+    svr.Delete("/api/engine/analyses/:analysis_id",
                [](httplib::Request const& /*req*/, httplib::Response& res) -> void
                { set_json_error(res, http_not_implemented, "engine analysis not yet implemented"); });
 
