@@ -159,6 +159,7 @@ motif_db      — database manager, schema CRUD, migrations, scratch base
 motif_import  — PGN import pipeline (taskflow DAG, workers, checkpoint/resume)
 motif_search  — position search, opening statistics, lazy opening tree
 motif_engine  — UCI engine integration via ucilib (Phase 2; stub only in Phase 1)
+motif_http    — local HTTP/SSE adapter for web or experimental frontends
 motif_app     — Qt 6 GUI; the only CMake target that links Qt
 motif_ml      — AI/ML layer (Phase 3; not scaffolded until Phase 3 begins)
 ```
@@ -166,6 +167,7 @@ motif_ml      — AI/ML layer (Phase 3; not scaffolded until Phase 3 begins)
 **Dependency direction:**
 ```
 motif_app → motif_db, motif_import, motif_search, motif_engine
+motif_http → motif_db, motif_import, motif_search, motif_engine
 motif_import → motif_db
 motif_search → motif_db
 motif_engine → (ucilib only)
@@ -177,6 +179,12 @@ No circular dependencies. `motif_import`, `motif_search`, and `motif_engine` are
 ### GUI↔Backend Communication
 
 **Qt worker threads + signals/slots (option A).** Backend operations run on `QThread` workers; results are emitted as typed Qt signals back to the main thread. Simple, idiomatic Qt, sufficient for a solo project at this scale.
+
+**Local HTTP/SSE adapter.** The `motif_http` module exposes selected backend capabilities to local web or experimental frontends. It owns request validation, JSON/SSE formatting, CORS, and session lifecycle; it does not own chess rules or engine subprocess behavior. Legal move generation remains owned by `chesslib`, and UCI subprocess lifecycle remains owned by `ucilib` through `motif_engine`.
+
+**Frontend rendering feasibility constraints.** The web board renderer is display-only: it accepts FEN, renders pieces, and handles drag/drop affordances without embedding chess rules. It asks the backend for legal destinations and sends candidate moves back for validation/application; the board updates only from a confirmed API response containing the resulting FEN. Large game lists use virtual scrolling with paginated API fetches (the HTTP game-list cap of 200 rows per request is compatible with 1M+ entries when the frontend keeps only the visible window plus a small prefetch buffer). Import progress and engine analysis use SSE-style streaming; engine streams should be consumed from a Web Worker or equivalent off-main-thread client path to keep rendering responsive.
+
+**Local deployment constraints.** The local API target is `localhost:8080`. There is no authentication, multi-tenancy, CDN, or remote service dependency in the local-first architecture. CORS must allow the frontend development origin while keeping the API scoped to local development and local user data; no imported games, engine output, or analysis data leaves the machine.
 
 ### Schema Versioning
 
