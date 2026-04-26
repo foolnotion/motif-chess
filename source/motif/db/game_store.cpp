@@ -106,7 +106,8 @@ class txn_guard
 };
 
 // Bind parameter positions for:
-//   INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves)
+//   INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,
+//                    source_type, source_label, review_status)
 namespace game_ins_param
 {
 constexpr int white_id = 1;
@@ -116,13 +117,17 @@ constexpr int date = 4;
 constexpr int result = 5;
 constexpr int eco = 6;
 constexpr int moves = 7;
+constexpr int source_type = 8;
+constexpr int source_label = 9;
+constexpr int review_status = 10;
 }  // namespace game_ins_param
 
 // Column positions in the JOIN query used by get():
-//   w.name, w.elo, w.title, w.country,   (0-3)
-//   b.name, b.elo, b.title, b.country,   (4-7)
-//   e.name, e.site, e.date,              (8-10)
-//   g.date, g.result, g.eco, g.moves     (11-14)
+//   w.name, w.elo, w.title, w.country,             (0-3)
+//   b.name, b.elo, b.title, b.country,             (4-7)
+//   e.name, e.site, e.date,                        (8-10)
+//   g.date, g.result, g.eco, g.moves,              (11-14)
+//   g.source_type, g.source_label, g.review_status (15-17)
 namespace get_col
 {
 constexpr int white_name = 0;
@@ -140,6 +145,9 @@ constexpr int game_date = 11;
 constexpr int game_result = 12;
 constexpr int game_eco = 13;
 constexpr int game_moves = 14;
+constexpr int game_source_type = 15;
+constexpr int game_source_label = 16;
+constexpr int game_review_status = 17;
 }  // namespace get_col
 
 namespace list_col
@@ -151,6 +159,9 @@ constexpr int result = 3;
 constexpr int event = 4;
 constexpr int date = 5;
 constexpr int eco = 6;
+constexpr int source_type = 7;
+constexpr int source_label = 8;
+constexpr int review_status = 9;
 }  // namespace list_col
 
 namespace list_param
@@ -394,14 +405,17 @@ auto game_store::create_schema() -> result<void>
         );
 
         CREATE TABLE IF NOT EXISTS game (
-            id       INTEGER PRIMARY KEY,
-            white_id INTEGER NOT NULL REFERENCES player(id),
-            black_id INTEGER NOT NULL REFERENCES player(id),
-            event_id INTEGER REFERENCES event(id),
-            date     TEXT,
-            result   TEXT NOT NULL,
-            eco      TEXT,
-            moves    BLOB NOT NULL
+            id            INTEGER PRIMARY KEY,
+            white_id      INTEGER NOT NULL REFERENCES player(id),
+            black_id      INTEGER NOT NULL REFERENCES player(id),
+            event_id      INTEGER REFERENCES event(id),
+            date          TEXT,
+            result        TEXT NOT NULL,
+            eco           TEXT,
+            moves         BLOB NOT NULL,
+            source_type   TEXT NOT NULL DEFAULT 'imported',
+            source_label  TEXT,
+            review_status TEXT NOT NULL DEFAULT 'new'
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS ux_game_identity ON game(
@@ -570,8 +584,9 @@ auto game_store::insert(game const& src_game) -> result<std::uint32_t>
 
     auto game_ins = prepare_cached_stmt(
         insert_game_stmt_,
-        "INSERT INTO game(white_id, black_id, event_id, date, result, eco, "
-        "moves) " "VALUES(?, ?, ?, ?, ?, ?, ?)");
+        "INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,"
+        " source_type, source_label, review_status)"
+        " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     if (!game_ins) {
         return tl::unexpected {game_ins.error()};
     }
@@ -592,6 +607,17 @@ auto game_store::insert(game const& src_game) -> result<std::uint32_t>
     } else {
         sqlite3_bind_blob(*game_ins, game_ins_param::moves, moves.data(), static_cast<int>(blob_bytes), SQLITE_TRANSIENT);
     }
+    sqlite3_bind_text(*game_ins,
+                      game_ins_param::source_type,
+                      src_game.provenance.source_type.c_str(),
+                      static_cast<int>(src_game.provenance.source_type.size()),
+                      SQLITE_TRANSIENT);
+    bind_optional_text(*game_ins, game_ins_param::source_label, src_game.provenance.source_label);
+    sqlite3_bind_text(*game_ins,
+                      game_ins_param::review_status,
+                      src_game.provenance.review_status.c_str(),
+                      static_cast<int>(src_game.provenance.review_status.size()),
+                      SQLITE_TRANSIENT);
 
     int const ins_rc = sqlite3_step(*game_ins);
     if (ins_rc == SQLITE_CONSTRAINT) {
@@ -627,7 +653,8 @@ auto game_store::get(std::uint32_t const game_id) const -> result<game>
             w.name, w.elo, w.title, w.country,
             b.name, b.elo, b.title, b.country,
             e.name, e.site, e.date,
-            g.date, g.result, g.eco, g.moves
+            g.date, g.result, g.eco, g.moves,
+            g.source_type, g.source_label, g.review_status
         FROM game g
         JOIN player w ON w.id = g.white_id
         JOIN player b ON b.id = g.black_id
@@ -672,6 +699,16 @@ auto game_store::get(std::uint32_t const game_id) const -> result<game>
     out.date = column_optional_text(stmt->get(), get_col::game_date);
     out.result = column_text(stmt->get(), get_col::game_result);
     out.eco = column_optional_text(stmt->get(), get_col::game_eco);
+
+    {
+        auto const* src_type_raw = column_text(stmt->get(), get_col::game_source_type);
+        out.provenance.source_type = (src_type_raw != nullptr) ? std::string {src_type_raw} : "imported";
+    }
+    out.provenance.source_label = column_optional_text(stmt->get(), get_col::game_source_label);
+    {
+        auto const* rev_status_raw = column_text(stmt->get(), get_col::game_review_status);
+        out.provenance.review_status = (rev_status_raw != nullptr) ? std::string {rev_status_raw} : "new";
+    }
 
     // Decode move blob — raw uint16_t array stored by insert().
     auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), get_col::game_moves));
@@ -857,7 +894,10 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
             COALESCE(g.result, ''),
             COALESCE(e.name, ''),
             COALESCE(g.date, ''),
-            COALESCE(g.eco, '')
+            COALESCE(g.eco, ''),
+            COALESCE(g.source_type, 'imported'),
+            g.source_label,
+            COALESCE(g.review_status, 'new')
         FROM game g
         JOIN player w ON w.id = g.white_id
         JOIN player b ON b.id = g.black_id
@@ -890,10 +930,13 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
     }
 
     auto entries = std::vector<game_list_entry> {};
-    entries.reserve(std::min(query.limit, std::size_t {256}));
+    static constexpr std::size_t max_reserve {256};
+    entries.reserve(std::min(query.limit, max_reserve));
 
     int step_rc = SQLITE_ROW;
     while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
+        auto const* src_type_raw = column_text(stmt->get(), list_col::source_type);
+        auto const* rev_status_raw = column_text(stmt->get(), list_col::review_status);
         entries.push_back(game_list_entry {
             .id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), list_col::game_id)),
             .white = column_text(stmt->get(), list_col::white),
@@ -902,6 +945,9 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
             .event = column_text(stmt->get(), list_col::event),
             .date = column_text(stmt->get(), list_col::date),
             .eco = column_text(stmt->get(), list_col::eco),
+            .source_type = (src_type_raw != nullptr) ? std::string {src_type_raw} : "imported",
+            .source_label = column_optional_text(stmt->get(), list_col::source_label),
+            .review_status = (rev_status_raw != nullptr) ? std::string {rev_status_raw} : "new",
         });
     }
 
@@ -1029,6 +1075,270 @@ auto game_store::remove(std::uint32_t game_id) -> result<void>
         return tl::unexpected {stmt.error()};
     }
     sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_id));
+
+    if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (sqlite3_changes(db_) == 0) {
+        return tl::unexpected {error_code::not_found};
+    }
+    return {};
+}
+
+auto game_store::get_provenance(std::uint32_t const game_id) const -> result<game_provenance>
+{
+    // language=sql
+    static constexpr char const* sql = R"sql(
+        SELECT source_type, source_label, review_status
+        FROM game
+        WHERE id = ?
+    )sql";
+
+    auto stmt = prepare(db_, sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_id));
+
+    int const step_rc = sqlite3_step(stmt->get());
+    if (step_rc == SQLITE_DONE) {
+        return tl::unexpected {error_code::not_found};
+    }
+    if (step_rc != SQLITE_ROW) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    game_provenance prov;
+    {
+        auto const* raw = column_text(stmt->get(), 0);
+        prov.source_type = (raw != nullptr) ? std::string {raw} : "imported";
+    }
+    prov.source_label = column_optional_text(stmt->get(), 1);
+    {
+        auto const* raw = column_text(stmt->get(), 2);
+        prov.review_status = (raw != nullptr) ? std::string {raw} : "new";
+    }
+    return prov;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& patch) -> result<void>
+{
+    auto prov_res = get_provenance(game_id);
+    if (!prov_res) {
+        return tl::unexpected {prov_res.error()};
+    }
+    if (prov_res->source_type != "manual") {
+        return tl::unexpected {error_code::not_editable};
+    }
+
+    txn_guard txn {db_};
+    if (!txn.began()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    // Update player rows via find-or-insert/repoint semantics to avoid
+    // mutating shared player rows used by other games.
+    if (patch.white_name.has_value() || patch.white_elo.has_value()) {
+        auto cur_game = get(game_id);
+        if (!cur_game) {
+            return tl::unexpected {cur_game.error()};
+        }
+        motif::db::player updated_white = cur_game->white;
+        if (patch.white_name.has_value()) {
+            updated_white.name = *patch.white_name;
+        }
+        if (patch.white_elo.has_value()) {
+            updated_white.elo = patch.white_elo;
+        }
+        auto white_id_res = find_or_insert_player(updated_white);
+        if (!white_id_res) {
+            return tl::unexpected {white_id_res.error()};
+        }
+        auto upd_stmt = prepare(db_, "UPDATE game SET white_id = ? WHERE id = ?");
+        if (!upd_stmt) {
+            return tl::unexpected {upd_stmt.error()};
+        }
+        sqlite3_bind_int64(upd_stmt->get(), 1, *white_id_res);
+        sqlite3_bind_int64(upd_stmt->get(), 2, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(upd_stmt->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    if (patch.black_name.has_value() || patch.black_elo.has_value()) {
+        auto cur_game = get(game_id);
+        if (!cur_game) {
+            return tl::unexpected {cur_game.error()};
+        }
+        motif::db::player updated_black = cur_game->black;
+        if (patch.black_name.has_value()) {
+            updated_black.name = *patch.black_name;
+        }
+        if (patch.black_elo.has_value()) {
+            updated_black.elo = patch.black_elo;
+        }
+        auto black_id_res = find_or_insert_player(updated_black);
+        if (!black_id_res) {
+            return tl::unexpected {black_id_res.error()};
+        }
+        auto upd_stmt = prepare(db_, "UPDATE game SET black_id = ? WHERE id = ?");
+        if (!upd_stmt) {
+            return tl::unexpected {upd_stmt.error()};
+        }
+        sqlite3_bind_int64(upd_stmt->get(), 1, *black_id_res);
+        sqlite3_bind_int64(upd_stmt->get(), 2, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(upd_stmt->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    if (patch.event.has_value() || patch.site.has_value()) {
+        auto cur_game = get(game_id);
+        if (!cur_game) {
+            return tl::unexpected {cur_game.error()};
+        }
+        auto const existing_details = cur_game->event_details;
+        auto const event_name = patch.event.value_or(existing_details ? existing_details->name : std::string {});
+        if (!event_name.empty()) {
+            std::optional<std::string> const event_site =
+                patch.site.has_value() ? patch.site : (existing_details ? existing_details->site : std::nullopt);
+            std::optional<std::string> const event_date = existing_details ? existing_details->date : std::nullopt;
+            auto evt = motif::db::event {.name = event_name, .site = event_site, .date = event_date};
+            auto event_id_res = find_or_insert_event(evt);
+            if (!event_id_res) {
+                return tl::unexpected {event_id_res.error()};
+            }
+            auto upd_stmt = prepare(db_, "UPDATE game SET event_id = ? WHERE id = ?");
+            if (!upd_stmt) {
+                return tl::unexpected {upd_stmt.error()};
+            }
+            sqlite3_bind_int64(upd_stmt->get(), 1, *event_id_res);
+            sqlite3_bind_int64(upd_stmt->get(), 2, static_cast<std::int64_t>(game_id));
+            if (sqlite3_step(upd_stmt->get()) != SQLITE_DONE) {
+                return tl::unexpected {error_code::io_failure};
+            }
+        }
+    }
+
+    // Direct field updates
+    if (patch.date.has_value()) {
+        auto upd = prepare(db_, "UPDATE game SET date = ? WHERE id = ?");
+        if (!upd) {
+            return tl::unexpected {upd.error()};
+        }
+        sqlite3_bind_text(upd->get(), 1, patch.date->c_str(), static_cast<int>(patch.date->size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    if (patch.result.has_value()) {
+        auto upd = prepare(db_, "UPDATE game SET result = ? WHERE id = ?");
+        if (!upd) {
+            return tl::unexpected {upd.error()};
+        }
+        sqlite3_bind_text(upd->get(), 1, patch.result->c_str(), static_cast<int>(patch.result->size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    if (patch.eco.has_value()) {
+        auto upd = prepare(db_, "UPDATE game SET eco = ? WHERE id = ?");
+        if (!upd) {
+            return tl::unexpected {upd.error()};
+        }
+        sqlite3_bind_text(upd->get(), 1, patch.eco->c_str(), static_cast<int>(patch.eco->size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    if (patch.source_label.has_value()) {
+        auto upd = prepare(db_, "UPDATE game SET source_label = ? WHERE id = ?");
+        if (!upd) {
+            return tl::unexpected {upd.error()};
+        }
+        sqlite3_bind_text(upd->get(), 1, patch.source_label->c_str(), static_cast<int>(patch.source_label->size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    if (patch.review_status.has_value()) {
+        auto upd = prepare(db_, "UPDATE game SET review_status = ? WHERE id = ?");
+        if (!upd) {
+            return tl::unexpected {upd.error()};
+        }
+        sqlite3_bind_text(upd->get(), 1, patch.review_status->c_str(), static_cast<int>(patch.review_status->size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
+    if (patch.notes.has_value()) {
+        // notes is stored as a reserved game tag with key "_notes".
+        // Replace the existing tag if present.
+        auto del_stmt =
+            prepare(db_, R"sql(DELETE FROM game_tag WHERE game_id = ? AND tag_id = (SELECT id FROM tag WHERE name = '_notes'))sql");
+        if (!del_stmt) {
+            return tl::unexpected {del_stmt.error()};
+        }
+        sqlite3_bind_int64(del_stmt->get(), 1, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(del_stmt->get()) != SQLITE_DONE) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        if (!patch.notes->empty()) {
+            auto ins_res = insert_game_tags(game_id, {{"_notes", *patch.notes}});
+            if (!ins_res) {
+                return tl::unexpected {ins_res.error()};
+            }
+        }
+    }
+
+    if (!txn.commit()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+auto game_store::remove_user_game(std::uint32_t const game_id) -> result<void>
+{
+    auto prov_res = get_provenance(game_id);
+    if (!prov_res) {
+        return tl::unexpected {prov_res.error()};
+    }
+    if (prov_res->source_type != "manual") {
+        return tl::unexpected {error_code::not_editable};
+    }
+    return remove(game_id);
+}
+
+auto game_store::set_manual_provenance(std::uint32_t const game_id,
+                                       std::optional<std::string> const& source_label,
+                                       std::string const& review_status) -> result<void>
+{
+    // language=sql
+    static constexpr char const* sql = R"sql(
+        UPDATE game
+        SET source_type = 'manual', source_label = ?, review_status = ?
+        WHERE id = ?
+    )sql";
+
+    auto stmt = prepare(db_, sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+
+    bind_optional_text(stmt->get(), 1, source_label);
+    sqlite3_bind_text(stmt->get(), 2, review_status.c_str(), static_cast<int>(review_status.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt->get(), 3, static_cast<std::int64_t>(game_id));
 
     if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};

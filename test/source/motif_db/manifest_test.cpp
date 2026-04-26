@@ -65,7 +65,7 @@ TEST_CASE("manifest: make_manifest populates all fields with non-empty values", 
 {
     auto const manifest = motif::db::make_manifest("test-db");
     CHECK(manifest.name == "test-db");
-    CHECK(manifest.schema_version == 1);
+    CHECK(manifest.schema_version == 2);
     CHECK(manifest.game_count == 0);
     CHECK_FALSE(manifest.created_at.empty());
 }

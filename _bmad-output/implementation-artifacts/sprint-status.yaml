@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-26  # correct-course: add web frontend API prerequisites
+last_updated: 2026-04-26  # done: 4d-3 personal games CRUD API and LAN support
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -91,9 +91,10 @@ development_status:
   epic-4c-retrospective: done
 
   # ─── Epic 4d: Web Frontend API Prerequisites ────────────────────────────────
-  epic-4d: backlog
-  4d-1-legal-moves-and-move-validation-endpoints: backlog
-  4d-2-engine-analysis-api-contract: backlog
+  epic-4d: done
+  4d-1-legal-moves-and-move-validation-endpoints: done
+  4d-2-engine-analysis-api-contract: done
+  4d-3-personal-games-crud-api-and-lan-support: done
   epic-4d-retrospective: optional
 
   # ─── Epic 4: Desktop Application (DEFERRED — API prerequisites take priority)
