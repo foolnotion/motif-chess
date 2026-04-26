@@ -573,14 +573,14 @@ paths:
                   value:
                     error: duplicate game
 
-  /api/engine/analyzes:
+  /api/engine/analyses:
     post:
       operationId: startAnalysis
       summary: Start a UCI engine analysis session
       description: |-
         Accepts a FEN position and bounded analysis parameters, starts an engine
         analysis session, and returns an opaque `analysis_id`. The caller must
-        subsequently connect to `GET /api/engine/analyzes/{analysis_id}/stream`
+        subsequently connect to `GET /api/engine/analyses/{analysis_id}/stream`
         to receive SSE events.
 
         Exactly one of `depth` or `movetime_ms` must be provided.
@@ -642,7 +642,7 @@ paths:
                   value:
                     error: provide exactly one of depth or movetime_ms
 
-  /api/engine/analyzes/{analysis_id}/stream:
+  /api/engine/analyses/{analysis_id}/stream:
     get:
       operationId: streamAnalysis
       summary: Stream engine analysis events as Server-Sent Events
@@ -668,7 +668,7 @@ paths:
         - name: analysis_id
           in: path
           required: true
-          description: Opaque analysis session ID returned by POST /api/engine/analyzes
+          description: Opaque analysis session ID returned by POST /api/engine/analyses
           schema:
             type: string
       responses:
@@ -711,7 +711,7 @@ paths:
                   value:
                     error: analysis not found
 
-  /api/engine/analyzes/{analysis_id}:
+  /api/engine/analyses/{analysis_id}:
     delete:
       operationId: stopAnalysis
       summary: Stop an active engine analysis session
@@ -724,7 +724,7 @@ paths:
         - name: analysis_id
           in: path
           required: true
-          description: Opaque analysis session ID returned by POST /api/engine/analyzes
+          description: Opaque analysis session ID returned by POST /api/engine/analyses
           schema:
             type: string
       responses:
