@@ -55,7 +55,7 @@ so that the endpoint does not deadlock, leak resources, or produce malformed out
 9. **Given** the `server::impl` destructor runs
    **When** it returns
    **Then** all import worker threads have joined — no worker thread can be executing after the destructor returns
-   **And** the destructor explicitly joins remaining `import_workers` after signalling pipelines to stop, inside the destructor body (not relying on implicit jthread destructor sequencing after the mutex is released)
+   **And** the destructor explicitly joins remaining `import_workers` after signaling pipelines to stop, inside the destructor body (not relying on implicit jthread destructor sequencing after the mutex is released)
 
 10. **Given** an import worker thread deadlocks or stalls before `done.store(true)`
     **When** the SSE content provider polls indefinitely
@@ -114,7 +114,7 @@ so that the endpoint does not deadlock, leak resources, or produce malformed out
   - [x] Confirm `pipeline->request_stop()` is the only cancellation mechanism (it is — it sets an internal stop token)
 
 - [x] Task 9: Fix destructor join ordering (AC: 9)
-  - [x] In `server::impl::~impl()`, after signalling all pipelines to stop (inside the mutex scope), explicitly join the `import_workers` vector before returning
+  - [x] In `server::impl::~impl()`, after signaling all pipelines to stop (inside the mutex scope), explicitly join the `import_workers` vector before returning
   - [x] Move `import_workers.clear()` (which calls jthread destructors and thus joins) to an explicit statement after the mutex scope in the destructor body
   - [x] Alternatively: call `worker.request_stop(); worker.join();` on each entry before clearing
 
