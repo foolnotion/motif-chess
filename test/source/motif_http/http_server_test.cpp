@@ -3110,9 +3110,8 @@ TEST_CASE("server: game count reflects imported games", "[motif-http]")
     auto const import_id = extract_import_id(import_res->body);
     REQUIRE(!import_id.empty());
 
-    cli.Get("/api/imports/" + import_id + "/progress",
-            httplib::Headers {},
-            [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
+    cli.Get(
+        "/api/imports/" + import_id + "/progress", httplib::Headers {}, [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
 
     auto const count_res = cli.Get("/api/games/count");
 
@@ -3139,8 +3138,7 @@ TEST_CASE("server: upload import rejects request with missing file field", "[mot
     httplib::Client cli {"localhost", test_port};
     auto const res = cli.Post(
         "/api/imports/upload",
-        httplib::UploadFormDataItems {
-            {.name = "not_file", .content = "dummy", .filename = "dummy.pgn", .content_type = "text/plain"}});
+        httplib::UploadFormDataItems {{.name = "not_file", .content = "dummy", .filename = "dummy.pgn", .content_type = "text/plain"}});
 
     srv.stop();
     server_thread.join();
@@ -3198,8 +3196,7 @@ TEST_CASE("server: upload import rejects a second concurrent upload", "[motif-ht
     auto const long_pgn = make_repeated_pgn(long_import_game_count);
     auto const first_res = cli.Post(
         "/api/imports/upload",
-        httplib::UploadFormDataItems {
-            {.name = "file", .content = long_pgn, .filename = "games.pgn", .content_type = "text/plain"}});
+        httplib::UploadFormDataItems {{.name = "file", .content = long_pgn, .filename = "games.pgn", .content_type = "text/plain"}});
     REQUIRE(first_res != nullptr);
     REQUIRE(first_res->status == 202);
 
@@ -3213,9 +3210,8 @@ TEST_CASE("server: upload import rejects a second concurrent upload", "[motif-ht
     auto const import_id = extract_import_id(first_res->body);
     auto const del_res = cli.Delete("/api/imports/" + import_id);
     REQUIRE(del_res != nullptr);
-    cli.Get("/api/imports/" + import_id + "/progress",
-            httplib::Headers {},
-            [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
+    cli.Get(
+        "/api/imports/" + import_id + "/progress", httplib::Headers {}, [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
 
     srv.stop();
     server_thread.join();
