@@ -925,7 +925,7 @@ So that the browser can import games without a server-side path and display the 
 
 **Given** an import is already running
 **When** `POST /api/imports/upload` is called
-**Then** HTTP 409 is returned with a JSON error response, matching the conflict behaviour of `POST /api/imports`
+**Then** HTTP 409 is returned with a JSON error response, matching the conflict behavior of `POST /api/imports`
 
 **Given** the server is running with an open database
 **When** `GET /api/games/count` is called

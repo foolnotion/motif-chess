@@ -26,7 +26,7 @@ so that the browser can import games without a server-side path and display the 
 
 3. **Given** an import is already running
    **When** `POST /api/imports/upload` is called
-   **Then** HTTP 409 is returned with a JSON error response, matching the conflict behaviour of `POST /api/imports`
+   **Then** HTTP 409 is returned with a JSON error response, matching the conflict behavior of `POST /api/imports`
 
 4. **Given** the server is running with an open database
    **When** `GET /api/games/count` is called
@@ -55,7 +55,7 @@ so that the browser can import games without a server-side path and display the 
 
 - [x] Task 2: Add `GET /api/games/count` endpoint (AC: 4, 5)
   - [x] Add `game_count_response` DTO (`std::int64_t count`) in `motif::http::detail`
-  - [x] Register route before `Patch("/api/games/:id", ...)` so the exact path takes priority over the parameterised route
+  - [x] Register route before `Patch("/api/games/:id", ...)` so the exact path takes priority over the parameterized route
   - [x] Acquire `database_mutex`, call `database.store().count_games()`, return 200 with JSON body or 500 on failure
 
 - [x] Task 3: Add `POST /api/imports/upload` endpoint (AC: 1, 2, 3)
@@ -94,7 +94,7 @@ Browser-side constraint: `<input type="file">` and drag-and-drop give the fronte
 ### Key Design Decisions
 
 - Temp file is cleaned up inside the worker lambda — covers both success and failure. The `std::system_error` catch block also removes it if thread creation fails before the lambda runs.
-- Route ordering: `GET /api/games/count` registered before `Patch("/api/games/:id", ...)` (the first parameterised games route) so httplib matches the exact path first. `POST /api/imports/upload` registered after `Post("/api/imports", ...)` — no ordering conflict since it is a distinct exact path across all methods.
+- Route ordering: `GET /api/games/count` registered before `Patch("/api/games/:id", ...)` (the first parameterized games route) so httplib matches the exact path first. `POST /api/imports/upload` registered after `Post("/api/imports", ...)` — no ordering conflict since it is a distinct exact path across all methods.
 - `game_count_response` uses `std::int64_t` to match `sqlite3_column_int64` without a narrowing cast.
 
 ### References
@@ -117,7 +117,7 @@ None.
 
 ### Completion Notes List
 
-- `POST /api/imports/upload` registered as a distinct exact POST route; no conflict with the parameterised `GET`/`DELETE /api/imports/:import_id` routes.
+- `POST /api/imports/upload` registered as a distinct exact POST route; no conflict with the parameterized `GET`/`DELETE /api/imports/:import_id` routes.
 - httplib parses `multipart/form-data` automatically into `req.form.files`; file content is available as `file_it->second.content`.
 - Build: 215/215 tests passed. Sanitizer run pending.
 
