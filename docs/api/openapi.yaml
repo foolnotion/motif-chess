@@ -318,6 +318,62 @@ paths:
                   value:
                     error: import already running
 
+  /api/imports/upload:
+    post:
+      operationId: uploadImport
+      summary: Start a PGN import from uploaded file bytes
+      description: |-
+        Accepts a `multipart/form-data` POST with a single field named `file`
+        containing the PGN file bytes. The backend writes the bytes to a
+        temporary file, runs the same import pipeline as `POST /api/imports`,
+        and cleans up the temporary file when the import completes or fails.
+
+        Use this endpoint from browser frontends where the full filesystem path
+        of a user-selected file is not accessible.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PGN file bytes
+      responses:
+        '202':
+          description: Import started; use the returned import_id to stream progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportStartResponse'
+              examples:
+                typical:
+                  value:
+                    import_id: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+        '400':
+          description: Missing file field in multipart body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_field:
+                  value:
+                    error: missing file field
+        '409':
+          description: Another import is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                conflict:
+                  value:
+                    error: import already running
+
   /api/imports/{import_id}/progress:
     get:
       operationId: streamImportProgress
@@ -572,6 +628,25 @@ paths:
                 duplicate:
                   value:
                     error: duplicate game
+
+  /api/games/count:
+    get:
+      operationId: getGameCount
+      summary: Get total number of games in the database
+      description: |-
+        Returns the total number of games stored in the database.
+        Useful for showing database statistics after an import completes.
+      responses:
+        '200':
+          description: Total game count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameCountResponse'
+              examples:
+                typical:
+                  value:
+                    count: 12345
 
   /api/engine/analyses:
     post:
@@ -1306,6 +1381,16 @@ components:
         fen:
           type: string
           description: Canonical FEN of the resulting position after the move is applied
+
+    GameCountResponse:
+      type: object
+      required: [count]
+      properties:
+        count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total number of games in the database
 
     ImportStartResponse:
       type: object
