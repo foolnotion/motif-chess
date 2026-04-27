@@ -57,6 +57,7 @@ class game_store
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<std::unordered_map<std::uint32_t, game_context>>;
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const -> result<std::unordered_map<std::uint32_t, game_context>>;
     auto list_games(game_list_query const& query) const -> result<std::vector<game_list_entry>>;
+    auto count_games() const -> result<std::int64_t>;
     auto get_continuation_contexts(std::vector<opening_move_stat> const& move_stats) -> result<std::vector<game_continuation_context>>;
     auto get_continuation_contexts(std::vector<opening_move_stat> const& move_stats) const
         -> result<std::vector<game_continuation_context>>;
