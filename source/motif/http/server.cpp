@@ -1326,8 +1326,7 @@ void server::impl::setup_routes()
                      session->pipeline = std::make_unique<motif::import::import_pipeline>(database);
                      sessions.emplace(import_id, session);
                  }
-                 temp_path = std::filesystem::temp_directory_path()
-                     / fmt::format("motif_upload_{}.pgn", import_id);
+                 temp_path = std::filesystem::temp_directory_path() / fmt::format("motif_upload_{}.pgn", import_id);
                  {
                      std::ofstream tmp {temp_path, std::ios::binary};
                      if (!tmp.is_open()) {
@@ -1348,38 +1347,38 @@ void server::impl::setup_routes()
                  }
 
                  try {
-                     auto worker = std::jthread {
-                         [session, pgn_path = temp_path]() -> void
-                         {
-                             try {
-                                 auto result = session->pipeline->run(pgn_path, {});
-                                 if (result) {
-                                     session->summary = *result;
-                                 } else {
-                                     session->error_message = fmt::format(R"(import failed: "{}")", motif::import::to_string(result.error()));
-                                     session->failed.store(true, std::memory_order_release);
-                                 }
-} catch (...) {
-                                  std::error_code remove_err {};
-                                  std::filesystem::remove(pgn_path, remove_err);
-                                  session->error_message = "import failed: unexpected error";
-                                  session->failed.store(true, std::memory_order_release);
-                                  session->done.store(true, std::memory_order_release);
-                                  session->cv.notify_all();
-                                  return;
-                              }
-                              std::error_code remove_err {};
-                              std::filesystem::remove(pgn_path, remove_err);
-                             session->done.store(true, std::memory_order_release);
-                             session->cv.notify_all();
-                         }};
+                     auto worker = std::jthread {[session, pgn_path = temp_path]() -> void
+                                                 {
+                                                     try {
+                                                         auto result = session->pipeline->run(pgn_path, {});
+                                                         if (result) {
+                                                             session->summary = *result;
+                                                         } else {
+                                                             session->error_message = fmt::format(R"(import failed: "{}")",
+                                                                                                  motif::import::to_string(result.error()));
+                                                             session->failed.store(true, std::memory_order_release);
+                                                         }
+                                                     } catch (...) {
+                                                         std::error_code remove_err {};
+                                                         std::filesystem::remove(pgn_path, remove_err);
+                                                         session->error_message = "import failed: unexpected error";
+                                                         session->failed.store(true, std::memory_order_release);
+                                                         session->done.store(true, std::memory_order_release);
+                                                         session->cv.notify_all();
+                                                         return;
+                                                     }
+                                                     std::error_code remove_err {};
+                                                     std::filesystem::remove(pgn_path, remove_err);
+                                                     session->done.store(true, std::memory_order_release);
+                                                     session->cv.notify_all();
+                                                 }};
                      {
                          std::scoped_lock const lock {sessions_mutex};
                          import_workers.emplace_back(import_id, std::move(worker));
                      }
-} catch (std::system_error const&) {
-                      std::error_code remove_err {};
-                      std::filesystem::remove(temp_path, remove_err);
+                 } catch (std::system_error const&) {
+                     std::error_code remove_err {};
+                     std::filesystem::remove(temp_path, remove_err);
                      std::scoped_lock const lock {sessions_mutex};
                      sessions.erase(import_id);
                      set_json_error(res, http_internal_error, "failed to start import worker");
