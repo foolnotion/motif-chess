@@ -214,7 +214,7 @@ An HTTP API layer between motif-chess and any future frontend (Qt, web, or exper
 **Dependencies:** All met — `position_search`, `opening_stats`, `opening_tree`, `import_pipeline`, `database_manager` are stable and tested.
 
 ### Epic 4d: Web Frontend API Prerequisites
-Before interactive web UI work depends on the local HTTP API, the backend exposes the missing chessboard, engine-analysis, and personal-game management prerequisites: legal moves and move validation/application for a FEN position, a stable HTTP/SSE contract for UCI engine analysis, and a domain-native CRUD API for user-added games.
+Before interactive web UI work depends on the local HTTP API, the backend exposes the missing chessboard, engine-analysis, and personal-game management prerequisites: legal moves and move validation/application for a FEN position, a stable HTTP/SSE contract for UCI engine analysis, a domain-native CRUD API for user-added games, and browser-compatible import and game-count endpoints.
 **FRs covered:** FR02, FR05, FR06, FR09, FR21, FR24, FR26, FR29–FR31
 **NFRs covered:** NFR05, NFR09, NFR10, NFR18, NFR19
 **Dependencies:** Epic 4c complete; `chesslib` owns move legality/SAN/FEN; `ucilib` owns UCI subprocess lifecycle.
@@ -904,6 +904,39 @@ So that the web frontend can add, list/search, open, edit, and delete chess game
 **When** the document is reviewed
 **Then** it documents create, patch, delete, provenance fields, schemas, error cases, and examples
 **And** integration tests cover create/read/list/patch/delete/error cases, imported/reference mutation rejection, PGN parse errors, and SQLite/DuckDB consistency
+
+### Story 4d.4: File Upload Import and Game Count Endpoints
+
+As a developer building a web frontend import panel,
+I want an endpoint that accepts PGN file bytes directly and another that returns the total game count,
+So that the browser can import games without a server-side path and display the database total after an import completes.
+
+**Acceptance Criteria:**
+
+**Given** a browser user selects or drags a PGN file
+**When** `POST /api/imports/upload` is called with `multipart/form-data` containing a `file` field
+**Then** HTTP 202 is returned with an `import_id` matching the format of `POST /api/imports`
+**And** the backend writes the bytes to a temporary file, runs the same import pipeline, and deletes the temp file when the import finishes or fails
+**And** the returned `import_id` works with the existing `GET /api/imports/{import_id}/progress` SSE stream
+
+**Given** the `file` field is absent from the multipart body
+**When** `POST /api/imports/upload` is called
+**Then** HTTP 400 is returned with a JSON error response
+
+**Given** an import is already running
+**When** `POST /api/imports/upload` is called
+**Then** HTTP 409 is returned with a JSON error response, matching the conflict behavior of `POST /api/imports`
+
+**Given** the server is running with an open database
+**When** `GET /api/games/count` is called
+**Then** HTTP 200 is returned with `{"count": <integer>}` reflecting the total number of games in the database
+**And** the count is 0 on an empty database and increments correctly after an import completes
+
+**Given** `docs/api/openapi.yaml` is updated
+**When** the document is reviewed
+**Then** `POST /api/imports/upload` is documented with its multipart schema, 202/400/409 responses, and an `ImportStartResponse` reference
+**And** `GET /api/games/count` is documented with a `GameCountResponse` schema
+**And** integration tests cover: missing field → 400, valid upload → 202, concurrent upload → 409, empty count → 0, count after import → correct total
 
 ---
 

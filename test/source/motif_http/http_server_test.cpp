@@ -3065,4 +3065,157 @@ TEST_CASE("server: CORS with configured origins rejects non-matching origin", "[
     CHECK(res->get_header_value("Access-Control-Allow-Origin").empty());
 }
 
+TEST_CASE("server: game count returns 0 on empty database", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"game_count_empty"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "game-count-empty");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18157};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get("/api/games/count");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 200);
+    CHECK(res->body.contains(R"("count":0)"));
+}
+
+TEST_CASE("server: game count reflects imported games", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"game_count_import"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "game-count-import");
+    REQUIRE(db_res.has_value());
+
+    auto const pgn_path = write_pgn_fixture(tdir.path, three_game_pgn_content);
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18158};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const import_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+    REQUIRE(import_res != nullptr);
+    REQUIRE(import_res->status == 202);
+    auto const import_id = extract_import_id(import_res->body);
+    REQUIRE(!import_id.empty());
+
+    cli.Get(
+        "/api/imports/" + import_id + "/progress", httplib::Headers {}, [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
+
+    auto const count_res = cli.Get("/api/games/count");
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+
+    REQUIRE(count_res != nullptr);
+    CHECK(count_res->status == 200);
+    CHECK(count_res->body.contains(R"("count":3)"));
+}
+
+TEST_CASE("server: upload import rejects request with missing file field", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_missing_field"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-missing");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18159};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post(
+        "/api/imports/upload",
+        httplib::UploadFormDataItems {{.name = "not_file", .content = "dummy", .filename = "dummy.pgn", .content_type = "text/plain"}});
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+    CHECK(res->body.contains("missing file field"));
+}
+
+TEST_CASE("server: upload import accepts PGN bytes and returns 202 with import_id", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_valid"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-valid");
+    REQUIRE(db_res.has_value());
+
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18160};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post(
+        "/api/imports/upload",
+        httplib::UploadFormDataItems {
+            {.name = "file", .content = std::string {three_game_pgn_content}, .filename = "games.pgn", .content_type = "text/plain"}});
+
+    std::this_thread::sleep_for(import_short_settle_ms);
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 202);
+    CHECK(res->body.contains(R"("import_id")"));
+}
+
+TEST_CASE("server: upload import rejects a second concurrent upload", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_conflict"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-conflict");
+    REQUIRE(db_res.has_value());
+
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18161};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const long_pgn = make_repeated_pgn(long_import_game_count);
+    auto const first_res = cli.Post(
+        "/api/imports/upload",
+        httplib::UploadFormDataItems {{.name = "file", .content = long_pgn, .filename = "games.pgn", .content_type = "text/plain"}});
+    REQUIRE(first_res != nullptr);
+    REQUIRE(first_res->status == 202);
+
+    auto const second_res = cli.Post(
+        "/api/imports/upload",
+        httplib::UploadFormDataItems {
+            {.name = "file", .content = std::string {three_game_pgn_content}, .filename = "small.pgn", .content_type = "text/plain"}});
+    REQUIRE(second_res != nullptr);
+    CHECK(second_res->status == 409);
+
+    auto const import_id = extract_import_id(first_res->body);
+    auto const del_res = cli.Delete("/api/imports/" + import_id);
+    REQUIRE(del_res != nullptr);
+    cli.Get(
+        "/api/imports/" + import_id + "/progress", httplib::Headers {}, [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+}
+
 // NOLINTEND(readability-function-cognitive-complexity)

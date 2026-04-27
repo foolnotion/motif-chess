@@ -958,6 +958,21 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
     return entries;
 }
 
+auto game_store::count_games() const -> result<std::int64_t>
+{
+    // language=sql
+    static constexpr char const* sql = R"sql(SELECT COUNT(*) FROM game)sql";
+    auto stmt = prepare(db_, sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+    int const step_rc = sqlite3_step(stmt->get());
+    if (step_rc != SQLITE_ROW) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return sqlite3_column_int64(stmt->get(), 0);
+}
+
 auto game_store::get_continuation_contexts(std::vector<opening_move_stat> const& move_stats)
     -> result<std::vector<game_continuation_context>>
 {
