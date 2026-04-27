@@ -103,3 +103,9 @@
 - Exact continuation count not asserted in opening-stats populated-DB test — test would pass even with duplicate or phantom continuations
 - `fmt::format("{}", game_index)` + `operator+` string concatenation in clamp-limit test — inconsistent with the `fmt::format` inline pattern used in `make_repeated_pgn`; cosmetic
 - `to_opening_stats_response` copies `san`, `eco`, `opening_name` strings from `const&` source — move-from-value alternative not exploited; micro-optimization
+
+## Deferred from: code review of 4d-4-file-upload-import-and-game-count-endpoints (2026-04-27)
+
+- `std::filesystem::temp_directory_path()` can throw `filesystem_error` without JSON error response — pre-existing pattern of unguarded filesystem exceptions in server.cpp
+- Unbounded `import_workers` growth — no reaping of completed workers, pre-existing from original `/api/imports` endpoint
+- Missing test-failure injection flags for upload endpoint (`fail_next_import_worker_start_for_test` / `fail_next_import_worker_run_for_test` not replicated for upload path) — test infrastructure gap, not a functional bug

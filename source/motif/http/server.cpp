@@ -180,6 +180,11 @@ struct import_request_body
     std::string path;
 };
 
+struct game_count_response
+{
+    std::int64_t count {};
+};
+
 struct legal_move_response
 {
     std::string uci;
@@ -970,6 +975,24 @@ void server::impl::setup_routes()
                  res.status = http_created;
              });
 
+    svr.Get("/api/games/count",
+            [this](httplib::Request const& /*req*/, httplib::Response& res) -> void
+            {
+                auto count = [this]() -> decltype(database.store().count_games())
+                {
+                    std::scoped_lock const lock {database_mutex};
+                    return database.store().count_games();
+                }();
+                if (!count) {
+                    set_json_error(res, http_internal_error, "game count query failed");
+                    return;
+                }
+                std::string body {};
+                [[maybe_unused]] auto const err = glz::write_json(detail::game_count_response {*count}, body);
+                res.set_content(body, "application/json");
+                res.status = http_ok;
+            });
+
     svr.Patch("/api/games/:id",
               [this](httplib::Request const& req, httplib::Response& res) -> void
               {
@@ -1261,6 +1284,101 @@ void server::impl::setup_routes()
                          import_workers.emplace_back(import_id, std::move(worker));
                      }
                  } catch (std::system_error const&) {
+                     std::scoped_lock const lock {sessions_mutex};
+                     sessions.erase(import_id);
+                     set_json_error(res, http_internal_error, "failed to start import worker");
+                     return;
+                 }
+
+                 std::string body {};
+                 [[maybe_unused]] auto const err = glz::write_json(detail::import_response {import_id}, body);
+                 res.set_content(body, "application/json");
+                 res.status = http_accepted;
+             });
+
+    svr.Post("/api/imports/upload",
+             [this](httplib::Request const& req, httplib::Response& res) -> void
+             {
+                 auto const file_it = req.form.files.find("file");
+                 if (file_it == req.form.files.end()) {
+                     set_json_error(res, http_bad_request, "missing file field");
+                     return;
+                 }
+                 auto const& file_content = file_it->second.content;
+
+                 std::string import_id;
+                 std::shared_ptr<detail::import_session> session;
+                 std::filesystem::path temp_path;
+                 {
+                     std::scoped_lock const lock {sessions_mutex};
+                     prune_completed();
+                     auto const active_import = std::ranges::any_of(
+                         sessions, [](auto const& entry) -> bool { return !entry.second->done.load(std::memory_order_acquire); });
+                     if (active_import) {
+                         set_json_error(res, http_conflict, "import already running");
+                         return;
+                     }
+                     import_id = generate_import_id();
+                     while (sessions.contains(import_id)) {
+                         import_id = generate_import_id();
+                     }
+                     session = std::make_shared<detail::import_session>();
+                     session->pipeline = std::make_unique<motif::import::import_pipeline>(database);
+                     sessions.emplace(import_id, session);
+                 }
+                 temp_path = std::filesystem::temp_directory_path() / fmt::format("motif_upload_{}.pgn", import_id);
+                 {
+                     std::ofstream tmp {temp_path, std::ios::binary};
+                     if (!tmp.is_open()) {
+                         std::scoped_lock const lock {sessions_mutex};
+                         sessions.erase(import_id);
+                         set_json_error(res, http_internal_error, "failed to create temporary file");
+                         return;
+                     }
+                     tmp.write(file_content.data(), static_cast<std::streamsize>(file_content.size()));
+                     if (tmp.fail()) {
+                         std::error_code remove_err {};
+                         std::filesystem::remove(temp_path, remove_err);
+                         std::scoped_lock const lock {sessions_mutex};
+                         sessions.erase(import_id);
+                         set_json_error(res, http_internal_error, "failed to write temporary file");
+                         return;
+                     }
+                 }
+
+                 try {
+                     auto worker = std::jthread {[session, pgn_path = temp_path]() -> void
+                                                 {
+                                                     try {
+                                                         auto result = session->pipeline->run(pgn_path, {});
+                                                         if (result) {
+                                                             session->summary = *result;
+                                                         } else {
+                                                             session->error_message = fmt::format(R"(import failed: "{}")",
+                                                                                                  motif::import::to_string(result.error()));
+                                                             session->failed.store(true, std::memory_order_release);
+                                                         }
+                                                     } catch (...) {
+                                                         std::error_code remove_err {};
+                                                         std::filesystem::remove(pgn_path, remove_err);
+                                                         session->error_message = "import failed: unexpected error";
+                                                         session->failed.store(true, std::memory_order_release);
+                                                         session->done.store(true, std::memory_order_release);
+                                                         session->cv.notify_all();
+                                                         return;
+                                                     }
+                                                     std::error_code remove_err {};
+                                                     std::filesystem::remove(pgn_path, remove_err);
+                                                     session->done.store(true, std::memory_order_release);
+                                                     session->cv.notify_all();
+                                                 }};
+                     {
+                         std::scoped_lock const lock {sessions_mutex};
+                         import_workers.emplace_back(import_id, std::move(worker));
+                     }
+                 } catch (std::system_error const&) {
+                     std::error_code remove_err {};
+                     std::filesystem::remove(temp_path, remove_err);
                      std::scoped_lock const lock {sessions_mutex};
                      sessions.erase(import_id);
                      set_json_error(res, http_internal_error, "failed to start import worker");
