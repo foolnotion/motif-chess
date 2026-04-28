@@ -1,0 +1,36 @@
+name: Publish
+
+on:
+  push:
+    branches:
+    - master
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Nix
+      uses: cachix/install-nix-action@v30
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build Docker image
+      run: nix build .#docker --out-link docker-image
+
+    - name: Load image into Docker
+      run: docker load < docker-image
+
+    - name: Log in to Quay.io
+      run: echo "${{ secrets.QUAY_PASSWORD }}" | docker login quay.io -u "${{ secrets.QUAY_USERNAME }}" --password-stdin
+
+    - name: Push image
+      run: |
+        SHA_TAG="quay.io/motif-chess/motif-server:${{ github.sha }}"
+        LATEST_TAG="quay.io/motif-chess/motif-server:latest"
+        docker tag motif-chess:latest "$SHA_TAG"
+        docker tag motif-chess:latest "$LATEST_TAG"
+        docker push "$SHA_TAG"
+        docker push "$LATEST_TAG"
