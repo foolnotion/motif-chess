@@ -1615,12 +1615,24 @@ void server::impl::setup_routes()
 
                         auto const prog = session->pipeline->progress();
                         auto const elapsed = static_cast<double>(prog.elapsed.count()) / 1000.0;
+                        auto const phase_str = [](motif::import::import_phase p) -> std::string_view
+                        {
+                            switch (p) {
+                                case motif::import::import_phase::ingesting:
+                                    return "ingesting";
+                                case motif::import::import_phase::rebuilding:
+                                    return "rebuilding";
+                                default:
+                                    return "idle";
+                            }
+                        }(prog.phase);
                         auto event = fmt::format(
-                            "data: {{\"games_processed\":{},\"games_committed\":{},\"games_skipped\":{},\"elapsed_seconds\":{:.3f}}}\n\n",
+                            "data: {{\"games_processed\":{},\"games_committed\":{},\"games_skipped\":{},\"elapsed_seconds\":{:.3f},\"phase\":\"{}\"}}\n\n",
                             prog.games_processed,
                             prog.games_committed,
                             prog.games_skipped,
-                            elapsed);
+                            elapsed,
+                            phase_str);
                         if (!sink.write(event.data(), event.size())) {
                             return false;
                         }

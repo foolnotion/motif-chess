@@ -35,6 +35,13 @@ struct import_summary
     std::chrono::milliseconds elapsed {};
 };
 
+enum class import_phase : std::uint8_t
+{
+    idle,       // before the pipeline starts
+    ingesting,  // reading and inserting games into SQLite
+    rebuilding, // rebuilding and sorting the DuckDB position store
+};
+
 struct import_progress
 {
     std::size_t games_processed {};
@@ -43,6 +50,7 @@ struct import_progress
     std::size_t errors {};
     std::size_t total_games {};
     std::chrono::milliseconds elapsed {};
+    import_phase phase {import_phase::idle};
 };
 
 class import_pipeline
@@ -80,6 +88,7 @@ class import_pipeline
     std::atomic<std::size_t> total_games_ {0};
     std::atomic<std::int64_t> start_time_ns_ {0};
     std::atomic<bool> stop_requested_ {false};
+    std::atomic<import_phase> phase_ {import_phase::idle};
 };
 
 }  // namespace motif::import
