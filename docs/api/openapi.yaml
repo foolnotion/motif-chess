@@ -1051,6 +1051,71 @@ paths:
                   value:
                     error: not_found
 
+  /api/games/{id}/pgn:
+    get:
+      operationId: getGamePgn
+      summary: Export a single game as PGN text
+      description: |-
+        Returns the game reconstructed as a PGN string (`text/plain`).
+        Tags are derived from stored metadata; moves are replayed from the
+        starting position to produce SAN. A `MotifGameId` tag is included so
+        the caller can correlate the PGN back to the database record.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Game ID (unsigned 32-bit integer, 1–4294967295)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4294967295
+          examples:
+            typical:
+              value: 42
+      responses:
+        '200':
+          description: PGN text of the game
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                typical:
+                  value: |
+                    [Event "WCC 2021"]
+                    [Site "Dubai"]
+                    [Date "2021.12.03"]
+                    [Round "?"]
+                    [White "Magnus Carlsen"]
+                    [Black "Ian Nepomniachtchi"]
+                    [Result "1-0"]
+                    [WhiteElo "2882"]
+                    [BlackElo "2793"]
+                    [ECO "C88"]
+                    [MotifGameId "42"]
+
+                    1. e4 e5 1-0
+        '400':
+          description: Invalid game ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_id:
+                  value:
+                    error: invalid game id
+        '404':
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: not_found
+
 components:
   schemas:
 

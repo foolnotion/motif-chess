@@ -1638,6 +1638,71 @@ TEST_CASE("server: single game maps missing and invalid IDs", "[motif-http]")
     CHECK(bare->body == R"({"error":"invalid game id"})");
 }
 
+TEST_CASE("server: GET /api/games/{id}/pgn returns PGN text", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"game_pgn"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "game-pgn-db");
+    REQUIRE(db_res.has_value());
+    auto const [game_id, moves] = insert_detailed_http_game(*db_res);
+
+    constexpr std::uint16_t test_port {18162};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get(fmt::format("/api/games/{}/pgn", game_id));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+    CHECK(res->get_header_value("Content-Type").contains("text/plain"));
+    auto const& body = res->body;
+    CHECK(body.contains("[Event \"WCC 2021\"]"));
+    CHECK(body.contains("[Site \"Dubai\"]"));
+    CHECK(body.contains("[Date \"2021.12.03\"]"));
+    CHECK(body.contains("[White \"Magnus Carlsen\"]"));
+    CHECK(body.contains("[Black \"Ian Nepomniachtchi\"]"));
+    CHECK(body.contains("[Result \"1-0\"]"));
+    CHECK(body.contains("[WhiteElo \"2865\"]"));
+    CHECK(body.contains("[BlackElo \"2792\"]"));
+    CHECK(body.contains("[ECO \"C88\"]"));
+    CHECK(body.contains(fmt::format("[MotifGameId \"{}\"]", game_id)));
+    CHECK(body.contains("1. e4 e5 1-0"));
+}
+
+TEST_CASE("server: GET /api/games/{id}/pgn maps invalid and missing IDs", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"game_pgn_errors"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "game-pgn-errors-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18163};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const missing = cli.Get("/api/games/99999/pgn");
+    auto const alpha = cli.Get("/api/games/abc/pgn");
+    auto const zero = cli.Get("/api/games/0/pgn");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(missing != nullptr);
+    REQUIRE(alpha != nullptr);
+    REQUIRE(zero != nullptr);
+    CHECK(missing->status == 404);
+    CHECK(missing->body == R"({"error":"not_found"})");
+    CHECK(alpha->status == 400);
+    CHECK(alpha->body == R"({"error":"invalid game id"})");
+    CHECK(zero->status == 400);
+    CHECK(zero->body == R"({"error":"invalid game id"})");
+}
+
 // NOLINTEND(readability-function-cognitive-complexity)
 
 TEST_CASE("server: import rejects nonexistent file", "[motif-http]")
