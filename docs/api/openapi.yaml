@@ -398,8 +398,11 @@ paths:
 
             **Progress event** (emitted every ~250 ms while the import runs):
             ```
-            data: {"games_processed":500,"games_committed":490,"games_skipped":10,"elapsed_seconds":1.234}
+            data: {"games_processed":500,"games_committed":490,"games_skipped":10,"elapsed_seconds":1.234,"phase":"ingesting"}
             ```
+
+            `phase` is one of `ingesting` (reading and inserting games into SQLite) or
+            `rebuilding` (rebuilding and sorting the DuckDB position store after ingestion).
 
             **Completion event** (final event on success, named `complete`):
             ```
@@ -419,7 +422,7 @@ paths:
               examples:
                 progress_event:
                   summary: Progress event emitted every ~250 ms
-                  value: 'data: {"games_processed":500,"games_committed":490,"games_skipped":10,"elapsed_seconds":1.234}'
+                  value: 'data: {"games_processed":500,"games_committed":490,"games_skipped":10,"elapsed_seconds":1.234,"phase":"ingesting"}'
                 complete_event:
                   summary: Final event on successful import
                   value: |

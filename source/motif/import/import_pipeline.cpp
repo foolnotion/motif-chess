@@ -206,6 +206,7 @@ auto import_pipeline::progress() const noexcept -> import_progress
         .errors = games_errored_.load(std::memory_order_relaxed),
         .total_games = total_games_.load(std::memory_order_relaxed),
         .elapsed = elapsed,
+        .phase = phase_.load(std::memory_order_relaxed),
     };
 }
 
@@ -260,6 +261,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     games_errored_.store(0, std::memory_order_relaxed);
     total_games_.store(0, std::memory_order_relaxed);
     start_time_ns_.store(current_time_ns(), std::memory_order_relaxed);
+    phase_.store(import_phase::ingesting, std::memory_order_relaxed);
 
     if (auto game_count = count_games(pgn_path); game_count.has_value()) {
         total_games_.store(*game_count, std::memory_order_relaxed);
@@ -532,6 +534,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     }
 
     if (config.rebuild_positions_after_import) {
+        phase_.store(import_phase::rebuilding, std::memory_order_relaxed);
         if (auto rebuild_res = db_.rebuild_position_store(config.sort_positions_by_zobrist_after_rebuild); !rebuild_res) {
             return tl::unexpected {error_code::io_failure};
         }

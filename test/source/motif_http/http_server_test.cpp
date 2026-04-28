@@ -55,6 +55,7 @@ struct sse_event_payload
     std::optional<std::size_t> errors;
     std::optional<std::size_t> elapsed_ms;
     std::optional<std::string> error;
+    std::optional<std::string> phase;
 };
 
 struct start_analysis_response
@@ -693,6 +694,8 @@ void run_import_sse_test()
     CHECK(collected_events.contains("games_committed"));
     CHECK(collected_events.contains("games_skipped"));
     CHECK(collected_events.contains("elapsed_seconds"));
+    CHECK(collected_events.contains("\"phase\""));
+    CHECK(collected_events.contains("ingesting"));
     CHECK(collected_events.contains("event: complete"));
     CHECK(collected_events.contains("total_attempted"));
     CHECK(collected_events.contains("committed"));
