@@ -62,6 +62,45 @@
           });
         in
         rec {
+          packages.docker = pkgs.dockerTools.buildLayeredImage {
+            name = "motif-chess";
+            tag = "latest";
+            contents = [
+              packages.default
+              pkgs.dockerTools.usrBinEnv
+              pkgs.dockerTools.binSh
+              pkgs.coreutils
+            ];
+            config = {
+              Entrypoint = [ "${packages.serve}/bin/motif-serve" ];
+              ExposedPorts = { "8080/tcp" = { }; };
+              Env = [
+                "MOTIF_DB_PATH=/data/db"
+                "MOTIF_HTTP_PORT=8080"
+                "MOTIF_HTTP_HOST=0.0.0.0"
+              ];
+              Volumes = { "/data/db" = { }; };
+            };
+          };
+
+          packages.serve = pkgs.writeShellApplication {
+            name = "motif-serve";
+            runtimeInputs = [ packages.default ];
+            text = ''
+              # Resolve database directory: MOTIF_DB_PATH > XDG_DATA_HOME > ~/.local/share
+              export MOTIF_DB_PATH="''${MOTIF_DB_PATH:-''${XDG_DATA_HOME:-$HOME/.local/share}/motif-chess/db}"
+              mkdir -p "$MOTIF_DB_PATH"
+
+              # Port and host fall through to the binary's own env-var handling
+              # (MOTIF_HTTP_PORT, MOTIF_HTTP_HOST, MOTIF_HTTP_CORS_ORIGINS).
+              # Defaults: port 8080, host localhost.
+              export MOTIF_HTTP_PORT="''${MOTIF_HTTP_PORT:-8080}"
+              export MOTIF_HTTP_HOST="''${MOTIF_HTTP_HOST:-localhost}"
+
+              exec motif_http_server "$@"
+            '';
+          };
+
           packages.default = stdenv.mkDerivation {
             name = "motif-chess";
             src = self;
