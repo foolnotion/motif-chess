@@ -1730,8 +1730,10 @@ TEST_CASE("server: GET /api/games/{id}/positions returns fens and sans", "[motif
     REQUIRE(res != nullptr);
     REQUIRE(res->status == 200);
     auto const& body = res->body;
+    CHECK(body.contains(R"("starting_hash")"));
     CHECK(body.contains(R"("fens")"));
     CHECK(body.contains(R"("sans")"));
+    CHECK(body.contains(R"("hashes")"));
     // insert_detailed_http_game encodes 1.e4 e5 — two plies
     CHECK(body.contains("e4"));
     CHECK(body.contains("e5"));
@@ -1739,6 +1741,8 @@ TEST_CASE("server: GET /api/games/{id}/positions returns fens and sans", "[motif
     CHECK(body.contains("b KQkq"));
     // fens[1] is after 1...e5 — white to move
     CHECK(body.contains("w KQkq"));
+    // hashes array must have two entries (non-empty decimal strings)
+    CHECK(body.contains(R"("hashes":[")"));  // at least one entry
 }
 
 TEST_CASE("server: GET /api/games/{id}/positions empty game returns empty arrays", "[motif-http]")
@@ -1776,8 +1780,10 @@ TEST_CASE("server: GET /api/games/{id}/positions empty game returns empty arrays
 
     REQUIRE(res != nullptr);
     REQUIRE(res->status == 200);
+    CHECK(res->body.contains(R"("starting_hash")"));
     CHECK(res->body.contains(R"("fens":[])"));
     CHECK(res->body.contains(R"("sans":[])"));
+    CHECK(res->body.contains(R"("hashes":[])"));
 }
 
 TEST_CASE("server: GET /api/games/{id}/positions maps invalid and missing IDs", "[motif-http]")
