@@ -1116,6 +1116,64 @@ paths:
                   value:
                     error: not_found
 
+  /api/games/{id}/positions:
+    get:
+      operationId: getGamePositions
+      summary: Get the full position sequence for a stored game
+      description: |-
+        Replays all moves from the starting position and returns one FEN and
+        one SAN per ply. `fens[i]` is the board after ply `i+1`; `sans[i]` is
+        the SAN for that ply. The starting FEN is omitted — the client already
+        knows it. Array length equals the number of plies in the game.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Game ID (unsigned 32-bit integer, 1–4294967295)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4294967295
+          examples:
+            typical:
+              value: 42
+      responses:
+        '200':
+          description: Position sequence for the game
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GamePositions'
+              examples:
+                typical:
+                  value:
+                    fens:
+                      - 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1'
+                      - 'rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2'
+                    sans:
+                      - e4
+                      - e5
+        '400':
+          description: Invalid game ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_id:
+                  value:
+                    error: invalid game id
+        '404':
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_found:
+                  value:
+                    error: not_found
+
 components:
   schemas:
 
@@ -1446,6 +1504,25 @@ components:
         fen:
           type: string
           description: Canonical FEN of the resulting position after the move is applied
+
+    GamePositions:
+      type: object
+      required: [fens, sans]
+      description: |-
+        Full position sequence for a game. Both arrays have the same length
+        (equal to the number of plies). `fens[i]` is the board FEN after ply
+        `i+1`; `sans[i]` is the SAN for that ply. The starting FEN is omitted.
+      properties:
+        fens:
+          type: array
+          items:
+            type: string
+          description: FEN string of the board after each ply
+        sans:
+          type: array
+          items:
+            type: string
+          description: SAN notation for each ply
 
     GameCountResponse:
       type: object

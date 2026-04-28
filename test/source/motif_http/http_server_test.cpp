@@ -1703,6 +1703,107 @@ TEST_CASE("server: GET /api/games/{id}/pgn maps invalid and missing IDs", "[moti
     CHECK(zero->body == R"({"error":"invalid game id"})");
 }
 
+TEST_CASE("server: GET /api/games/{id}/positions returns fens and sans", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"game_positions"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "game-positions-db");
+    REQUIRE(db_res.has_value());
+    auto const [game_id, moves] = insert_detailed_http_game(*db_res);
+
+    constexpr std::uint16_t test_port {18164};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get(fmt::format("/api/games/{}/positions", game_id));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+    auto const& body = res->body;
+    CHECK(body.contains(R"("fens")"));
+    CHECK(body.contains(R"("sans")"));
+    // insert_detailed_http_game encodes 1.e4 e5 — two plies
+    CHECK(body.contains("e4"));
+    CHECK(body.contains("e5"));
+    // fens[0] is the position after 1.e4 — black to move
+    CHECK(body.contains("b KQkq"));
+    // fens[1] is after 1...e5 — white to move
+    CHECK(body.contains("w KQkq"));
+}
+
+TEST_CASE("server: GET /api/games/{id}/positions empty game returns empty arrays", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"game_positions_empty"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "game-positions-empty-db");
+    REQUIRE(db_res.has_value());
+    // insert_http_game uses a raw move_seed rather than valid encoded moves,
+    // so replay will produce "?" — but we just want to verify the shape here.
+    // Use a game with zero moves by inserting directly with an empty move list.
+    auto game = motif::db::game {
+        .white = make_http_player("A"),
+        .black = make_http_player("B"),
+        .event_details = std::nullopt,
+        .date = std::nullopt,
+        .result = "*",
+        .eco = std::nullopt,
+        .moves = {},
+        .extra_tags = {},
+        .provenance = {},
+    };
+    auto inserted = db_res->store().insert(game);
+    REQUIRE(inserted.has_value());
+
+    constexpr std::uint16_t test_port {18165};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get(fmt::format("/api/games/{}/positions", *inserted));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+    CHECK(res->body.contains(R"("fens":[])"));
+    CHECK(res->body.contains(R"("sans":[])"));
+}
+
+TEST_CASE("server: GET /api/games/{id}/positions maps invalid and missing IDs", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"game_positions_errors"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "game-positions-errors-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18166};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const missing = cli.Get("/api/games/99999/positions");
+    auto const alpha = cli.Get("/api/games/abc/positions");
+    auto const zero = cli.Get("/api/games/0/positions");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(missing != nullptr);
+    REQUIRE(alpha != nullptr);
+    REQUIRE(zero != nullptr);
+    CHECK(missing->status == 404);
+    CHECK(missing->body == R"({"error":"not_found"})");
+    CHECK(alpha->status == 400);
+    CHECK(alpha->body == R"({"error":"invalid game id"})");
+    CHECK(zero->status == 400);
+    CHECK(zero->body == R"({"error":"invalid game id"})");
+}
+
 // NOLINTEND(readability-function-cognitive-complexity)
 
 TEST_CASE("server: import rejects nonexistent file", "[motif-http]")
