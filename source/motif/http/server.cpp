@@ -495,10 +495,7 @@ auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> st
 {
     auto out = std::string {};
 
-    auto append_tag = [&out](std::string_view key, std::string_view value) -> void
-    {
-        out += fmt::format("[{} \"{}\"]\n", key, value);
-    };
+    auto append_tag = [&out](std::string_view key, std::string_view value) -> void { out += fmt::format("[{} \"{}\"]\n", key, value); };
 
     append_tag("Event", game.event_details ? game.event_details->name : "?");
     append_tag("Site", (game.event_details && game.event_details->site) ? *game.event_details->site : "?");
