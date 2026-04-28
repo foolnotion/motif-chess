@@ -1147,12 +1147,16 @@ paths:
               examples:
                 typical:
                   value:
+                    starting_hash: '12800752544858952846'
                     fens:
                       - 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1'
                       - 'rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2'
                     sans:
                       - e4
                       - e5
+                    hashes:
+                      - '3920604998870788528'
+                      - '2178025521679293994'
         '400':
           description: Invalid game ID
           content:
@@ -1507,12 +1511,20 @@ components:
 
     GamePositions:
       type: object
-      required: [fens, sans]
+      required: [starting_hash, fens, sans, hashes]
       description: |-
-        Full position sequence for a game. Both arrays have the same length
-        (equal to the number of plies). `fens[i]` is the board FEN after ply
-        `i+1`; `sans[i]` is the SAN for that ply. The starting FEN is omitted.
+        Full position sequence for a game. `fens`, `sans`, and `hashes` all
+        have the same length (equal to the number of plies). Index `i` describes
+        the position *after* ply `i+1`. The starting FEN is omitted — the
+        client already knows it. `starting_hash` is the Zobrist hash of the
+        initial position before any moves are played; all hash values are
+        decimal unsigned 64-bit integers serialized as strings.
       properties:
+        starting_hash:
+          type: string
+          description: Zobrist hash of the initial position (before any moves)
+          pattern: '^\d+$'
+          maxLength: 20
         fens:
           type: array
           items:
@@ -1523,6 +1535,13 @@ components:
           items:
             type: string
           description: SAN notation for each ply
+        hashes:
+          type: array
+          items:
+            type: string
+            pattern: '^\d+$'
+            maxLength: 20
+          description: Zobrist hash of the board after each ply
 
     GameCountResponse:
       type: object
