@@ -743,7 +743,7 @@ void run_import_delete_test()
     CHECK(collected_events.contains("event: complete"));
     // The cancel signal may arrive after the import has already finished cleanly
     // on fast runners. A checkpoint is only written on interrupt, so accept
-    // either outcome: checkpoint present (cancelled mid-run) or absent (completed
+    // either outcome: checkpoint present (canceled mid-run) or absent (completed
     // before cancel was processed).
     auto const checkpoint_exists = std::filesystem::exists(motif::import::checkpoint_path(db_res->dir()));
     auto const completed_cleanly = collected_events.contains("total_attempted");
