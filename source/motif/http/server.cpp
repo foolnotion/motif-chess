@@ -41,6 +41,7 @@
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
+#include "motif/db/move_codec.hpp"
 #include "motif/db/types.hpp"
 #include "motif/http/error.hpp"
 #include "motif/import/error.hpp"
@@ -486,6 +487,90 @@ auto is_valid_uci_syntax(std::string const& uci_str) -> bool
     return uci_str.size() == uci_move_length || is_promotion(uci_str[uci_move_length]);
 }
 
+// Reconstruct PGN text from a stored game.
+// Moves are decoded from their 16-bit encoding and replayed from the starting
+// position to produce SAN. Any move that fails to decode produces "?" for that
+// half-move; the loop continues so the caller always gets a complete string.
+auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> std::string
+{
+    auto out = std::string {};
+
+    auto append_tag = [&out](std::string_view key, std::string_view value) -> void
+    {
+        out += fmt::format("[{} \"{}\"]\n", key, value);
+    };
+
+    append_tag("Event", game.event_details ? game.event_details->name : "?");
+    append_tag("Site", (game.event_details && game.event_details->site) ? *game.event_details->site : "?");
+    append_tag("Date", game.date.value_or("????.??.??"));
+    append_tag("Round", "?");
+    append_tag("White", game.white.name);
+    append_tag("Black", game.black.name);
+    append_tag("Result", game.result);
+    if (game.white.elo) {
+        append_tag("WhiteElo", fmt::format("{}", *game.white.elo));
+    }
+    if (game.black.elo) {
+        append_tag("BlackElo", fmt::format("{}", *game.black.elo));
+    }
+    if (game.white.title) {
+        append_tag("WhiteTitle", *game.white.title);
+    }
+    if (game.black.title) {
+        append_tag("BlackTitle", *game.black.title);
+    }
+    if (game.eco) {
+        append_tag("ECO", *game.eco);
+    }
+    append_tag("MotifGameId", fmt::format("{}", game_id));
+    for (auto const& [key, value] : game.extra_tags) {
+        append_tag(key, value);
+    }
+
+    out += '\n';
+
+    auto board = chesslib::board {};
+    auto move_number = std::uint32_t {1};
+    bool white_to_move {true};
+    bool first_token {true};
+
+    auto append_token = [&out, &first_token](std::string_view token) -> void
+    {
+        if (!first_token) {
+            out += ' ';
+        }
+        out += token;
+        first_token = false;
+    };
+
+    for (auto const encoded : game.moves) {
+        auto move_result = motif::db::decode_move(encoded);
+        if (white_to_move) {
+            append_token(fmt::format("{}.", move_number));
+        }
+        if (move_result) {
+            append_token(chesslib::san::to_string(board, *move_result));
+            chesslib::move_maker {board, *move_result}.make();
+        } else {
+            append_token("?");
+        }
+        if (white_to_move) {
+            white_to_move = false;
+        } else {
+            white_to_move = true;
+            ++move_number;
+        }
+    }
+
+    if (!game.moves.empty()) {
+        out += ' ';
+    }
+    out += game.result;
+    out += '\n';
+
+    return out;
+}
+
 auto to_legal_move_response(chesslib::board const& board, chesslib::move const mov) -> detail::legal_move_response
 {
     auto const uci_str = chesslib::uci::to_string(mov);
@@ -894,6 +979,34 @@ void server::impl::setup_routes()
     svr.Get("/api/games/",
             [](httplib::Request const& /*req*/, httplib::Response& res) -> void
             { set_json_error(res, http_bad_request, "invalid game id"); });
+
+    svr.Get("/api/games/:id/pgn",
+            [this](httplib::Request const& req, httplib::Response& res) -> void
+            {
+                auto const& id_str = req.path_params.at("id");
+                auto const game_id = parse_game_id(id_str);
+                if (!game_id) {
+                    set_json_error(res, http_bad_request, "invalid game id");
+                    return;
+                }
+
+                auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
+                {
+                    std::scoped_lock const lock {database_mutex};
+                    return database.store().get(*game_id);
+                }();
+                if (!game_result) {
+                    if (game_result.error() == motif::db::error_code::not_found) {
+                        set_json_error(res, http_not_found, "not_found");
+                        return;
+                    }
+                    set_json_error(res, http_internal_error, "game retrieval failed");
+                    return;
+                }
+
+                res.set_content(game_to_pgn(*game_id, *game_result), "text/plain; charset=utf-8");
+                res.status = http_ok;
+            });
 
     svr.Post("/api/games",
              [this](httplib::Request const& req, httplib::Response& res) -> void
