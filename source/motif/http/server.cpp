@@ -186,6 +186,12 @@ struct game_count_response
     std::int64_t count {};
 };
 
+struct game_positions_response
+{
+    std::vector<std::string> fens;
+    std::vector<std::string> sans;
+};
+
 struct legal_move_response
 {
     std::string uci;
@@ -566,6 +572,34 @@ auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> st
     out += '\n';
 
     return out;
+}
+
+// Replay all moves from the starting position and return one FEN + one SAN
+// per ply. fens[i] is the position *after* ply i+1; sans[i] is the SAN for
+// that ply. The initial position FEN is omitted — the client already knows it.
+// Moves that fail to decode are represented as "?" in sans and the board is
+// left in the last valid state for subsequent plies.
+auto game_to_positions(motif::db::game const& game) -> detail::game_positions_response
+{
+    auto fens = std::vector<std::string> {};
+    auto sans = std::vector<std::string> {};
+    fens.reserve(game.moves.size());
+    sans.reserve(game.moves.size());
+
+    auto board = chesslib::board {};
+    for (auto const encoded : game.moves) {
+        auto move_result = motif::db::decode_move(encoded);
+        if (move_result) {
+            sans.push_back(chesslib::san::to_string(board, *move_result));
+            chesslib::move_maker {board, *move_result}.make();
+            fens.push_back(chesslib::fen::write(board));
+        } else {
+            sans.push_back("?");
+            fens.push_back(chesslib::fen::write(board));
+        }
+    }
+
+    return detail::game_positions_response {.fens = std::move(fens), .sans = std::move(sans)};
 }
 
 auto to_legal_move_response(chesslib::board const& board, chesslib::move const mov) -> detail::legal_move_response
@@ -1002,6 +1036,39 @@ void server::impl::setup_routes()
                 }
 
                 res.set_content(game_to_pgn(*game_id, *game_result), "text/plain; charset=utf-8");
+                res.status = http_ok;
+            });
+
+    svr.Get("/api/games/:id/positions",
+            [this](httplib::Request const& req, httplib::Response& res) -> void
+            {
+                auto const& id_str = req.path_params.at("id");
+                auto const game_id = parse_game_id(id_str);
+                if (!game_id) {
+                    set_json_error(res, http_bad_request, "invalid game id");
+                    return;
+                }
+
+                auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
+                {
+                    std::scoped_lock const lock {database_mutex};
+                    return database.store().get(*game_id);
+                }();
+                if (!game_result) {
+                    if (game_result.error() == motif::db::error_code::not_found) {
+                        set_json_error(res, http_not_found, "not_found");
+                        return;
+                    }
+                    set_json_error(res, http_internal_error, "game retrieval failed");
+                    return;
+                }
+
+                std::string body {};
+                if (auto const err = glz::write_json(game_to_positions(*game_result), body); err) {
+                    set_json_error(res, http_internal_error, "game retrieval failed");
+                    return;
+                }
+                res.set_content(body, "application/json");
                 res.status = http_ok;
             });
 
