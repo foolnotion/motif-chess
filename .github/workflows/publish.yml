@@ -2,8 +2,8 @@ name: Publish
 
 on:
   push:
-    branches:
-    - master
+    tags:
+    - 'v*'
 
 jobs:
   publish:
@@ -28,9 +28,9 @@ jobs:
 
     - name: Push image
       run: |
-        SHA_TAG="quay.io/motif-chess/motif-server:${{ github.sha }}"
+        VERSION_TAG="quay.io/motif-chess/motif-server:${{ github.ref_name }}"
         LATEST_TAG="quay.io/motif-chess/motif-server:latest"
-        docker tag motif-chess:latest "$SHA_TAG"
+        docker tag motif-chess:latest "$VERSION_TAG"
         docker tag motif-chess:latest "$LATEST_TAG"
-        docker push "$SHA_TAG"
+        docker push "$VERSION_TAG"
         docker push "$LATEST_TAG"
