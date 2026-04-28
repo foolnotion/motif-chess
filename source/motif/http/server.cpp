@@ -188,8 +188,10 @@ struct game_count_response
 
 struct game_positions_response
 {
+    std::string starting_hash;
     std::vector<std::string> fens;
     std::vector<std::string> sans;
+    std::vector<std::string> hashes;
 };
 
 struct legal_move_response
@@ -574,32 +576,42 @@ auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> st
     return out;
 }
 
-// Replay all moves from the starting position and return one FEN + one SAN
-// per ply. fens[i] is the position *after* ply i+1; sans[i] is the SAN for
-// that ply. The initial position FEN is omitted — the client already knows it.
-// Moves that fail to decode are represented as "?" in sans and the board is
-// left in the last valid state for subsequent plies.
+// Replay all moves from the starting position and return one FEN, one SAN,
+// and one Zobrist hash per ply. fens[i]/sans[i]/hashes[i] describe the
+// position *after* ply i+1. starting_hash is the hash of the initial position
+// before any moves are played. The initial FEN is omitted — the client already
+// knows it. Moves that fail to decode produce "?" in sans; the board stays in
+// its last valid state so subsequent entries remain consistent.
 auto game_to_positions(motif::db::game const& game) -> detail::game_positions_response
 {
     auto fens = std::vector<std::string> {};
     auto sans = std::vector<std::string> {};
+    auto hashes = std::vector<std::string> {};
     fens.reserve(game.moves.size());
     sans.reserve(game.moves.size());
+    hashes.reserve(game.moves.size());
 
     auto board = chesslib::board {};
+    auto const starting_hash = fmt::format("{}", board.hash());
+
     for (auto const encoded : game.moves) {
         auto move_result = motif::db::decode_move(encoded);
         if (move_result) {
             sans.push_back(chesslib::san::to_string(board, *move_result));
             chesslib::move_maker {board, *move_result}.make();
-            fens.push_back(chesslib::fen::write(board));
         } else {
             sans.push_back("?");
-            fens.push_back(chesslib::fen::write(board));
         }
+        fens.push_back(chesslib::fen::write(board));
+        hashes.push_back(fmt::format("{}", board.hash()));
     }
 
-    return detail::game_positions_response {.fens = std::move(fens), .sans = std::move(sans)};
+    return detail::game_positions_response {
+        .starting_hash = starting_hash,
+        .fens = std::move(fens),
+        .sans = std::move(sans),
+        .hashes = std::move(hashes),
+    };
 }
 
 auto to_legal_move_response(chesslib::board const& board, chesslib::move const mov) -> detail::legal_move_response
