@@ -43,6 +43,8 @@
 #include "motif/db/error.hpp"
 #include "motif/db/move_codec.hpp"
 #include "motif/db/types.hpp"
+#include "motif/engine/engine_manager.hpp"
+#include "motif/engine/error.hpp"
 #include "motif/http/error.hpp"
 #include "motif/import/error.hpp"
 #include "motif/import/import_pipeline.hpp"
@@ -249,6 +251,53 @@ struct import_session
     std::condition_variable cv;
 };
 
+struct configure_engine_request
+{
+    std::string name;
+    std::string path;
+};
+
+struct engine_list_entry
+{
+    std::string name;
+    std::string path;
+};
+
+struct engine_list_response
+{
+    std::vector<engine_list_entry> engines;
+};
+
+struct sse_score_value
+{
+    std::string type;
+    int value {};
+};
+
+struct sse_analysis_info_event
+{
+    int depth {};
+    std::optional<int> seldepth;
+    int multipv {1};
+    sse_score_value score;
+    std::vector<std::string> pv_uci;
+    std::optional<std::vector<std::string>> pv_san;
+    std::optional<std::int64_t> nodes;
+    std::optional<int> nps;
+    std::optional<int> time_ms;
+};
+
+struct sse_analysis_complete_event
+{
+    std::string best_move_uci;
+    std::optional<std::string> ponder_uci;
+};
+
+struct sse_analysis_error_event
+{
+    std::string message;
+};
+
 }  // namespace motif::http::detail
 
 namespace motif::http
@@ -264,6 +313,7 @@ constexpr int http_accepted {202};
 constexpr int http_bad_request {400};
 constexpr int http_not_found {404};
 constexpr int http_conflict {409};
+constexpr int http_service_unavailable {503};
 constexpr int http_not_implemented {501};
 constexpr int http_internal_error {500};
 
@@ -430,20 +480,6 @@ auto to_game_list_entry_response(motif::db::game_list_entry const& src) -> detai
 }
 
 auto generate_import_id() -> std::string
-{
-    static std::mutex rng_mutex;
-    static std::mt19937_64 rng {std::random_device {}()};
-    std::uint64_t high {};
-    std::uint64_t low {};
-    {
-        std::scoped_lock const lock {rng_mutex};
-        high = rng();
-        low = rng();
-    }
-    return fmt::format("{:016x}{:016x}", high, low);
-}
-
-auto generate_analysis_id() -> std::string
 {
     static std::mutex rng_mutex;
     static std::mt19937_64 rng {std::random_device {}()};
@@ -654,6 +690,54 @@ void register_cors(httplib::Server& svr, std::vector<std::string> const& allowed
     svr.Options(".*", [](httplib::Request const& /*req*/, httplib::Response& res) -> void { res.status = http_ok; });
 }
 
+// Thread-safe event queue connecting ucilib callbacks (engine reader thread)
+// to the httplib content provider (httplib thread pool thread).
+// No glaze serialization needed — internal state only.
+struct analysis_sse_session
+{
+    std::mutex queue_mutex;
+    std::deque<std::string> event_queue;
+    std::condition_variable cv;
+    std::atomic<bool> terminal {false};
+};
+
+auto make_info_sse_event(motif::engine::info_event const& evt) -> std::string
+{
+    detail::sse_analysis_info_event payload {
+        .depth = evt.depth,
+        .seldepth = evt.seldepth,
+        .multipv = evt.multipv,
+        .score = {.type = evt.score.type, .value = evt.score.value},
+        .pv_uci = evt.pv_uci,
+        .pv_san = evt.pv_san,
+        .nodes = evt.nodes,
+        .nps = evt.nps,
+        .time_ms = evt.time_ms,
+    };
+    std::string json;
+    [[maybe_unused]] auto const err = glz::write_json(payload, json);
+    return fmt::format("event: info\ndata: {}\n\n", json);
+}
+
+auto make_complete_sse_event(motif::engine::complete_event const& evt) -> std::string
+{
+    detail::sse_analysis_complete_event payload {
+        .best_move_uci = evt.best_move_uci,
+        .ponder_uci = evt.ponder_uci,
+    };
+    std::string json;
+    [[maybe_unused]] auto const err = glz::write_json(payload, json);
+    return fmt::format("event: complete\ndata: {}\n\n", json);
+}
+
+auto make_error_sse_event(motif::engine::error_event const& evt) -> std::string
+{
+    detail::sse_analysis_error_event payload {.message = evt.message};
+    std::string json;
+    [[maybe_unused]] auto const err = glz::write_json(payload, json);
+    return fmt::format("event: error\ndata: {}\n\n", json);
+}
+
 }  // namespace
 
 // server::impl is a private nested type — all route registration is done via
@@ -661,6 +745,7 @@ void register_cors(httplib::Server& svr, std::vector<std::string> const& allowed
 struct server::impl
 {
     httplib::Server svr;
+    motif::engine::engine_manager engine_mgr;
     std::mutex database_mutex;
     std::mutex sessions_mutex;
     std::unordered_map<std::string, std::shared_ptr<detail::import_session>> sessions;
@@ -668,6 +753,8 @@ struct server::impl
     std::deque<std::pair<std::string, std::jthread>> import_workers;
     // Insertion-ordered list of completed import IDs, capped at max_completed_sessions.
     std::deque<std::string> completed_session_ids;
+    std::mutex analyses_mutex;
+    std::unordered_map<std::string, std::shared_ptr<analysis_sse_session>> analyses;
     std::atomic<bool> fail_next_import_worker_start_for_test {false};
     std::atomic<bool> fail_next_import_worker_run_for_test {false};
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
@@ -1333,9 +1420,47 @@ void server::impl::setup_routes()
                 res.status = http_ok;
             });
 
+    // POST /api/engine/engines — register or overwrite an engine configuration.
+    svr.Post("/api/engine/engines",
+             [this](httplib::Request const& req, httplib::Response& res) -> void
+             {
+                 detail::configure_engine_request req_body;
+                 if (auto parse_err = glz::read_json(req_body, req.body); parse_err) {
+                     set_json_error(res, http_bad_request, "invalid request body");
+                     return;
+                 }
+                 if (req_body.name.empty() || req_body.path.empty()) {
+                     set_json_error(res, http_bad_request, "name and path are required");
+                     return;
+                 }
+                 auto result = engine_mgr.configure_engine({.name = req_body.name, .path = req_body.path});
+                 if (!result) {
+                     set_json_error(res, http_bad_request, "engine configuration failed");
+                     return;
+                 }
+                 res.set_content(R"({"status":"ok"})", "application/json");
+                 res.status = http_ok;
+             });
+
+    // GET /api/engine/engines — list all registered engines.
+    svr.Get("/api/engine/engines",
+            [this](httplib::Request const& /*req*/, httplib::Response& res) -> void
+            {
+                auto const configs = engine_mgr.list_engines();
+                auto entries = std::vector<detail::engine_list_entry> {};
+                entries.reserve(configs.size());
+                for (auto const& cfg : configs) {
+                    entries.push_back({.name = cfg.name, .path = cfg.path});
+                }
+                std::string body;
+                [[maybe_unused]] auto const err = glz::write_json(detail::engine_list_response {std::move(entries)}, body);
+                res.set_content(body, "application/json");
+                res.status = http_ok;
+            });
+
     // Engine analysis routes — exact path before parameterized paths.
     svr.Post("/api/engine/analyses",
-             [](httplib::Request const& req, httplib::Response& res) -> void
+             [this](httplib::Request const& req, httplib::Response& res) -> void
              {
                  detail::start_analysis_request req_body;
                  if (auto parse_err = glz::read_json(req_body, req.body); parse_err) {
@@ -1382,22 +1507,136 @@ void server::impl::setup_routes()
                      return;
                  }
 
-                 auto const analysis_id = generate_analysis_id();
+                 const motif::engine::analysis_params params {
+                     .fen = req_body.fen,
+                     .engine = req_body.engine,
+                     .multipv = multipv,
+                     .depth = req_body.depth,
+                     .movetime_ms = req_body.movetime_ms,
+                 };
+
+                 auto analysis_result = engine_mgr.start_analysis(params);
+                 if (!analysis_result) {
+                     switch (analysis_result.error()) {
+                         case motif::engine::error_code::engine_not_configured:
+                             set_json_error(res, http_service_unavailable, "no engine configured");
+                             return;
+                         case motif::engine::error_code::invalid_analysis_params:
+                             set_json_error(res, http_bad_request, "invalid analysis params");
+                             return;
+                         default:
+                             set_json_error(res, http_service_unavailable, "engine failed to start");
+                             return;
+                     }
+                 }
+
+                 auto const& analysis_id = *analysis_result;
+                 auto sse_sess = std::make_shared<analysis_sse_session>();
+
+                 auto push_event = [sse_sess](std::string msg) -> void
+                 {
+                     {
+                         std::scoped_lock const q_lock {sse_sess->queue_mutex};
+                         sse_sess->event_queue.push_back(std::move(msg));
+                     }
+                     sse_sess->cv.notify_one();
+                 };
+
+                 // Subscribe immediately so no events are lost between start and stream.
+                 static_cast<void>(engine_mgr.subscribe(
+                     analysis_id,
+                     [push_event](motif::engine::info_event const& evt) -> void { push_event(make_info_sse_event(evt)); },
+                     [sse_sess, push_event](motif::engine::complete_event const& evt) -> void
+                     {
+                         push_event(make_complete_sse_event(evt));
+                         sse_sess->terminal.store(true, std::memory_order_relaxed);
+                         sse_sess->cv.notify_all();
+                     },
+                     [sse_sess, push_event](motif::engine::error_event const& evt) -> void
+                     {
+                         push_event(make_error_sse_event(evt));
+                         sse_sess->terminal.store(true, std::memory_order_relaxed);
+                         sse_sess->cv.notify_all();
+                     }));
+
+                 {
+                     std::scoped_lock const lock {analyses_mutex};
+                     analyses.emplace(analysis_id, sse_sess);
+                 }
+
                  std::string body {};
                  [[maybe_unused]] auto const err = glz::write_json(detail::start_analysis_response {analysis_id}, body);
                  res.set_content(body, "application/json");
                  res.status = http_accepted;
              });
 
-    // GET /api/engine/analyses/:analysis_id/stream — SSE body is Phase 2 work.
+    // GET /api/engine/analyses/:analysis_id/stream — SSE stream for analysis events.
     svr.Get("/api/engine/analyses/:analysis_id/stream",
-            [](httplib::Request const& /*req*/, httplib::Response& res) -> void
-            { set_json_error(res, http_not_implemented, "engine analysis not yet implemented"); });
+            [this](httplib::Request const& req, httplib::Response& res) -> void
+            {
+                auto const& analysis_id = req.path_params.at("analysis_id");
+                std::shared_ptr<analysis_sse_session> sse_sess;
+                {
+                    std::scoped_lock const lock {analyses_mutex};
+                    auto const it = analyses.find(analysis_id);
+                    if (it == analyses.end()) {
+                        set_json_error(res, http_not_found, "analysis not found");
+                        return;
+                    }
+                    sse_sess = it->second;
+                }
 
-    // DELETE /api/engine/analyses/:analysis_id — stop logic is Phase 2 work.
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [sse_sess](size_t /*offset*/, httplib::DataSink& sink) -> bool
+                    {
+                        std::vector<std::string> pending;
+                        bool is_terminal = false;
+                        {
+                            std::unique_lock<std::mutex> lock {sse_sess->queue_mutex};
+                            sse_sess->cv.wait_for(lock,
+                                                  std::chrono::milliseconds {250},
+                                                  [&sse_sess] { return !sse_sess->event_queue.empty() || sse_sess->terminal.load(); });
+                            while (!sse_sess->event_queue.empty()) {
+                                pending.push_back(std::move(sse_sess->event_queue.front()));
+                                sse_sess->event_queue.pop_front();
+                            }
+                            is_terminal = sse_sess->terminal.load();
+                        }
+                        for (auto const& evt_str : pending) {
+                            if (!sink.write(evt_str.data(), evt_str.size())) {
+                                return false;
+                            }
+                        }
+                        if (is_terminal && pending.empty()) {
+                            sink.done();
+                            return false;
+                        }
+                        return !is_terminal;
+                    });
+            });
+
+    // DELETE /api/engine/analyses/:analysis_id — stop an active analysis session.
     svr.Delete("/api/engine/analyses/:analysis_id",
-               [](httplib::Request const& /*req*/, httplib::Response& res) -> void
-               { set_json_error(res, http_not_implemented, "engine analysis not yet implemented"); });
+               [this](httplib::Request const& req, httplib::Response& res) -> void
+               {
+                   auto const& analysis_id = req.path_params.at("analysis_id");
+                   auto stop_result = engine_mgr.stop_analysis(analysis_id);
+                   if (!stop_result) {
+                       switch (stop_result.error()) {
+                           case motif::engine::error_code::analysis_not_found:
+                               set_json_error(res, http_not_found, "analysis not found");
+                               return;
+                           case motif::engine::error_code::analysis_already_terminal:
+                               set_json_error(res, http_conflict, "analysis already terminal");
+                               return;
+                           default:
+                               set_json_error(res, http_internal_error, "engine stop failed");
+                               return;
+                       }
+                   }
+                   res.status = http_no_content;
+               });
 
     svr.Post("/api/imports",
              [this](httplib::Request const& req, httplib::Response& res) -> void
@@ -1627,7 +1866,9 @@ void server::impl::setup_routes()
                             }
                         }(prog.phase);
                         auto event = fmt::format(
-                            "data: {{\"games_processed\":{},\"games_committed\":{},\"games_skipped\":{},\"elapsed_seconds\":{:.3f},\"phase\":\"{}\"}}\n\n",
+                            "data: "
+                            "{{\"games_processed\":{},\"games_committed\":{},\"games_skipped\":{},\"elapsed_seconds\":{:.3f},\"phase\":\"{}"
+                            "\"}}\n\n",
                             prog.games_processed,
                             prog.games_committed,
                             prog.games_skipped,
