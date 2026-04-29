@@ -150,6 +150,50 @@ paths:
                   value:
                     error: invalid fen
 
+  /api/positions/hash:
+    get:
+      operationId: getPositionHash
+      summary: Get the Zobrist hash for a FEN position
+      description: >-
+        Parses the given FEN string and returns the Zobrist hash of that position
+        as a decimal unsigned 64-bit integer string. Useful for converting a
+        plain FEN (e.g. from a new tab or clipboard paste) into the hash key
+        required by the opening-stats and position-search endpoints.
+      parameters:
+        - name: fen
+          in: query
+          required: true
+          description: URL-encoded FEN string of the position
+          schema:
+            type: string
+          examples:
+            initial:
+              value: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+      responses:
+        '200':
+          description: Zobrist hash of the position
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PositionHashResponse'
+              examples:
+                initial:
+                  value:
+                    hash: '12800752544858952846'
+        '400':
+          description: Missing or malformed FEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_fen:
+                  value:
+                    error: invalid fen
+                malformed_fen:
+                  value:
+                    error: invalid fen
+
   /api/positions/{zobrist_hash}:
     get:
       operationId: searchPositions
@@ -1692,3 +1736,13 @@ components:
         message:
           type: string
           description: Human-readable description of the engine failure
+
+    PositionHashResponse:
+      type: object
+      required: [hash]
+      properties:
+        hash:
+          type: string
+          description: Decimal unsigned 64-bit Zobrist hash of the position
+          pattern: '^\d+$'
+          maxLength: 20
