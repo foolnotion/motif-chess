@@ -149,28 +149,28 @@ _No UX Design document exists. GUI is deferred to spec 004 (Phase 1 MVP, later s
 - FR18: Epic 3 — navigate opening tree with per-node statistics
 - FR19: Epic 3 — lazy opening tree traversal
 - FR20: Epic 2 — position index populated automatically during import
-- FR21: Epic 4 — chessboard widget displaying current position | Epic 4d — legal moves and move validation endpoints for interactive board rendering
-- FR22: Epic 4 — move-by-move game navigation
-- FR23: Epic 4 — game tree view with variations
-- FR24: Epic 4 — initiate PGN import and monitor progress from UI
-- FR25: Epic 4 — position search from current board state
-- FR26: Epic 4 — game list browser with filtering | Epic 4b — HTTP endpoint GET /games
-- FR27: Epic 4 — high-DPI display support
-- FR28: Epic 4 — full keyboard navigation
-- FR29: Epic 5 — configure UCI engine by executable path | Epic 4d — engine API contract
-- FR30: Epic 5 — start/stop engine analysis | Epic 4d — HTTP start/stop contract
-- FR31: Epic 5 — view real-time engine output | Epic 4d — SSE stream contract
-- FR32: Epic 5 — engine crash isolation
-- FR33: Epic 6 — performance statistics by opening
-- FR34: Epic 6 — error distribution by game phase
-- FR35: Epic 6 — time-management statistics
-- FR36: Epic 6 — graceful degradation without clock/Elo data
-- FR37: Epic 7 — build and save annotated repertoire lines
-- FR38: Epic 7 — repertoire drill mode
-- FR39: Epic 4 — configure database directory, recent DBs, engine paths, UI preferences
-- FR40: Epic 4 — per-user config independent of database files
+- FR21: Epic 7 — chessboard widget displaying current position | Epic 4d — legal moves and move validation endpoints for interactive board rendering
+- FR22: Epic 7 — move-by-move game navigation
+- FR23: Epic 7 — game tree view with variations
+- FR24: Epic 7 — initiate PGN import and monitor progress from UI
+- FR25: Epic 7 — position search from current board state
+- FR26: Epic 7 — game list browser with filtering | Epic 4b — HTTP endpoint GET /games
+- FR27: Epic 7 — high-DPI display support
+- FR28: Epic 7 — full keyboard navigation
+- FR29: Epic 4 — configure UCI engine by executable path | Epic 4d — engine API contract
+- FR30: Epic 4 — start/stop engine analysis | Epic 4d — HTTP start/stop contract
+- FR31: Epic 4 — view real-time engine output | Epic 4d — SSE stream contract
+- FR32: Epic 4 — engine crash isolation
+- FR33: Epic 5 — performance statistics by opening
+- FR34: Epic 5 — error distribution by game phase
+- FR35: Epic 5 — time-management statistics
+- FR36: Epic 5 — graceful degradation without clock/Elo data
+- FR37: Epic 6 — build and save annotated repertoire lines
+- FR38: Epic 6 — repertoire drill mode
+- FR39: Epic 7 — configure database directory, recent DBs, engine paths, UI preferences
+- FR40: Epic 7 — per-user config independent of database files
 - FR41: Epic 1 — database portability (move/copy preserves all data)
-- FR42: Epic 4 — .pgn file handler registration at OS level
+- FR42: Epic 7 — .pgn file handler registration at OS level
 - FR43: Epic 8 — corpus analysis for style/strength/weakness profiling
 - FR44: Epic 8 — generate personalized repertoire proposal
 - FR45: Epic 8 — repertoire accounts for player strength and piece structures
@@ -219,21 +219,21 @@ Before interactive web UI work depends on the local HTTP API, the backend expose
 **NFRs covered:** NFR05, NFR09, NFR10, NFR18, NFR19
 **Dependencies:** Epic 4c complete; `chesslib` owns move legality/SAN/FEN; `ucilib` owns UCI subprocess lifecycle.
 
-### Epic 4: Desktop Application *(DEFERRED — API prerequisites take priority)*
+### Epic 7: Desktop Application *(DEFERRED — API prerequisites take priority)*
 Users interact with the full database through a native Qt 6 desktop GUI — browsing games, navigating positions on a chessboard, running imports, searching positions, and configuring the application — all keyboard-accessible on high-DPI displays.
 **FRs covered:** FR21–FR28, FR39–FR40, FR42
 **NFRs covered:** NFR05, NFR06
 
-### Epic 5: Engine Integration *(Phase 2)*
+### Epic 4: Engine Integration *(Phase 2)*
 Users can configure UCI engines and run real-time analysis on any position through backend-owned engine lifecycle APIs; engine crashes are isolated and never affect the application or connected frontend.
 **FRs covered:** FR29–FR32
 **NFRs covered:** NFR18
 
-### Epic 6: Statistical Analysis *(Phase 2)*
+### Epic 5: Statistical Analysis *(Phase 2)*
 Users view personal performance correlated across openings, game phases, opponent rating ranges, and time management — degrading gracefully when clock data or Elo is absent.
 **FRs covered:** FR33–FR36
 
-### Epic 7: Repertoire Management *(Phase 2)*
+### Epic 6: Repertoire Management *(Phase 2)*
 Users build and save annotated opening repertoire lines and drill them in practice mode.
 **FRs covered:** FR37–FR38
 
@@ -940,33 +940,64 @@ So that the browser can import games without a server-side path and display the 
 
 ---
 
-## Epic 4: Desktop Application *(DEFERRED — API prerequisites take priority)*
+## Epic 7: Desktop Application *(DEFERRED — API prerequisites take priority)*
 
 Users interact with the full database through a native Qt 6 desktop GUI — browsing games, navigating positions on a chessboard, running imports, searching positions, and configuring the application — all keyboard-accessible on high-DPI displays.
 
-### Story 4.1: Application Shell, Config & .pgn File Handler
+### Story 7.1: Database Workspace - Create, Open, Recent & Scratch
 
 As a user,
-I want the application to start in under 3 seconds, remember my recent databases and preferences, and register as my system's `.pgn` file handler,
-So that motif-chess feels like a native, well-integrated desktop tool from first launch.
+I want motif-chess to start with a first-class database workspace where I can create, open, reopen, or use a scratch database,
+So that every game list, import, search, and analysis workflow has an explicit active database context.
 
 **Acceptance Criteria:**
 
 **Given** the application is launched for the first time
 **When** the main window appears
 **Then** startup time from launch to usable window is under 3 seconds (NFR06)
-**And** `~/.config/motif-chess/config.json` is created with defaults (database directory, empty recent list, default engine paths, default UI preferences) (FR39, FR40)
+**And** a database workspace/start screen is shown before game list, import, search, or analysis workflows
+**And** `~/.config/motif-chess/config.json` is created with defaults for database directory, empty recent list, default engine paths, and default UI preferences (FR39, FR40)
+
+**Given** the database workspace is visible
+**When** the user creates a named database at a chosen directory
+**Then** a portable database bundle is created containing `games.db`, `positions.duckdb`, and `manifest.json` (FR01, FR41)
+**And** the new database becomes the active database
+**And** the active database name and path are visible in the shell
+
+**Given** the database workspace is visible
+**When** the user opens an existing database bundle
+**Then** the bundle is validated and opened without dropping or recreating data (FR07)
+**And** invalid, missing, schema-mismatched, or corrupt bundles are reported through the shell without crashing
+**And** failed opens do not replace the previous active database
 
 **Given** the user has previously opened databases
 **When** the application starts
 **Then** the recent databases list is populated from `config.json`; config is never stored inside database files (FR39, FR40)
+**And** missing recent paths are shown as unavailable and can be removed
+**And** successfully opened databases move to the front of the recent list without duplicates
+
+**Given** the database workspace is visible
+**When** the user selects the scratch database option
+**Then** the in-memory scratch database becomes active (AR07)
+**And** the shell clearly labels it as temporary
+**And** scratch is never persisted to disk and never added to recent databases
+
+**Given** no active database exists
+**When** the user attempts to browse games, import PGN, search positions, or start analysis
+**Then** the shell prompts the user to create, open, or use scratch first
+**And** backend workflows are not started without an active database context
+
+**Given** the application is launched with one or more `.pgn` file paths
+**When** the main window appears
+**Then** those paths are captured as a queued import list
+**And** if no active database exists, the workspace asks the user to choose/create/use scratch before import can proceed
 
 **Given** the application is installed on Linux
 **When** the `.desktop` file is registered
 **Then** double-clicking a `.pgn` file in the file manager opens motif-chess with that file queued for import (FR42)
-**And** all Qt code is confined to `motif_app`; no Qt headers appear in `motif_db`, `motif_import`, or `motif_search`
+**And** all Qt code is confined to `motif_app`; no Qt headers appear in `motif_db`, `motif_import`, `motif_search`, `motif_engine`, or `motif_http`
 
-### Story 4.2: Chessboard Widget & Game Navigation
+### Story 7.2: Chessboard Widget & Game Navigation
 
 As a user,
 I want to view a chessboard displaying the current position and navigate through a game move by move using the keyboard,
@@ -991,7 +1022,7 @@ So that I can step through any game in my database without reaching for the mous
 **When** the board renders
 **Then** pieces and squares are crisp with no blurry scaling artifacts (FR27)
 
-### Story 4.3: Game List Browser
+### Story 7.3: Game List Browser
 
 As a user,
 I want to browse the full list of games in my active database, filter by player name or result, and open any game for board replay,
@@ -1011,7 +1042,7 @@ So that I can find and review specific games from my collection without external
 **When** the user presses Enter or double-clicks
 **Then** the selected game loads into the chessboard widget and game tree widget; transition completes within 100ms (FR22, NFR05)
 
-### Story 4.4: PGN Import Dialog
+### Story 7.4: PGN Import Dialog
 
 As a user,
 I want to initiate a PGN import from within the UI, monitor its real-time progress, and see the final summary when it completes,
@@ -1033,7 +1064,7 @@ So that I never need to use a command line to add games to my database.
 **Then** the dialog shows total attempted, committed, skipped, and error count (FR14)
 **And** the game list panel refreshes to include the newly imported games
 
-### Story 4.5: Position Search Panel
+### Story 7.5: Position Search Panel
 
 As a user,
 I want to search the database for the position currently on the board and view matching games and opening statistics inline,
@@ -1057,11 +1088,11 @@ So that I can immediately see how any position has been played without leaving t
 
 ---
 
-## Epic 5: Engine Integration *(Phase 2)*
+## Epic 4: Engine Integration *(Phase 2)*
 
 Users can configure UCI engines and run real-time analysis on any position; engine crashes are isolated and never affect the application.
 
-### Story 5.1: Engine Configuration & Lifecycle
+### Story 4.1: Engine Configuration & Lifecycle
 
 As a user,
 I want to configure one or more UCI chess engines by executable path and start/stop analysis on a FEN position,
@@ -1082,7 +1113,7 @@ So that any motif-chess frontend can get engine evaluations without managing eng
 **When** stop is triggered
 **Then** the engine subprocess receives a `stop` command, output ceases, and the analysis session transitions to a terminal state (FR30)
 
-### Story 5.2: Real-Time Engine Output & Crash Isolation
+### Story 4.2: Real-Time Engine Output & Crash Isolation
 
 As a user,
 I want to see engine depth, score, and principal variation updating in real time through a streaming backend API, and have engine crashes never crash motif-chess,
@@ -1103,11 +1134,11 @@ So that I can analyze positions safely from desktop or web frontends even with u
 
 ---
 
-## Epic 6: Statistical Analysis *(Phase 2)*
+## Epic 5: Statistical Analysis *(Phase 2)*
 
 Users view personal performance correlated across openings, game phases, opponent rating ranges, and time management — degrading gracefully when clock data or Elo is absent.
 
-### Story 6.1: Performance Statistics by Opening & Color
+### Story 5.1: Performance Statistics by Opening & Color
 
 As a user,
 I want to view my win/draw/loss rates by opening, color, and opponent rating range,
@@ -1124,7 +1155,7 @@ So that I can identify which openings are working and which need attention.
 **When** statistics are computed
 **Then** those games contribute to result counts but not to rating-band breakdowns; the UI labels absent-Elo bins clearly (FR36)
 
-### Story 6.2: Game Phase & Time Management Statistics
+### Story 5.2: Game Phase & Time Management Statistics
 
 As a user,
 I want to see where in the game I tend to make errors and how my performance correlates with time pressure,
@@ -1146,11 +1177,11 @@ So that I can target the specific phase or time situation that costs me the most
 
 ---
 
-## Epic 7: Repertoire Management *(Phase 2)*
+## Epic 6: Repertoire Management *(Phase 2)*
 
 Users build and save annotated opening repertoire lines and drill them in practice mode.
 
-### Story 7.1: Build & Save Annotated Repertoire Lines
+### Story 6.1: Build & Save Annotated Repertoire Lines
 
 As a user,
 I want to build an opening repertoire as a set of annotated lines and save it within the application,
@@ -1167,7 +1198,7 @@ So that I have a structured preparation reference I can return to.
 **When** the user reopens the application
 **Then** the repertoire is loaded and all annotated lines are accessible (FR37)
 
-### Story 7.2: Repertoire Drill Mode
+### Story 6.2: Repertoire Drill Mode
 
 As a user,
 I want to drill my repertoire lines in a practice mode where the application plays the opponent's moves and I respond,

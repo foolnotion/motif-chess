@@ -109,3 +109,9 @@
 - `std::filesystem::temp_directory_path()` can throw `filesystem_error` without JSON error response — pre-existing pattern of unguarded filesystem exceptions in server.cpp
 - Unbounded `import_workers` growth — no reaping of completed workers, pre-existing from original `/api/imports` endpoint
 - Missing test-failure injection flags for upload endpoint (`fail_next_import_worker_start_for_test` / `fail_next_import_worker_run_for_test` not replicated for upload path) — test infrastructure gap, not a functional bug
+
+## Deferred from: code review of 4-1-engine-configuration-lifecycle (2026-04-29)
+
+- ~~AC7 crash/error handling requires upstream `ucilib` support~~ — **resolved 2026-04-29**:
+  `uci::engine::on_error(error_callback)` merged to ucilib
+  (`github:foolnotion/ucilib/0926064e62f46f78366373c96c68abcf6d28fb95`); Story 4.2 wires it.
