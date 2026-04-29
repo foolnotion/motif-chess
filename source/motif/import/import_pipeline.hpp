@@ -37,9 +37,9 @@ struct import_summary
 
 enum class import_phase : std::uint8_t
 {
-    idle,       // before the pipeline starts
+    idle,  // before the pipeline starts
     ingesting,  // reading and inserting games into SQLite
-    rebuilding, // rebuilding and sorting the DuckDB position store
+    rebuilding,  // rebuilding and sorting the DuckDB position store
 };
 
 struct import_progress

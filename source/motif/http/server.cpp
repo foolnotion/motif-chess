@@ -1627,7 +1627,9 @@ void server::impl::setup_routes()
                             }
                         }(prog.phase);
                         auto event = fmt::format(
-                            "data: {{\"games_processed\":{},\"games_committed\":{},\"games_skipped\":{},\"elapsed_seconds\":{:.3f},\"phase\":\"{}\"}}\n\n",
+                            "data: "
+                            "{{\"games_processed\":{},\"games_committed\":{},\"games_skipped\":{},\"elapsed_seconds\":{:.3f},\"phase\":\"{}"
+                            "\"}}\n\n",
                             prog.games_processed,
                             prog.games_committed,
                             prog.games_skipped,
