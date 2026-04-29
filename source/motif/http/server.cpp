@@ -186,6 +186,11 @@ struct game_count_response
     std::int64_t count {};
 };
 
+struct position_hash_response
+{
+    std::string hash;
+};
+
 struct game_positions_response
 {
     std::string starting_hash;
@@ -846,6 +851,26 @@ void server::impl::setup_routes()
                  res.set_content(body, "application/json");
                  res.status = http_ok;
              });
+
+    svr.Get("/api/positions/hash",
+            [](httplib::Request const& req, httplib::Response& res) -> void
+            {
+                auto const fen_param = req.get_param_value("fen");
+                if (fen_param.empty()) {
+                    set_json_error(res, http_bad_request, "invalid fen");
+                    return;
+                }
+                auto board_result = chesslib::fen::read(fen_param);
+                if (!board_result) {
+                    set_json_error(res, http_bad_request, "invalid fen");
+                    return;
+                }
+                std::string body {};
+                [[maybe_unused]] auto const err =
+                    glz::write_json(detail::position_hash_response {fmt::format("{}", board_result->hash())}, body);
+                res.set_content(body, "application/json");
+                res.status = http_ok;
+            });
 
     auto const invalid_hash_handler = [](httplib::Request const& /*req*/, httplib::Response& res) -> void
     { set_json_error(res, http_bad_request, "invalid zobrist hash"); };
