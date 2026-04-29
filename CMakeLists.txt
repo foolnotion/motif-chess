@@ -23,6 +23,8 @@ endif()
 include(cmake/project-is-top-level.cmake)
 include(cmake/variables.cmake)
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+
 # ---- Dependencies ----
 
 find_package(fmt REQUIRED)

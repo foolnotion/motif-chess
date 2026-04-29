@@ -2,20 +2,24 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <tl/expected.hpp>
 
 #include "motif/engine/error.hpp"
 
-// Phase 2 stub — engine subprocess management and ucilib wiring are deferred.
-// This header defines the contract that motif_http depends on for type-checking
-// and route registration. Implementations are Phase 2 work.
-
 namespace motif::engine
 {
+
+struct engine_config
+{
+    std::string name;
+    std::string path;
+};
 
 struct analysis_params
 {
@@ -58,29 +62,36 @@ struct error_event
 };
 
 // Opaque subscription handle returned by engine_manager::subscribe.
-// Destroying the handle unsubscribes the callbacks. Phase 2 will implement
-// the actual lifetime management.
 struct subscription
 {
-    // Phase 2 stub: no state needed for the contract.
 };
 
 using info_callback = std::function<void(info_event const&)>;
 using complete_callback = std::function<void(complete_event const&)>;
 using error_callback = std::function<void(error_event const&)>;
 
+// Convert a sequence of UCI moves to SAN starting from start_fen.
+// Stops at the first illegal or unparseable move; partial output is valid.
+auto pv_to_san(std::string_view start_fen, std::vector<std::string> const& pv_uci) -> std::vector<std::string>;
+
 class engine_manager
 {
   public:
-    engine_manager() = default;
-    ~engine_manager() = default;
+    engine_manager();
+    ~engine_manager();
     engine_manager(engine_manager const&) = delete;
     auto operator=(engine_manager const&) -> engine_manager& = delete;
     engine_manager(engine_manager&&) = delete;
     auto operator=(engine_manager&&) -> engine_manager& = delete;
 
+    // Register or overwrite an engine configuration.
+    // Returns engine_not_configured if path is empty.
+    auto configure_engine(engine_config cfg) -> tl::expected<void, error_code>;
+
+    // Return all registered engine configurations.
+    auto list_engines() -> std::vector<engine_config>;
+
     // Start an analysis session. Returns an opaque analysis_id on success.
-    // Phase 2 will call ucilib to start the engine process and invoke go().
     auto start_analysis(analysis_params const& params) -> tl::expected<std::string, error_code>;
 
     // Stop an active analysis session.
@@ -93,6 +104,10 @@ class engine_manager
                    info_callback const& on_info,
                    complete_callback const& on_complete,
                    error_callback const& on_error) -> tl::expected<subscription, error_code>;
+
+  private:
+    struct impl;
+    std::unique_ptr<impl> impl_;
 };
 
 }  // namespace motif::engine
