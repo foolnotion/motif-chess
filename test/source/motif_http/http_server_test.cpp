@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -63,6 +64,17 @@ struct start_analysis_response
     std::string analysis_id;
 };
 
+struct engine_list_entry
+{
+    std::string name;
+    std::string path;
+};
+
+struct engine_list_response
+{
+    std::vector<engine_list_entry> engines;
+};
+
 struct provenance_response
 {
     std::string source_type;
@@ -98,6 +110,51 @@ namespace
 {
 
 using test_helpers::is_sanitized_build;
+
+// Creates a shell-script UCI fake engine. go_body is the shell fragment executed
+// when the "go" command is received (see engine_manager_test.cpp for the pattern).
+auto make_fake_engine_http(std::string_view go_body) -> std::filesystem::path
+{
+    auto const stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto const path = std::filesystem::temp_directory_path() / fmt::format("motif_http_fake_uci_engine_{}.sh", stamp);
+    auto script = std::ofstream {path};
+    script << "#!/usr/bin/env sh\n"
+              "while IFS= read -r line; do\n"
+              "  case \"$line\" in\n"
+              "    uci)\n"
+              "      printf '%s\\n' 'id name MotifFake'\n"
+              "      printf '%s\\n' 'uciok'\n"
+              "      ;;\n"
+              "    isready)\n"
+              "      printf '%s\\n' 'readyok'\n"
+              "      ;;\n"
+              "    setoption*)\n"
+              "      ;;\n"
+              "    position*)\n"
+              "      ;;\n"
+              "    go*)\n"
+           << go_body
+           << "      ;;\n"
+              "    stop)\n"
+              "      printf '%s\\n' 'bestmove e2e4'\n"
+              "      ;;\n"
+              "    quit)\n"
+              "      exit 0\n"
+              "      ;;\n"
+              "  esac\n"
+              "done\n";
+    script.close();
+    std::filesystem::permissions(
+        path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    return path;
+}
+
+auto make_fast_complete_engine_http() -> std::filesystem::path
+{
+    return make_fake_engine_http(
+        "      printf '%s\\n' 'info depth 1 seldepth 1 multipv 1 score cp 13 nodes 42 nps 1000 time 1 pv e2e4 e7e5'\n"
+        "      printf '%s\\n' 'bestmove e2e4 ponder e7e5'\n");
+}
 
 constexpr int wait_poll_count {40};
 constexpr std::chrono::milliseconds wait_poll_interval {5};
@@ -2511,6 +2568,7 @@ TEST_CASE("server: apply-move bad request body returns 400", "[motif-http]")
 
 TEST_CASE("server: POST /api/engine/analyses valid body returns 202 with analysis_id", "[motif-http]")
 {
+    auto const fake_engine = make_fast_complete_engine_http();
     auto const tdir = tmp_dir {"engine_analyses_valid"};
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-valid");
     REQUIRE(db_res.has_value());
@@ -2521,11 +2579,17 @@ TEST_CASE("server: POST /api/engine/analyses valid body returns 202 with analysi
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
+    auto const cfg_res =
+        cli.Post("/api/engine/engines", fmt::format(R"({{"name":"fake","path":"{}"}})", fake_engine.string()), "application/json");
+    REQUIRE(cfg_res != nullptr);
+    REQUIRE(cfg_res->status == 200);
+
     auto const res = cli.Post(
-        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":20})", "application/json");
+        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":1})", "application/json");
 
     srv.stop();
     server_thread.join();
+    static_cast<void>(std::filesystem::remove(fake_engine));
 
     REQUIRE(res != nullptr);
     REQUIRE(res->status == 202);
@@ -2669,7 +2733,7 @@ TEST_CASE("server: POST /api/engine/analyses with multipv=6 returns 400", "[moti
     CHECK(res->status == 400);
 }
 
-TEST_CASE("server: GET /api/engine/analyses/unknown-id/stream returns 404 or 501", "[motif-http]")
+TEST_CASE("server: GET /api/engine/analyses/unknown-id/stream returns 404", "[motif-http]")
 {
     auto const tdir = tmp_dir {"engine_analyses_stream_unknown"};
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-stream-unknown");
@@ -2687,10 +2751,10 @@ TEST_CASE("server: GET /api/engine/analyses/unknown-id/stream returns 404 or 501
     server_thread.join();
 
     REQUIRE(res != nullptr);
-    CHECK((res->status == 404 || res->status == 501));
+    CHECK(res->status == 404);
 }
 
-TEST_CASE("server: DELETE /api/engine/analyses/unknown-id returns 404 or 501", "[motif-http]")
+TEST_CASE("server: DELETE /api/engine/analyses/unknown-id returns 404", "[motif-http]")
 {
     auto const tdir = tmp_dir {"engine_analyses_delete_unknown"};
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-delete-unknown");
@@ -2708,7 +2772,202 @@ TEST_CASE("server: DELETE /api/engine/analyses/unknown-id returns 404 or 501", "
     server_thread.join();
 
     REQUIRE(res != nullptr);
-    CHECK((res->status == 404 || res->status == 501));
+    CHECK(res->status == 404);
+}
+
+TEST_CASE("server: POST /api/engine/engines valid registration returns 200", "[motif-http]")
+{
+    auto const fake_engine = make_fast_complete_engine_http();
+    auto const tdir = tmp_dir {"engine_engines_valid"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-engines-valid");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18139};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res =
+        cli.Post("/api/engine/engines", fmt::format(R"({{"name":"fake","path":"{}"}})", fake_engine.string()), "application/json");
+
+    srv.stop();
+    server_thread.join();
+    static_cast<void>(std::filesystem::remove(fake_engine));
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 200);
+}
+
+TEST_CASE("server: POST /api/engine/engines with empty path returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_engines_empty_path"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-engines-empty-path");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18140};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post("/api/engine/engines", R"({"name":"fake","path":""})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 400);
+}
+
+TEST_CASE("server: POST /api/engine/analyses returns 503 when no engine configured", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"engine_analyses_no_engine"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-no-engine");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18141};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Post(
+        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":1})", "application/json");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 503);
+}
+
+TEST_CASE("server: GET /api/engine/analyses/:id/stream receives info and complete SSE events", "[motif-http]")
+{
+    auto const fake_engine = make_fast_complete_engine_http();
+    auto const tdir = tmp_dir {"engine_analyses_stream_valid"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-stream-valid");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18142};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const cfg_res =
+        cli.Post("/api/engine/engines", fmt::format(R"({{"name":"fake","path":"{}"}})", fake_engine.string()), "application/json");
+    REQUIRE(cfg_res != nullptr);
+    REQUIRE(cfg_res->status == 200);
+
+    auto const start_res = cli.Post(
+        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":1})", "application/json");
+    REQUIRE(start_res != nullptr);
+    REQUIRE(start_res->status == 202);
+
+    motif_http_test::start_analysis_response analysis_resp;
+    REQUIRE(!glz::read_json(analysis_resp, start_res->body));
+    REQUIRE(!analysis_resp.analysis_id.empty());
+
+    std::string collected_events;
+    cli.Get(fmt::format("/api/engine/analyses/{}/stream", analysis_resp.analysis_id),
+            [&collected_events](const char* data, size_t size) -> bool
+            {
+                collected_events.append(data, size);
+                return true;
+            });
+
+    srv.stop();
+    server_thread.join();
+    static_cast<void>(std::filesystem::remove(fake_engine));
+
+    CHECK(collected_events.find("event: info") != std::string::npos);
+    CHECK(collected_events.find("event: complete") != std::string::npos);
+}
+
+TEST_CASE("server: DELETE /api/engine/analyses/:id for active session returns 204", "[motif-http]")
+{
+    // Use a wait-for-stop engine (emits info but no bestmove until stop)
+    auto const fake_engine = make_fake_engine_http(
+        "      printf '%s\\n' 'info depth 1 seldepth 1 multipv 1 score cp 13 nodes 42 nps 1000 time 1 pv e2e4 e7e5'\n");
+    auto const tdir = tmp_dir {"engine_analyses_delete_active"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-delete-active");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18143};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const cfg_res =
+        cli.Post("/api/engine/engines", fmt::format(R"({{"name":"fake","path":"{}"}})", fake_engine.string()), "application/json");
+    REQUIRE(cfg_res != nullptr);
+    REQUIRE(cfg_res->status == 200);
+
+    auto const start_res = cli.Post(
+        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":1})", "application/json");
+    REQUIRE(start_res != nullptr);
+    REQUIRE(start_res->status == 202);
+
+    motif_http_test::start_analysis_response analysis_resp;
+    REQUIRE(!glz::read_json(analysis_resp, start_res->body));
+
+    auto const del_res = cli.Delete(fmt::format("/api/engine/analyses/{}", analysis_resp.analysis_id));
+
+    srv.stop();
+    server_thread.join();
+    static_cast<void>(std::filesystem::remove(fake_engine));
+
+    REQUIRE(del_res != nullptr);
+    CHECK(del_res->status == 204);
+}
+
+TEST_CASE("server: DELETE /api/engine/analyses/:id for already-terminal session returns 409", "[motif-http]")
+{
+    auto const fake_engine = make_fast_complete_engine_http();
+    auto const tdir = tmp_dir {"engine_analyses_delete_terminal"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-delete-terminal");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18144};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const cfg_res =
+        cli.Post("/api/engine/engines", fmt::format(R"({{"name":"fake","path":"{}"}})", fake_engine.string()), "application/json");
+    REQUIRE(cfg_res != nullptr);
+    REQUIRE(cfg_res->status == 200);
+
+    auto const start_res = cli.Post(
+        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":1})", "application/json");
+    REQUIRE(start_res != nullptr);
+    REQUIRE(start_res->status == 202);
+
+    motif_http_test::start_analysis_response analysis_resp;
+    REQUIRE(!glz::read_json(analysis_resp, start_res->body));
+
+    // Drain the SSE stream to wait for the engine to complete
+    cli.Get(fmt::format("/api/engine/analyses/{}/stream", analysis_resp.analysis_id),
+            [](const char* /*data*/, size_t /*size*/) -> bool { return true; });
+
+    // Now the session should be terminal — DELETE should return 409
+    auto const del_res = cli.Delete(fmt::format("/api/engine/analyses/{}", analysis_resp.analysis_id));
+
+    srv.stop();
+    server_thread.join();
+    static_cast<void>(std::filesystem::remove(fake_engine));
+
+    REQUIRE(del_res != nullptr);
+    CHECK(del_res->status == 409);
 }
 
 // ── CRUD game tests (Story 4d.3) ─────────────────────────────────────────────

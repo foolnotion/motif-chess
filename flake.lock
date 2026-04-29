@@ -238,11 +238,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1776422454,
-        "narHash": "sha256-2+XRjNGjZkP2xbpmct7uXc5dTH0k/hsaeEs+9m5s1dc=",
+        "lastModified": 1777461621,
+        "narHash": "sha256-Cg7Pa44DvESIbv++yemme7f33iNlNo5kImLjyc70ZgA=",
         "owner": "foolnotion",
         "repo": "ucilib",
-        "rev": "8e7a6ca50a98ed6972599c8a44c4c46275a5f9e0",
+        "rev": "60abbdac0f260778164ab9d4b58bc23b8c19327a",
         "type": "github"
       },
       "original": {
