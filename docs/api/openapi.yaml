@@ -651,6 +651,54 @@ paths:
                   value:
                     count: 12345
 
+  /api/engine/engines:
+    post:
+      operationId: configureEngine
+      summary: Register or overwrite a UCI engine configuration
+      description: |-
+        Registers a named UCI engine executable. If an engine with the same name
+        already exists it is overwritten. The engine is not started until an
+        analysis session is requested.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigureEngineRequest'
+            examples:
+              stockfish:
+                summary: Register Stockfish
+                value:
+                  name: stockfish
+                  path: /usr/bin/stockfish
+      responses:
+        '200':
+          description: Engine registered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '400':
+          description: Invalid request body, or name/path is empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      operationId: listEngines
+      summary: List all registered engine configurations
+      responses:
+        '200':
+          description: List of registered engines
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EngineListResponse'
+
   /api/engine/analyses:
     post:
       operationId: startAnalysis
@@ -719,6 +767,19 @@ paths:
                 neither_limit:
                   value:
                     error: provide exactly one of depth or movetime_ms
+        '503':
+          description: No engine configured, or engine failed to start
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                no_engine:
+                  value:
+                    error: no engine configured
+                start_failed:
+                  value:
+                    error: engine failed to start
 
   /api/engine/analyses/{analysis_id}/stream:
     get:
@@ -1566,6 +1627,37 @@ components:
           minLength: 32
           maxLength: 32
           description: Opaque session identifier; use with /api/imports/{import_id}/progress
+
+    ConfigureEngineRequest:
+      type: object
+      required: [name, path]
+      properties:
+        name:
+          type: string
+          description: Unique name for this engine configuration
+          example: stockfish
+        path:
+          type: string
+          description: Absolute path to the UCI engine executable
+          example: /usr/bin/stockfish
+
+    EngineListEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Engine name
+        path:
+          type: string
+          description: Path to engine executable
+
+    EngineListResponse:
+      type: object
+      properties:
+        engines:
+          type: array
+          items:
+            $ref: '#/components/schemas/EngineListEntry'
 
     StartAnalysisRequest:
       type: object
