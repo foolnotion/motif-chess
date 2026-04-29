@@ -87,7 +87,7 @@ auto wait_until(std::atomic<bool> const& flag) -> bool
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Preserved stub behaviour: no engine registered
+// Preserved stub behavior: no engine registered
 // ---------------------------------------------------------------------------
 
 TEST_CASE("engine_manager: start_analysis reports engine not configured when no engine registered", "[motif-engine]")
@@ -351,11 +351,11 @@ TEST_CASE("engine_manager: on_error fires when engine crashes during analysis", 
 {
     auto const fake_engine = make_fake_engine("      exit 1\n");
     motif::engine::engine_manager manager;
-    REQUIRE(manager.configure_engine(motif::engine::engine_config {.name = "crasher", .path = fake_engine.string()}).has_value());
+    REQUIRE(manager.configure_engine(motif::engine::engine_config {.name = "crash", .path = fake_engine.string()}).has_value());
 
     auto const analysis_id = manager.start_analysis(motif::engine::analysis_params {
         .fen = startpos_fen,
-        .engine = "crasher",
+        .engine = "crash",
         .multipv = 1,
         .depth = default_depth,
         .movetime_ms = std::nullopt,

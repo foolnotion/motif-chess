@@ -71,7 +71,7 @@ using complete_callback = std::function<void(complete_event const&)>;
 using error_callback = std::function<void(error_event const&)>;
 
 // Convert a sequence of UCI moves to SAN starting from start_fen.
-// Stops at the first illegal or unparseable move; partial output is valid.
+// Stops at the first illegal or unparsable move; partial output is valid.
 auto pv_to_san(std::string_view start_fen, std::vector<std::string> const& pv_uci) -> std::vector<std::string>;
 
 class engine_manager
