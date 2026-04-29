@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-04-27  # review: 4d-4 file upload import and game count endpoints
+last_updated: 2026-04-29  # story 4-2 completed
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -98,31 +98,31 @@ development_status:
   4d-4-file-upload-import-and-game-count-endpoints: done
   epic-4d-retrospective: optional
 
-  # ─── Epic 4: Desktop Application (DEFERRED — API prerequisites take priority)
+  # ─── Epic 4: Engine Integration ─────────────────────────────────────────────
   epic-4: in-progress
-  4-1-application-shell-config-pgn-file-handler: ready-for-dev
-  4-2-chessboard-widget-game-navigation: backlog
-  4-3-game-list-browser: backlog
-  4-4-pgn-import-dialog: backlog
-  4-5-position-search-panel: backlog
+  4-1-engine-configuration-lifecycle: done
+  4-2-real-time-engine-output-crash-isolation: done
   epic-4-retrospective: optional
 
-  # ─── Epic 5: Engine Integration (Phase 2) ──────────────────────────────────
+  # ─── Epic 5: Statistical Analysis ───────────────────────────────────────────
   epic-5: backlog
-  5-1-engine-configuration-lifecycle: backlog
-  5-2-real-time-engine-output-crash-isolation: backlog
+  5-1-performance-statistics-by-opening-color: backlog
+  5-2-game-phase-time-management-statistics: backlog
   epic-5-retrospective: optional
 
-  # ─── Epic 6: Statistical Analysis (Phase 2) ────────────────────────────────
+  # ─── Epic 6: Repertoire Management ──────────────────────────────────────────
   epic-6: backlog
-  6-1-performance-statistics-by-opening-color: backlog
-  6-2-game-phase-time-management-statistics: backlog
+  6-1-build-save-annotated-repertoire-lines: backlog
+  6-2-repertoire-drill-mode: backlog
   epic-6-retrospective: optional
 
-  # ─── Epic 7: Repertoire Management (Phase 2) ───────────────────────────────
-  epic-7: backlog
-  7-1-build-save-annotated-repertoire-lines: backlog
-  7-2-repertoire-drill-mode: backlog
+  # ─── Epic 7: Desktop Application ────────────────────────────────────────────
+  epic-7: in-progress
+  7-1-database-workspace-create-open-recent-scratch: ready-for-dev
+  7-2-chessboard-widget-game-navigation: backlog
+  7-3-game-list-browser: backlog
+  7-4-pgn-import-dialog: backlog
+  7-5-position-search-panel: backlog
   epic-7-retrospective: optional
 
   # ─── Epic 8: AI Repertoire Construction (Phase 3) ──────────────────────────
