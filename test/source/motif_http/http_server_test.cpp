@@ -2189,6 +2189,11 @@ struct apply_move_response
     std::string fen;
 };
 
+struct position_hash_response
+{
+    std::string hash;
+};
+
 }  // namespace motif_http_test
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -2433,6 +2438,69 @@ TEST_CASE("server: legal-moves missing fen returns 400", "[motif-http]")
     CHECK(empty_param->body.contains(R"("error")"));
     CHECK(malformed->body.contains(R"("error")"));
     CHECK(few_fields->body.contains(R"("error")"));
+}
+
+// ─── Position hash endpoint tests ─────────────────────────────────────────────
+
+TEST_CASE("server: position hash initial position returns correct hash", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"pos_hash_initial"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "pos-hash-initial");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18167};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    constexpr std::string_view initial_fen {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"};
+    auto const encoded_fen = httplib::encode_query_component(std::string {initial_fen});
+    auto const res = cli.Get("/api/positions/hash?fen=" + encoded_fen);
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+
+    motif_http_test::position_hash_response parsed;
+    auto const parse_err = glz::read_json(parsed, res->body);
+    REQUIRE(!parse_err);
+    REQUIRE_FALSE(parsed.hash.empty());
+
+    auto const expected_hash = fmt::format("{}", chesslib::board {}.hash());
+    CHECK(parsed.hash == expected_hash);
+}
+
+TEST_CASE("server: position hash missing or malformed fen returns 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"pos_hash_bad_fen"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "pos-hash-bad-fen");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18168};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const no_param = cli.Get("/api/positions/hash");
+    auto const empty_param = cli.Get("/api/positions/hash?fen=");
+    auto const malformed = cli.Get("/api/positions/hash?fen=not_a_fen");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(no_param != nullptr);
+    REQUIRE(empty_param != nullptr);
+    REQUIRE(malformed != nullptr);
+    CHECK(no_param->status == 400);
+    CHECK(empty_param->status == 400);
+    CHECK(malformed->status == 400);
+    CHECK(no_param->body == R"({"error":"invalid fen"})");
+    CHECK(empty_param->body == R"({"error":"invalid fen"})");
+    CHECK(malformed->body == R"({"error":"invalid fen"})");
 }
 
 // ─── Apply-move endpoint tests ────────────────────────────────────────────────
