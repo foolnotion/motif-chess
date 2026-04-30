@@ -594,6 +594,25 @@ TEST_CASE("opening_stats::query with orphan position row still counts unique gam
     CHECK(cont.frequency == 1);
 }
 
+TEST_CASE("opening_stats::query counts terminal positions in total_games", "[motif-search][opening_stats]")
+{
+    tmp_dir const tdir {"terminal_total_games"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "terminal-total-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(
+        *manager,
+        {
+            make_game({.sans = {"e4", "e5"}, .result = "1-0", .white_elo = white_elo_high, .black_elo = black_elo_high}),
+        });
+
+    auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 1);
+    CHECK(stats->continuations.empty());
+}
+
 TEST_CASE("rebuild_position_store makes total_games consistent with game count", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"rebuild_consistency"};
