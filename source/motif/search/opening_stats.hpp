@@ -34,6 +34,7 @@ struct stats
 {
     stats() = default;
 
+    std::uint32_t total_games {};
     std::vector<continuation> continuations;
 };
 

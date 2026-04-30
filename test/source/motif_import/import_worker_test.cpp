@@ -477,7 +477,7 @@ TEST_CASE("import_worker: game without Elo tags stores null elo", "[motif-import
 
 // ── Zero-move game ───────────────────────────────────────────────────────────
 
-TEST_CASE("import_worker: header-only game inserts game row with starting position", "[motif-import]")
+TEST_CASE("import_worker: header-only game is rejected as empty_game", "[motif-import]")
 {
     tmp_dir const tdir {"zero_moves"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
@@ -487,16 +487,8 @@ TEST_CASE("import_worker: header-only game inserts game row with starting positi
     auto game = make_game("Header White", "Header Black", pgn::result::unknown, {});
 
     auto res = worker.process(game);
-    REQUIRE(res.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(res->positions_inserted == 1);  // starting position only
-
-    auto game_row = mgr.store().get(res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
-    REQUIRE(game_row.has_value());
-
-    auto count = mgr.positions().row_count();
-    REQUIRE(count.has_value());
-    CHECK(*count == 1);  // NOLINT(bugprone-unchecked-optional-access)
+    REQUIRE_FALSE(res.has_value());
+    CHECK(res.error() == motif::import::error_code::empty_game);
 
     mgr.close();
 }

@@ -170,6 +170,7 @@ struct opening_continuation_response
 
 struct opening_stats_response
 {
+    std::uint32_t total_games {};
     std::vector<opening_continuation_response> continuations;
 };
 
@@ -481,7 +482,7 @@ auto to_game_list_entry_response(motif::db::game_list_entry const& src) -> detai
     for (auto const& continuation : source.continuations) {
         continuations.push_back(to_opening_continuation_response(continuation));
     }
-    return detail::opening_stats_response {.continuations = std::move(continuations)};
+    return detail::opening_stats_response {.total_games = source.total_games, .continuations = std::move(continuations)};
 }
 
 auto generate_import_id() -> std::string
@@ -1247,6 +1248,10 @@ void server::impl::setup_routes()
                              set_json_error(res, http_bad_request, "pgn parse error: invalid SAN move");
                              return;
                          }
+                         if (worker_result.error() == motif::import::error_code::empty_game) {
+                             set_json_error(res, http_bad_request, "game has no moves");
+                             return;
+                         }
                          set_json_error(res, http_internal_error, "game creation failed");
                          return;
                      }
@@ -1257,6 +1262,7 @@ void server::impl::setup_routes()
                      // flip to 'manual' provenance now.
                      auto prov_res = database.store().set_manual_provenance(game_id, req_body.source_label, review_status);
                      if (!prov_res) {
+                         static_cast<void>(database.positions().delete_by_game_id(game_id));
                          static_cast<void>(database.store().remove(game_id));
                          set_json_error(res, http_internal_error, "game creation failed");
                          return;
@@ -1293,6 +1299,18 @@ void server::impl::setup_routes()
                 res.set_content(body, "application/json");
                 res.status = http_ok;
             });
+
+    svr.Post("/api/positions/rebuild",
+             [this](httplib::Request const& /*req*/, httplib::Response& res) -> void
+             {
+                 std::scoped_lock const lock {database_mutex};
+                 auto rebuild_res = database.rebuild_position_store();
+                 if (!rebuild_res) {
+                     set_json_error(res, http_internal_error, "position store rebuild failed");
+                     return;
+                 }
+                 res.status = http_no_content;
+             });
 
     svr.Patch("/api/games/:id",
               [this](httplib::Request const& req, httplib::Response& res) -> void
@@ -1404,9 +1422,10 @@ void server::impl::setup_routes()
                            return;
                        }
 
-                       // Rebuild DuckDB position store to remove deleted game's position rows.
-                       // position_store has no delete-by-game-id API; rebuild is the safe path (NFR09).
-                       static_cast<void>(database.rebuild_position_store(/*sort_by_zobrist=*/false));
+                       // Remove deleted game's position rows from DuckDB.
+                       // position_store has no bulk delete API; delete_by_game_id
+                       // is cheaper than a full rebuild for a single game.
+                       static_cast<void>(database.positions().delete_by_game_id(*game_id));
                    }
 
                    res.status = http_no_content;

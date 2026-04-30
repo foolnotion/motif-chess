@@ -1258,7 +1258,7 @@ TEST_CASE("server: opening stats returns empty for unknown position", "[motif-ht
 
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
-    CHECK(res->body == R"({"continuations":[]})");
+    CHECK(res->body == R"({"total_games":0,"continuations":[]})");
 }
 
 // NOLINTBEGIN(readability-function-cognitive-complexity)

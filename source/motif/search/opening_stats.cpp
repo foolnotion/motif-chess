@@ -157,6 +157,9 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
         return stats {};
     }
 
+    auto output = stats {};
+    output.total_games = static_cast<std::uint32_t>(opening_moves->size());
+
     auto position = chesslib::board {};
     bool position_set = false;
     for (auto const& move_row : *opening_moves) {
@@ -222,7 +225,6 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
         }
     }
 
-    auto output = stats {};
     output.continuations.reserve(grouped.size());
 
     for (auto const& [encoded_move, aggregate] : grouped) {

@@ -18,6 +18,7 @@ enum class error_code : std::uint8_t
     parse_error,
     duplicate,
     not_found,
+    empty_game,
 };
 
 template<typename T>
@@ -40,6 +41,8 @@ using result = tl::expected<T, error_code>;
             return "duplicate";
         case error_code::not_found:
             return "not_found";
+        case error_code::empty_game:
+            return "empty_game";
     }
 
     return "unknown";
