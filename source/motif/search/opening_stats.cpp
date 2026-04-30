@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -158,7 +159,6 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
     }
 
     auto output = stats {};
-    output.total_games = static_cast<std::uint32_t>(opening_moves->size());
 
     auto position = chesslib::board {};
     bool position_set = false;
@@ -193,6 +193,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
     auto grouped = std::map<std::uint16_t, continuation_aggregate> {};
     auto eco_lookup = std::map<std::string, std::string, std::less<>> {};
     auto seen = std::unordered_map<continuation_key, bool, continuation_key_hash> {};
+    auto unique_game_ids = std::unordered_set<std::uint32_t> {};
 
     for (auto const& context : *continuation_contexts) {
         auto const key = continuation_key {.game_id = context.game_id, .encoded_move = context.encoded_move};
@@ -200,6 +201,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
             continue;
         }
         seen.emplace(key, true);
+        unique_game_ids.insert(context.game_id);
 
         auto& aggregate = grouped.try_emplace(context.encoded_move, continuation_aggregate {}).first->second;
         aggregate.encoded_move = context.encoded_move;
@@ -225,6 +227,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
         }
     }
 
+    output.total_games = static_cast<std::uint32_t>(unique_game_ids.size());
     output.continuations.reserve(grouped.size());
 
     for (auto const& [encoded_move, aggregate] : grouped) {

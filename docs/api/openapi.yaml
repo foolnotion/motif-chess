@@ -286,6 +286,7 @@ paths:
               examples:
                 typical:
                   value:
+                    total_games: 150
                     continuations:
                       - san: e4
                         result_hash: '9999999999999'
@@ -307,6 +308,28 @@ paths:
                 invalid_hash:
                   value:
                     error: invalid zobrist hash
+
+  /api/positions/rebuild:
+    post:
+      operationId: rebuildPositionStore
+      summary: Rebuild the DuckDB position store from SQLite
+      description: >-
+        Drops and rebuilds the DuckDB position table from all games currently stored
+        in SQLite. Useful for repairing consistency after data corruption or
+        manual database edits.
+      responses:
+        '204':
+          description: Position store rebuilt successfully
+        '500':
+          description: Rebuild failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                rebuild_failed:
+                  value:
+                    error: position store rebuild failed
 
   /api/imports:
     post:
@@ -607,8 +630,8 @@ paths:
         - Duplicate games (same moves and metadata as an existing manual game)
           return HTTP 409.
         - Malformed or multi-game PGN returns HTTP 400.
-        - The optional `review_status` field must be one of `new`, `reviewed`,
-          or `needs_review`; defaults to `new` when omitted.
+        - The optional `review_status` field must be one of `new`, `needs_review`,
+          `studied`, or `archived`; defaults to `new` when omitted.
       requestBody:
         required: true
         content:
@@ -629,7 +652,7 @@ paths:
                   review_status: new
       responses:
         '201':
-          description: Game created; returns the new game ID and full record
+          description: Game created; returns the new game ID and provenance
           content:
             application/json:
               schema:
@@ -638,19 +661,10 @@ paths:
                 typical:
                   value:
                     id: 99
-                    game:
-                      id: 99
-                      white:
-                        name: Alice
-                      black:
-                        name: Bob
-                      result: '1-0'
-                      moves: [20289]
-                      provenance:
-                        source_type: manual
-                        review_status: new
+                    source_type: manual
+                    review_status: new
         '400':
-          description: Missing or malformed PGN, invalid SAN, or invalid review_status
+          description: Missing or malformed PGN, invalid SAN, invalid review_status, or game has no moves
           content:
             application/json:
               schema:
@@ -665,6 +679,9 @@ paths:
                 invalid_review_status:
                   value:
                     error: invalid review_status
+                empty_game:
+                  value:
+                    error: game has no moves
         '409':
           description: A game with identical moves and metadata already exists
           content:
@@ -1012,10 +1029,10 @@ paths:
         in the request body are changed; absent fields are left unchanged.
 
         - Only games with `source_type: manual` may be patched; attempting to
-          patch an `imported` game returns HTTP 403.
+          patch an `imported` game returns HTTP 409.
         - All string fields are trimmed; empty strings are rejected with HTTP 400.
         - `result` must be one of `1-0`, `0-1`, `1/2-1/2`, or `*`.
-        - `review_status` must be one of `new`, `reviewed`, or `needs_review`.
+        - `review_status` must be one of `new`, `needs_review`, `studied`, or `archived`.
       parameters:
         - name: id
           in: path
@@ -1044,9 +1061,9 @@ paths:
                 value:
                   notes: Blundered the queen on move 20
               update_review:
-                summary: Mark game as reviewed
+                summary: Mark game as studied
                 value:
-                  review_status: reviewed
+                  review_status: studied
       responses:
         '200':
           description: Updated full game record
@@ -1066,7 +1083,7 @@ paths:
                     moves: [20289]
                     provenance:
                       source_type: manual
-                      review_status: reviewed
+                      review_status: studied
         '400':
           description: Invalid game ID, empty string field, or invalid enum value
           content:
@@ -1083,8 +1100,8 @@ paths:
                 empty_field:
                   value:
                     error: white name must not be empty
-        '403':
-          description: Game is not user-added (source_type is not manual)
+        '409':
+          description: Game is not user-added (source_type is not manual) or patch would create a duplicate
           content:
             application/json:
               schema:
@@ -1092,7 +1109,10 @@ paths:
               examples:
                 not_editable:
                   value:
-                    error: game is not editable
+                    error: game is not user-added and cannot be modified
+                duplicate:
+                  value:
+                    error: patch would create a duplicate game
         '404':
           description: Game not found
           content:
@@ -1108,11 +1128,10 @@ paths:
       operationId: deleteGame
       summary: Delete a user-added game
       description: |-
-        Permanently removes a `manual` game and rebuilds the position store to
-        ensure DuckDB consistency.
+        Permanently removes a `manual` game and its position rows from DuckDB.
 
         - Only games with `source_type: manual` may be deleted; attempting to
-          delete an `imported` game returns HTTP 403.
+          delete an `imported` game returns HTTP 409.
       parameters:
         - name: id
           in: path
@@ -1138,7 +1157,7 @@ paths:
                 invalid_id:
                   value:
                     error: invalid game id
-        '403':
+        '409':
           description: Game is not user-added (source_type is not manual)
           content:
             application/json:
@@ -1147,7 +1166,7 @@ paths:
               examples:
                 not_editable:
                   value:
-                    error: game is not editable
+                    error: game is not user-added and cannot be deleted
         '404':
           description: Game not found
           content:
@@ -1334,8 +1353,11 @@ components:
 
     OpeningStats:
       type: object
-      required: [continuations]
+      required: [total_games, continuations]
       properties:
+        total_games:
+          type: integer
+          description: Total number of position rows at the queried Zobrist hash (i.e. total games reaching this position)
         continuations:
           type: array
           items:
@@ -1391,7 +1413,7 @@ components:
           description: Human-readable label for the import source; omitted for manual games
         review_status:
           type: string
-          enum: [new, reviewed, needs_review]
+          enum: [new, needs_review, studied, archived]
           description: User-assigned review status; defaults to `new`
 
     CreateGameRequest:
@@ -1401,21 +1423,33 @@ components:
         pgn:
           type: string
           description: PGN text of a single game
+        source_label:
+          type: string
+          description: Human-readable label for the game source; stored with provenance
         review_status:
           type: string
-          enum: [new, reviewed, needs_review]
+          enum: [new, needs_review, studied, archived]
           default: new
           description: Initial review status; defaults to `new` when omitted
 
     CreateGameResponse:
       type: object
-      required: [id, game]
+      required: [id, source_type, review_status]
       properties:
         id:
           type: integer
           description: Database ID of the newly created game
-        game:
-          $ref: '#/components/schemas/GameFull'
+        source_type:
+          type: string
+          enum: [manual]
+          description: Always `manual` for games created via this endpoint
+        source_label:
+          type: string
+          description: Human-readable label for the game source; omitted when not provided
+        review_status:
+          type: string
+          enum: [new, needs_review, studied, archived]
+          description: Review status of the newly created game
 
     PatchGameRequest:
       type: object
@@ -1444,7 +1478,7 @@ components:
           description: Personal notes stored as a reserved PGN tag
         review_status:
           type: string
-          enum: [new, reviewed, needs_review]
+          enum: [new, needs_review, studied, archived]
           description: Review status to set
 
     GameListEntry:
