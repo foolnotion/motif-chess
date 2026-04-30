@@ -1,0 +1,51 @@
+/**
+ * @page product_overview Product Overview
+ *
+ * @section product_overview_goal Goal
+ *
+ * Motif Chess helps a single user build and explore a local chess database.
+ * The product focuses on fast import, durable local storage, position search,
+ * opening exploration, and engine-assisted analysis.
+ *
+ * @section product_overview_capabilities Current capabilities
+ *
+ * - Import PGN collections from disk or browser upload.
+ * - Resume or monitor imports through SSE progress updates.
+ * - Search positions by Zobrist hash.
+ * - Query opening continuation statistics from any position.
+ * - Add, edit, export, and delete personal games.
+ * - Register UCI engines and stream live analysis.
+ * - Run locally from source or Docker.
+ *
+ * @section product_overview_personas Intended user
+ *
+ * The current product is optimized for a single local user:
+ *
+ * - a player importing personal or reference PGN collections;
+ * - an analyst exploring opening trends from a current board position;
+ * - a developer or advanced user running the backend locally.
+ *
+ * Authentication, cloud sync, and multi-user access are intentionally out of
+ * scope for the current version.
+ *
+ * @section product_overview_frontend Frontend shape
+ *
+ * The current UI is a web workspace organized around six panels:
+ *
+ * - board workspace;
+ * - opening explorer;
+ * - game list;
+ * - notation;
+ * - engine analysis;
+ * - import and backend status.
+ *
+ * The frontend consumes the HTTP API defined in `docs/api/openapi.yaml`.
+ *
+ * @section product_overview_nonfunctional Non-functional priorities
+ *
+ * - local-first durability;
+ * - clear, testable API boundaries;
+ * - fast position and opening-stat queries;
+ * - straightforward deployment and release workflow;
+ * - maintainable code with automated tests.
+ */
