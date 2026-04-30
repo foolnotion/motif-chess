@@ -104,6 +104,10 @@ import_worker::import_worker(motif::db::game_store& store, motif::db::position_s
 
 auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
 {
+    if (pgn_game.moves.empty()) {
+        return tl::unexpected(error_code::empty_game);
+    }
+
     if (pgn_game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
         return tl::unexpected(error_code::io_failure);
     }

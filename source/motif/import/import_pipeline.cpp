@@ -127,6 +127,10 @@ struct pipeline_slot
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
 {
+    if (pgn_game.moves.empty()) {
+        return tl::unexpected {error_code::empty_game};
+    }
+
     auto const& tags = pgn_game.tags;
 
     auto const white_elo_opt = parse_elo(find_tag(tags, "WhiteElo"));

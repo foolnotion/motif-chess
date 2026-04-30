@@ -110,6 +110,10 @@ auto narrow_elo(std::optional<std::int32_t> const& elo) -> result<std::optional<
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t result_code) -> result<std::vector<position_row>>
 {
+    if (game.moves.empty()) {
+        return std::vector<position_row> {};
+    }
+
     if (game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
         return tl::unexpected {error_code::io_failure};
     }

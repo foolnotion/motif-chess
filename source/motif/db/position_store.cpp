@@ -289,4 +289,33 @@ auto position_store::sample_zobrist_hashes(std::size_t const limit, std::uint64_
     return hashes;
 }
 
+auto position_store::delete_by_game_id(std::uint32_t const game_id) -> result<void>
+{
+    duckdb_result res {};
+    std::ostringstream sql;
+    sql << "DELETE FROM position WHERE game_id = CAST(" << game_id << " AS UINTEGER)";
+    if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
+        duckdb_destroy_result(&res);
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    duckdb_destroy_result(&res);
+    return {};
+}
+
+auto position_store::count_by_zobrist(std::uint64_t const zobrist_hash) const -> result<std::int64_t>
+{
+    duckdb_result res {};
+    std::ostringstream sql;
+    sql << "SELECT COUNT(*) FROM position WHERE zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT)";
+    if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
+        duckdb_destroy_result(&res);
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const count = duckdb_value_int64(&res, 0, 0);
+    duckdb_destroy_result(&res);
+    return count;
+}
+
 }  // namespace motif::db
