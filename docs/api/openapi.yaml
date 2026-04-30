@@ -1357,7 +1357,7 @@ components:
       properties:
         total_games:
           type: integer
-          description: Total number of position rows at the queried Zobrist hash (i.e. total games reaching this position)
+          description: Total number of unique stored games that reached the queried position
         continuations:
           type: array
           items:
