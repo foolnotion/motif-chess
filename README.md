@@ -50,6 +50,48 @@ ctest --test-dir build/dev-sanitize
 
 The binary is produced at `build/dev/bin/motif_http_server`.
 
+## Docker
+
+Published images live at `quay.io/motif-chess/motif-server`.
+
+### Pull a released image
+
+```sh
+docker pull quay.io/motif-chess/motif-server:v0.1.0
+```
+
+### Run the server in Docker
+
+```sh
+mkdir -p "$HOME/chess/my-db"
+
+docker run --rm \
+  -p 8080:8080 \
+  -v "$HOME/chess/my-db:/data" \
+  quay.io/motif-chess/motif-server:v0.1.0 \
+  motif_http_server --db /data --host 0.0.0.0 --port 8080
+```
+
+Notes:
+
+- mount a host directory so the SQLite and DuckDB files persist across container restarts
+- use `--host 0.0.0.0` inside the container so the port mapping is reachable from the host
+- replace `v0.1.0` with `latest` if you explicitly want the newest published image
+
+### Build the Docker image locally with Nix
+
+```sh
+nix build .#docker --out-link docker-image
+docker load < docker-image
+mkdir -p "$PWD/tmp-db"
+
+docker run --rm \
+  -p 8080:8080 \
+  -v "$PWD/tmp-db:/data" \
+  motif-chess:latest \
+  motif_http_server --db /data --host 0.0.0.0 --port 8080
+```
+
 ## Usage
 
 ### Starting the server
@@ -81,15 +123,18 @@ motif_http_server --db ~/chess/my-db --port 9000 \
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Health check |
+| `GET` | `/api/positions/legal-moves?fen=` | Legal moves for a position |
+| `POST` | `/api/positions/apply-move` | Apply a UCI move and return the resulting FEN |
+| `GET` | `/api/positions/hash?fen=` | Zobrist hash for a FEN position |
+| `GET` | `/api/positions/:hash` | Games containing a position |
+| `POST` | `/api/positions/rebuild` | Rebuild the DuckDB position store from SQLite |
+| `GET` | `/api/openings/:hash/stats` | Opening continuation statistics plus `total_games` |
 | `POST` | `/api/imports` | Start a PGN import by filesystem path |
 | `POST` | `/api/imports/upload` | Start a PGN import by file upload |
 | `GET` | `/api/imports/:id/progress` | SSE stream of import progress |
-| `GET` | `/api/positions/hash?fen=` | Zobrist hash for a FEN position |
-| `GET` | `/api/positions/:hash` | Games containing a position |
-| `GET` | `/api/openings/:hash/stats` | Opening continuation statistics |
-| `GET` | `/api/positions/legal-moves?fen=` | Legal moves for a position |
-| `POST` | `/api/positions/apply-move` | Apply a UCI move, get resulting FEN |
+| `DELETE` | `/api/imports/:id` | Request cancellation of an in-progress import |
 | `GET` | `/api/games` | List games (filterable by player, result) |
+| `GET` | `/api/games/count` | Total number of games in the database |
 | `GET` | `/api/games/:id` | Full game record |
 | `GET` | `/api/games/:id/positions` | FEN + hash sequence for a game |
 | `GET` | `/api/games/:id/pgn` | Game as PGN text |
