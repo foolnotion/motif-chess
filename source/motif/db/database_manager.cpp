@@ -125,7 +125,17 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
 
     chesslib::board board;
     std::vector<position_row> batch;
-    batch.reserve(game.moves.size());
+    batch.reserve(game.moves.size() + 1);
+
+    // Starting position row (ply = 0) so root-hash queries find data
+    batch.push_back(position_row {
+        .zobrist_hash = board.hash(),
+        .game_id = game_id,
+        .ply = 0,
+        .result = result_code,
+        .white_elo = *white_elo,
+        .black_elo = *black_elo,
+    });
 
     for (std::size_t i = 0; i < game.moves.size(); ++i) {
         auto const decoded = chesslib::codec::decode(game.moves[i]);

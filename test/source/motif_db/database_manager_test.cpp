@@ -349,7 +349,7 @@ TEST_CASE("database_manager::rebuild_position_store after N-move game returns N 
     auto count = mgr->positions().row_count();
     REQUIRE(count.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(*count == std::ssize(moves));
+    CHECK(*count == std::ssize(moves) + 1);
 }
 
 TEST_CASE("database_manager::rebuild_position_store is idempotent", "[motif-db][database_manager][duckdb]")
@@ -387,7 +387,7 @@ TEST_CASE("database_manager::rebuild_position_store is idempotent", "[motif-db][
     auto count = mgr->positions().row_count();
     REQUIRE(count.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(*count == 1);
+    CHECK(*count == 2);
 }
 
 TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo", "[motif-db][database_manager][duckdb]")
@@ -473,6 +473,6 @@ TEST_CASE("database_manager::rebuild_position_store defaults to sorted-by-zobris
     REQUIRE(rebuild_res.has_value());
 
     auto hashes = read_position_hashes(tdir.path / "positions.duckdb");
-    REQUIRE(hashes.size() == 2);
+    REQUIRE(hashes.size() == 4);
     CHECK(std::ranges::is_sorted(hashes));
 }
