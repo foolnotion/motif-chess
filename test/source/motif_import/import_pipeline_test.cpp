@@ -444,7 +444,7 @@ TEST_CASE("import_pipeline: run imports games and deletes checkpoint on success"
     CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
     auto row_count = mgr->positions().row_count();
     REQUIRE(row_count.has_value());
-    CHECK(*row_count == 13);
+    CHECK(*row_count == 16);
 
     mgr->close();
     std::filesystem::remove_all(tmp);

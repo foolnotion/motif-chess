@@ -186,7 +186,10 @@ auto expected_hashes(std::vector<pgn::move_node> const& moves) -> std::vector<st
 {
     auto board = chesslib::board {};
     auto hashes = std::vector<std::uint64_t> {};
-    hashes.reserve(moves.size());
+    hashes.reserve(moves.size() + 1);
+
+    // Starting position (ply = 0)
+    hashes.push_back(board.hash());
 
     for (auto const& move_node : moves) {
         auto move = chesslib::san::from_string(board, move_node.san);
@@ -240,7 +243,7 @@ auto check_stored_positions(std::vector<stored_position_row> const& positions,
     for (std::size_t index = 0; index < positions.size(); ++index) {
         require_test(positions[index].zobrist_hash == hashes[index], "zobrist hash mismatch");
         require_test(positions[index].game_id == game_id, "game id mismatch");
-        require_test(positions[index].ply == static_cast<std::uint16_t>(index + 1), "ply mismatch");
+        require_test(positions[index].ply == static_cast<std::uint16_t>(index), "ply mismatch");
         require_test(positions[index].result == 0, "result mismatch");
         require_test(positions[index].white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_white_elo)},
                      "white elo mismatch");
@@ -305,7 +308,7 @@ TEST_CASE("import_worker: valid 5-move game stores metadata and position rows", 
 
     auto res = worker.process(game);
     REQUIRE(res.has_value());  // NOLINT(bugprone-unchecked-optional-access)
-    CHECK(res->positions_inserted == 5);  // NOLINT(bugprone-unchecked-optional-access)
+    CHECK(res->positions_inserted == 5 + 1);  // NOLINT(bugprone-unchecked-optional-access)
 
     auto stored_game = mgr.store().get(res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
     REQUIRE(stored_game.has_value());
@@ -313,7 +316,7 @@ TEST_CASE("import_worker: valid 5-move game stores metadata and position rows", 
 
     auto count = mgr.positions().row_count();
     REQUIRE(count.has_value());
-    CHECK(*count == 5);  // NOLINT(bugprone-unchecked-optional-access)
+    CHECK(*count == 5 + 1);  // NOLINT(bugprone-unchecked-optional-access)
 
     auto const game_id = res->game_id;  // NOLINT(bugprone-unchecked-optional-access)
     mgr.close();
@@ -411,7 +414,7 @@ TEST_CASE("import_worker: %clk annotation is silently ignored", "[motif-import]"
     auto res = worker.process(game);
     REQUIRE(res.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(res->positions_inserted == 1);
+    CHECK(res->positions_inserted == 2);  // starting position + 1 move
 
     mgr.close();
 }
@@ -454,23 +457,27 @@ TEST_CASE("import_worker: game without Elo tags stores null elo", "[motif-import
     auto res = worker.process(game);
     REQUIRE(res.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(res->positions_inserted == 1);
+    CHECK(res->positions_inserted == 2);  // starting position + 1 move
 
     auto count = mgr.positions().row_count();
     REQUIRE(count.has_value());
-    CHECK(*count == 1);  // NOLINT(bugprone-unchecked-optional-access)
+    CHECK(*count == 2);  // NOLINT(bugprone-unchecked-optional-access)
 
     mgr.close();
 
     auto const positions = load_position_rows(tdir.path / "positions.duckdb");
-    REQUIRE(positions.size() == 1);
+    REQUIRE(positions.size() == 2);
+    CHECK(positions[0].ply == 0);
     CHECK_FALSE(positions[0].white_elo.has_value());
     CHECK_FALSE(positions[0].black_elo.has_value());
+    CHECK(positions[1].ply == 1);
+    CHECK_FALSE(positions[1].white_elo.has_value());
+    CHECK_FALSE(positions[1].black_elo.has_value());
 }
 
 // ── Zero-move game ───────────────────────────────────────────────────────────
 
-TEST_CASE("import_worker: header-only game inserts game row, zero position rows", "[motif-import]")
+TEST_CASE("import_worker: header-only game inserts game row with starting position", "[motif-import]")
 {
     tmp_dir const tdir {"zero_moves"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
@@ -482,14 +489,14 @@ TEST_CASE("import_worker: header-only game inserts game row, zero position rows"
     auto res = worker.process(game);
     REQUIRE(res.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(res->positions_inserted == 0);
+    CHECK(res->positions_inserted == 1);  // starting position only
 
     auto game_row = mgr.store().get(res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
     REQUIRE(game_row.has_value());
 
     auto count = mgr.positions().row_count();
     REQUIRE(count.has_value());
-    CHECK(*count == 0);  // NOLINT(bugprone-unchecked-optional-access)
+    CHECK(*count == 1);  // NOLINT(bugprone-unchecked-optional-access)
 
     mgr.close();
 }

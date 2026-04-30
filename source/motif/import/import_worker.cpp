@@ -121,7 +121,17 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     std::vector<std::uint16_t> encoded_moves;
     std::vector<motif::db::position_row> position_rows;
     encoded_moves.reserve(pgn_game.moves.size());
-    position_rows.reserve(pgn_game.moves.size());
+    position_rows.reserve(pgn_game.moves.size() + 1);
+
+    // Starting position row (ply = 0) so root-hash queries find data
+    position_rows.push_back(motif::db::position_row {
+        .zobrist_hash = board.hash(),
+        .game_id = 0,
+        .ply = 0,
+        .result = result_int,
+        .white_elo = white_elo,
+        .black_elo = black_elo,
+    });
 
     for (auto const& node : pgn_game.moves) {
         auto move_res = chesslib::san::from_string(board, node.san);
