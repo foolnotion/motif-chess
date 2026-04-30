@@ -440,3 +440,187 @@ TEST_CASE("opening_stats::query performance on sorted position store", "[perform
 {
     run_opening_stats_perf_test();
 }
+
+TEST_CASE("opening_stats::query total_games counts unique game ids", "[motif-search][opening_stats]")
+{
+    tmp_dir const tdir {"total_games_unique"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "total-games-db");
+    REQUIRE(manager.has_value());
+
+    auto const start_hash = chesslib::board {}.hash();
+
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight Opening"}}),
+                                 make_game({.sans = {"e4", "c5", "Nf3"},
+                                            .result = "0-1",
+                                            .white_elo = white_elo_mid,
+                                            .black_elo = std::nullopt,
+                                            .eco = std::string {"B20"},
+                                            .opening_name = std::string {"Sicilian Defense"}}),
+                                 make_game({.sans = {"e4", "e5"},
+                                            .result = "1/2-1/2",
+                                            .white_elo = std::nullopt,
+                                            .black_elo = black_elo_other,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight Opening"}}),
+                             });
+
+    auto stats = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats.has_value());
+
+    auto const game_count = manager->store().count_games();
+    REQUIRE(game_count.has_value());
+    CHECK(stats->total_games == static_cast<std::uint32_t>(*game_count));
+
+    CHECK(stats->continuations.size() == 1);
+    auto const& e4 = stats->continuations.front();
+    CHECK(e4.san == "e4");
+    CHECK(e4.frequency == 3);
+}
+
+TEST_CASE("opening_stats::query total_games excludes duplicate position rows", "[motif-search][opening_stats]")
+{
+    tmp_dir const tdir {"total_games_dedup"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "dedup-db");
+    REQUIRE(manager.has_value());
+
+    auto const start_hash = chesslib::board {}.hash();
+
+    insert_games_and_rebuild(
+        *manager,
+        {
+            make_game({.sans = {"e4", "e5"}, .result = "1-0", .white_elo = white_elo_high, .black_elo = black_elo_high}),
+        });
+
+    auto stats_before = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats_before.has_value());
+    CHECK(stats_before->total_games == 1);
+
+    auto count_before = manager->positions().count_by_zobrist(start_hash);
+    REQUIRE(count_before.has_value());
+    CHECK(*count_before == 1);
+
+    auto const game_id = manager->store().insert(
+        make_game({.sans = {"e4", "d5"}, .result = "0-1", .white_elo = white_elo_mid, .black_elo = black_elo_other}));
+    REQUIRE(game_id.has_value());
+
+    auto rebuilt = manager->rebuild_position_store();
+    REQUIRE(rebuilt.has_value());
+
+    auto stats_after = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats_after.has_value());
+    CHECK(stats_after->total_games == 2);
+
+    auto game_count = manager->store().count_games();
+    REQUIRE(game_count.has_value());
+    CHECK(stats_after->total_games == static_cast<std::uint32_t>(*game_count));
+}
+
+TEST_CASE("delete_by_game_id removes position rows and total_games stays consistent", "[motif-db][position_store]")
+{
+    tmp_dir const tdir {"delete_consistency"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "del-db");
+    REQUIRE(manager.has_value());
+
+    auto const start_hash = chesslib::board {}.hash();
+
+    auto game1_id = manager->store().insert(
+        make_game({.sans = {"e4", "e5", "Nf3"}, .result = "1-0", .white_elo = white_elo_high, .black_elo = black_elo_high}));
+    REQUIRE(game1_id.has_value());
+
+    auto game2_id = manager->store().insert(
+        make_game({.sans = {"e4", "c5", "Nf3"}, .result = "0-1", .white_elo = white_elo_mid, .black_elo = std::nullopt}));
+    REQUIRE(game2_id.has_value());
+
+    auto rebuilt = manager->rebuild_position_store();
+    REQUIRE(rebuilt.has_value());
+
+    auto stats_before = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats_before.has_value());
+    CHECK(stats_before->total_games == 2);
+
+    auto del_positions = manager->positions().delete_by_game_id(*game1_id);
+    REQUIRE(del_positions.has_value());
+
+    auto del_game = manager->store().remove(*game1_id);
+    REQUIRE(del_game.has_value());
+
+    auto stats_after = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats_after.has_value());
+    CHECK(stats_after->total_games == 1);
+    CHECK(stats_after->continuations.size() == 1);
+    CHECK(stats_after->continuations.front().san == "e4");
+    CHECK(stats_after->continuations.front().frequency == 1);
+}
+
+TEST_CASE("opening_stats::query with orphan position row still counts unique games", "[motif-search][opening_stats]")
+{
+    tmp_dir const tdir {"orphan_total_games"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "orphan-total-db");
+    REQUIRE(manager.has_value());
+
+    auto const start_hash = chesslib::board {}.hash();
+
+    auto game1_id = manager->store().insert(
+        make_game({.sans = {"e4", "e5", "Nf3"}, .result = "1-0", .white_elo = white_elo_high, .black_elo = black_elo_high}));
+    REQUIRE(game1_id.has_value());
+
+    auto game2_id = manager->store().insert(
+        make_game({.sans = {"e4", "c5"}, .result = "1/2-1/2", .white_elo = white_elo_mid, .black_elo = std::nullopt}));
+    REQUIRE(game2_id.has_value());
+
+    auto rebuilt = manager->rebuild_position_store();
+    REQUIRE(rebuilt.has_value());
+
+    auto removed = manager->store().remove(*game1_id);
+    REQUIRE(removed.has_value());
+
+    auto stats = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 1);
+
+    auto const& cont = stats->continuations.front();
+    CHECK(cont.san == "e4");
+    CHECK(cont.frequency == 1);
+}
+
+TEST_CASE("rebuild_position_store makes total_games consistent with game count", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"rebuild_consistency"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "rebuild-db");
+    REQUIRE(manager.has_value());
+
+    auto const start_hash = chesslib::board {}.hash();
+
+    constexpr int game_count {5};
+    for (int i = 0; i < game_count; ++i) {
+        auto id = manager->store().insert(make_game({.sans = {"e4", "e5"}, .result = "1-0", .white_elo = 2000 + i, .black_elo = 1900 + i}));
+        REQUIRE(id.has_value());
+    }
+
+    auto rebuilt = manager->rebuild_position_store();
+    REQUIRE(rebuilt.has_value());
+
+    auto stats = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == game_count);
+
+    auto count = manager->store().count_games();
+    REQUIRE(count.has_value());
+    CHECK(stats->total_games == static_cast<std::uint32_t>(*count));
+
+    auto position_count = manager->positions().count_by_zobrist(start_hash);
+    REQUIRE(position_count.has_value());
+    CHECK(stats->total_games == static_cast<std::uint32_t>(*position_count));
+}
