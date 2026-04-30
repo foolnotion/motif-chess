@@ -1,7 +1,18 @@
 /**
- * @page about About
- * @section about-doxygen Doxygen documentation
- * This page is auto generated using
- * <a href="https://www.doxygen.nl/">Doxygen</a>, making use of some useful
- * <a href="https://www.doxygen.nl/manual/commands.html">special commands</a>.
+ * @page about About Motif Chess
+ *
+ * Motif Chess is a local-first chess database and analysis application.
+ * It imports PGN files, stores game metadata durably, indexes positions by
+ * Zobrist hash, exposes opening statistics, and streams engine analysis over
+ * HTTP and Server-Sent Events.
+ *
+ * Core documentation pages:
+ * - @subpage product_overview
+ * - @subpage architecture_overview
+ * - @subpage requirements_fulfillment
+ *
+ * Reference material:
+ * - OpenAPI contract: `docs/api/openapi.yaml`
+ * - Weekly engineering record: `docs/devlog/`
+ * - User/developer quickstart: `README.md`
  */
