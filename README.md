@@ -124,7 +124,7 @@ HASH=$(curl -s "http://localhost:8080/api/positions/hash?fen=rnbqkbnr%2Fpppppppp
 # 3. Explore opening statistics
 curl -s "http://localhost:8080/api/openings/$HASH/stats" | jq .
 
-# 4. Analyse with a UCI engine
+# 4. Analyze with a UCI engine
 curl -s -X POST http://localhost:8080/api/engine/engines \
   -H 'Content-Type: application/json' \
   -d '{"name":"stockfish","path":"/usr/bin/stockfish"}'
