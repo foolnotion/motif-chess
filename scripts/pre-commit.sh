@@ -4,6 +4,7 @@
 
 set -euo pipefail
 
+build_dir="build/dev"
 staged_cpp_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.cpp' '*.hpp' '*.h' 2>/dev/null || true)
 
 if [ -z "$staged_cpp_files" ]; then
@@ -14,9 +15,14 @@ echo "Running clang-format on staged files..."
 echo "$staged_cpp_files" | xargs clang-format -i
 
 echo "Running clang-tidy on staged files..."
+if [ ! -f "$build_dir/compile_commands.json" ]; then
+    echo "clang-tidy requires $build_dir/compile_commands.json; run cmake --preset=dev first." >&2
+    exit 1
+fi
+
 for f in $staged_cpp_files; do
     if [ -f "$f" ]; then
-        clang-tidy --quiet "$f" 2>/dev/null || true
+        clang-tidy --quiet -p "$build_dir" "$f"
     fi
 done
 
