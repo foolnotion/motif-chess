@@ -450,6 +450,49 @@ TEST_CASE("import_pipeline: run imports games and deletes checkpoint on success"
     std::filesystem::remove_all(tmp);
 }
 
+TEST_CASE("import_pipeline: inline path row count matches rebuild path", "[motif-import]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_parity";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    auto mgr_a = motif::db::database_manager::create(tmp / "db_a", "test");
+    REQUIRE(mgr_a.has_value());
+    motif::import::import_pipeline pipeline_a {*mgr_a};
+    auto summary_a = pipeline_a.run(pgn_file, motif::import::import_config {});
+    REQUIRE(summary_a.has_value());
+    auto const row_count_a = mgr_a->positions().row_count();
+    REQUIRE(row_count_a.has_value());
+    mgr_a->close();
+
+    constexpr motif::import::import_config rebuild_config {
+        .num_workers = 1,
+        .num_lines = 4,
+        .rebuild_positions_after_import = false,
+        .batch_size = 2,
+    };
+    auto mgr_b = motif::db::database_manager::create(tmp / "db_b", "test");
+    REQUIRE(mgr_b.has_value());
+    motif::import::import_pipeline pipeline_b {*mgr_b};
+    auto summary_b = pipeline_b.run(pgn_file, rebuild_config);
+    REQUIRE(summary_b.has_value());
+    REQUIRE(mgr_b->rebuild_position_store().has_value());
+    auto const row_count_b = mgr_b->positions().row_count();
+    REQUIRE(row_count_b.has_value());
+    mgr_b->close();
+
+    CHECK(summary_a->committed == summary_b->committed);
+    CHECK(*row_count_a == *row_count_b);
+
+    std::filesystem::remove_all(tmp);
+}
+
 TEST_CASE("import_pipeline: resume skips already-committed games (duplicate policy)", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_resume";
@@ -491,6 +534,10 @@ TEST_CASE("import_pipeline: resume skips already-committed games (duplicate poli
     REQUIRE(second_run.has_value());
     CHECK(second_run->committed == 0);
     CHECK(second_run->skipped == 3);
+
+    auto const row_count = mgr->positions().row_count();
+    REQUIRE(row_count.has_value());
+    CHECK(*row_count == 16);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
@@ -1210,6 +1257,86 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist", "[performance][query-l
     print_result(r_sorted);
 
     auto const _ = motif::import::shutdown_logging();
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("import_pipeline: inline path peak RSS on 1M", "[performance][motif-import]")
+{
+    skip_perf_unless_release_build();
+
+    auto const pgn_file = perf_pgn_path();
+    if (!std::filesystem::exists(pgn_file)) {
+        SKIP("1M-game PGN not available");
+    }
+
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_rss_inline";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "perf");
+    REQUIRE(mgr.has_value());
+
+    motif::import::import_pipeline pipeline {*mgr};
+
+    static constexpr std::size_t bytes_per_mb = 1024UZ * 1024UZ;
+    auto const rss_baseline = test_helpers::read_rss_bytes();
+    test_helpers::peak_rss_sampler const sampler;
+    auto summary = pipeline.run(pgn_file, motif::import::import_config {});
+    auto const peak_rss = sampler.peak();
+
+    REQUIRE(summary.has_value());
+    auto const delta_mb = peak_rss > rss_baseline ? (peak_rss - rss_baseline) / bytes_per_mb : 0;
+    std::cout << "\n=== import_pipeline: inline path peak RSS on 1M ===\n"
+              << "  elapsed:      " << summary->elapsed.count() << " ms\n"
+              << "  committed:    " << summary->committed << "\n"
+              << "  baseline RSS: " << rss_baseline / bytes_per_mb << " MB\n"
+              << "  peak RSS:     " << peak_rss / bytes_per_mb << " MB\n"
+              << "  delta:        " << delta_mb << " MB\n";
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("import_pipeline: rebuild path peak RSS on 1M", "[performance][motif-import]")
+{
+    skip_perf_unless_release_build();
+
+    auto const pgn_file = perf_pgn_path();
+    if (!std::filesystem::exists(pgn_file)) {
+        SKIP("1M-game PGN not available");
+    }
+
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_rss_rebuild";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "perf");
+    REQUIRE(mgr.has_value());
+
+    motif::import::import_pipeline pipeline {*mgr};
+
+    constexpr motif::import::import_config sqlite_only {
+        .rebuild_positions_after_import = false,
+    };
+
+    static constexpr std::size_t bytes_per_mb = 1024UZ * 1024UZ;
+    auto const rss_baseline = test_helpers::read_rss_bytes();
+    test_helpers::peak_rss_sampler const sampler;
+    auto summary = pipeline.run(pgn_file, sqlite_only);
+    REQUIRE(summary.has_value());
+    auto rebuild_res = mgr->rebuild_position_store();
+    REQUIRE(rebuild_res.has_value());
+    auto const peak_rss = sampler.peak();
+
+    auto const delta_mb = peak_rss > rss_baseline ? (peak_rss - rss_baseline) / bytes_per_mb : 0;
+    std::cout << "\n=== import_pipeline: rebuild path peak RSS on 1M ===\n"
+              << "  elapsed:      " << summary->elapsed.count() << " ms\n"
+              << "  committed:    " << summary->committed << "\n"
+              << "  baseline RSS: " << rss_baseline / bytes_per_mb << " MB\n"
+              << "  peak RSS:     " << peak_rss / bytes_per_mb << " MB\n"
+              << "  delta:        " << delta_mb << " MB\n";
+
     mgr->close();
     std::filesystem::remove_all(tmp);
 }
