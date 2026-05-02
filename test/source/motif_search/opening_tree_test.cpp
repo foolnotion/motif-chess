@@ -598,6 +598,62 @@ TEST_CASE("opening_tree::open from starting position aggregates first moves corr
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("opening_tree::open from starting position on real corpus", "[performance][motif-search][opening_tree]")
+{
+    if (is_sanitized_build) {
+        SKIP("performance checks are skipped in sanitize builds");
+    }
+
+#ifndef NDEBUG
+    SKIP("performance checks run only in release builds");
+#endif
+
+    auto const pgn_file = perf_pgn_path();
+    if (!std::filesystem::exists(pgn_file)) {
+        SKIP("PGN corpus not available");
+    }
+
+    tmp_dir const tdir {"starting_pos_real"};
+
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "opening-tree-startpos");
+    REQUIRE(manager.has_value());
+
+    auto init_log = motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
+    REQUIRE(init_log.has_value());
+
+    motif::import::import_pipeline pipeline {*manager};
+    auto summary = pipeline.run(pgn_file, motif::import::import_config {});
+    REQUIRE(summary.has_value());
+    REQUIRE(summary->committed > 0);
+
+    auto const starting_hash = hash_after_sans({});
+    auto tree_res = motif::search::opening_tree::open(*manager, starting_hash, 1);
+    REQUIRE(tree_res.has_value());
+
+    auto const& root = tree_res->root;
+    CHECK(root.zobrist_hash == starting_hash);
+    CHECK(root.is_expanded);
+
+    // Every committed game must pass through the starting position, so the sum
+    // of all first-move frequencies must equal the number of committed games.
+    auto total_freq = std::size_t {0};
+    for (auto const& cont : root.continuations) {
+        total_freq += cont.frequency;
+    }
+    CHECK(total_freq == summary->committed);
+
+    // Real corpora always have at least the common first moves (e4, d4, Nf3, c4, ...).
+    CHECK(root.continuations.size() >= 4);
+
+    // The most popular first move in tournament chess is always e4 or d4.
+    auto const& top = root.continuations[0];
+    CHECK((top.san == "e4" || top.san == "d4"));
+
+    auto const shutdown_result = motif::import::shutdown_logging();
+    REQUIRE(shutdown_result.has_value());
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("opening_tree::open performance on sorted position store", "[performance][motif-search][opening_tree]")
 {
     if (is_sanitized_build) {
