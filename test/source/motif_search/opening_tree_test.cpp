@@ -627,7 +627,11 @@ TEST_CASE("opening_tree::open from starting position on real corpus", "[performa
     REQUIRE(summary->committed > 0);
 
     auto const starting_hash = hash_after_sans({});
+
+    auto const start = std::chrono::steady_clock::now();
     auto tree_res = motif::search::opening_tree::open(*manager, starting_hash, 1);
+    auto const elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
     REQUIRE(tree_res.has_value());
 
     auto const& root = tree_res->root;
@@ -648,6 +652,12 @@ TEST_CASE("opening_tree::open from starting position on real corpus", "[performa
     // The most popular first move in tournament chess is always e4 or d4.
     auto const& top = root.continuations[0];
     CHECK((top.san == "e4" || top.san == "d4"));
+
+    std::cout << "\n=== opening_tree::open from starting position ===\n"
+              << "  corpus:       " << pgn_file.filename().string() << "\n"
+              << "  committed:    " << summary->committed << " games\n"
+              << "  continuations:" << root.continuations.size() << "\n"
+              << "  elapsed:      " << elapsed_ms << " ms\n";
 
     auto const shutdown_result = motif::import::shutdown_logging();
     REQUIRE(shutdown_result.has_value());
