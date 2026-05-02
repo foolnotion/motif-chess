@@ -819,65 +819,74 @@ auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) c
 
     out.reserve(game_ids.size());
 
-    auto sql = std::ostringstream {};
-    sql << R"sql(
-        SELECT
-            g.id,
-            g.eco,
-            (
-                SELECT gt.value
-                FROM game_tag gt
-                JOIN tag t ON t.id = gt.tag_id
-                WHERE gt.game_id = g.id AND t.name = 'Opening'
-                ORDER BY gt.rowid
-                LIMIT 1
-            ) AS opening_name,
-            g.moves
-        FROM game g
-        WHERE g.id IN (
-    )sql";
+    // SQLite limits the number of host parameters per statement; batch to stay within it.
+    auto const max_params = static_cast<std::size_t>(sqlite3_limit(db_, SQLITE_LIMIT_VARIABLE_NUMBER, -1));
+    auto const batch_size = max_params > 0U ? max_params : std::size_t {999};
 
-    for (std::size_t index = 0; index < game_ids.size(); ++index) {
-        if (index > 0U) {
-            sql << ',';
+    for (std::size_t batch_start = 0; batch_start < game_ids.size(); batch_start += batch_size) {
+        auto const batch_end = std::min(batch_start + batch_size, game_ids.size());
+        auto const batch_count = batch_end - batch_start;
+
+        auto sql = std::ostringstream {};
+        sql << R"sql(
+            SELECT
+                g.id,
+                g.eco,
+                (
+                    SELECT gt.value
+                    FROM game_tag gt
+                    JOIN tag t ON t.id = gt.tag_id
+                    WHERE gt.game_id = g.id AND t.name = 'Opening'
+                    ORDER BY gt.rowid
+                    LIMIT 1
+                ) AS opening_name,
+                g.moves
+            FROM game g
+            WHERE g.id IN (
+        )sql";
+
+        for (std::size_t index = 0; index < batch_count; ++index) {
+            if (index > 0U) {
+                sql << ',';
+            }
+            sql << '?';
         }
-        sql << '?';
-    }
-    sql << ')';
+        sql << ')';
 
-    auto stmt = prepare(db_, sql.str().c_str());
-    if (!stmt) {
-        return tl::unexpected {stmt.error()};
-    }
+        auto stmt = prepare(db_, sql.str().c_str());
+        if (!stmt) {
+            return tl::unexpected {stmt.error()};
+        }
 
-    for (std::size_t index = 0; index < game_ids.size(); ++index) {
-        sqlite3_bind_int64(stmt->get(), static_cast<int>(index + 1U), static_cast<std::int64_t>(game_ids[index]));
-    }
+        for (std::size_t index = 0; index < batch_count; ++index) {
+            sqlite3_bind_int64(stmt->get(), static_cast<int>(index + 1U), static_cast<std::int64_t>(game_ids[batch_start + index]));
+        }
 
-    int step_rc = SQLITE_ROW;
-    while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
-        auto const game_id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), 0));
-        auto context = game_context {};
-        context.eco = column_optional_text(stmt->get(), 1);
-        context.opening_name = column_optional_text(stmt->get(), 2);
+        int step_rc = SQLITE_ROW;
+        while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
+            auto const game_id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), 0));
+            auto context = game_context {};
+            context.eco = column_optional_text(stmt->get(), 1);
+            context.opening_name = column_optional_text(stmt->get(), 2);
 
-        auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), 3));
-        int const blob_bytes = sqlite3_column_bytes(stmt->get(), 3);
-        if (blob_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0) {
+            auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), 3));
+            int const blob_bytes = sqlite3_column_bytes(stmt->get(), 3);
+            if (blob_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0) {
+                return tl::unexpected {error_code::io_failure};
+            }
+
+            auto const move_count = static_cast<std::size_t>(blob_bytes) / sizeof(std::uint16_t);
+            context.moves.resize(move_count);
+            if (move_count > 0 && blob != nullptr) {
+                std::memcpy(context.moves.data(), blob, static_cast<std::size_t>(blob_bytes));
+            }
+
+            out.emplace(game_id, std::move(context));
+        }
+
+        if (step_rc != SQLITE_DONE) {
             return tl::unexpected {error_code::io_failure};
         }
-
-        auto const move_count = static_cast<std::size_t>(blob_bytes) / sizeof(std::uint16_t);
-        context.moves.resize(move_count);
-        if (move_count > 0 && blob != nullptr) {
-            std::memcpy(context.moves.data(), blob, static_cast<std::size_t>(blob_bytes));
-        }
-
-        out.emplace(game_id, std::move(context));
-    }
-
-    if (step_rc != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
     }
 
     return out;
