@@ -638,13 +638,13 @@ TEST_CASE("opening_tree::open from starting position on real corpus", "[performa
     CHECK(root.zobrist_hash == starting_hash);
     CHECK(root.is_expanded);
 
-    // Every committed game must pass through the starting position, so the sum
-    // of all first-move frequencies must equal the number of committed games.
+    // Every committed game passes through the starting position at least once;
+    // games that revisit it via move repetition contribute more than once.
     auto total_freq = std::size_t {0};
     for (auto const& cont : root.continuations) {
         total_freq += cont.frequency;
     }
-    CHECK(total_freq == summary->committed);
+    CHECK(total_freq >= summary->committed);
 
     // Real corpora always have at least the common first moves (e4, d4, Nf3, c4, ...).
     CHECK(root.continuations.size() >= 4);
