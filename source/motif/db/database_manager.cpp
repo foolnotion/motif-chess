@@ -440,6 +440,42 @@ auto database_manager::positions() const noexcept -> position_store const&
     return *positions_;
 }
 
+auto database_manager::sort_positions() -> result<void>
+{
+    if (duck_con_ == nullptr || !positions_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    duckdb_result tx_res {};
+    if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
+        duckdb_destroy_result(&tx_res);
+        return tl::unexpected {error_code::io_failure};
+    }
+    duckdb_destroy_result(&tx_res);
+
+    auto rollback = [this]() noexcept -> void
+    {
+        duckdb_result rollback_res {};
+        duckdb_query(duck_con_, "ROLLBACK", &rollback_res);
+        duckdb_destroy_result(&rollback_res);
+    };
+
+    if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
+        rollback();
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    duckdb_result commit_res {};
+    if (duckdb_query(duck_con_, "COMMIT", &commit_res) == DuckDBError) {
+        duckdb_destroy_result(&commit_res);
+        rollback();
+        return tl::unexpected {error_code::io_failure};
+    }
+    duckdb_destroy_result(&commit_res);
+
+    return {};
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> result<void>
 {
