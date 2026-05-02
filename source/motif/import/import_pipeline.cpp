@@ -8,6 +8,7 @@
 #include <ios>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -105,6 +106,7 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
 struct prepared_game
 {
     motif::db::game game_row;
+    std::vector<motif::db::position_row> position_rows;
 };
 
 enum class slot_state : std::uint8_t
@@ -125,7 +127,7 @@ struct pipeline_slot
 };
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
+auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<prepared_game>
 {
     if (pgn_game.moves.empty()) {
         return tl::unexpected {error_code::empty_game};
@@ -173,6 +175,20 @@ auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
     std::vector<std::uint16_t> encoded_moves;
     encoded_moves.reserve(pgn_game.moves.size());
 
+    std::vector<motif::db::position_row> position_rows;
+    std::int8_t const result_int = build_positions ? pgn_result_to_int8(pgn_game.result) : std::int8_t {0};
+    if (build_positions) {
+        position_rows.reserve(pgn_game.moves.size() + 1);
+        position_rows.push_back(motif::db::position_row {
+            .zobrist_hash = board.hash(),
+            .game_id = 0,
+            .ply = 0,
+            .result = result_int,
+            .white_elo = white_elo_opt,
+            .black_elo = black_elo_opt,
+        });
+    }
+
     for (auto const& node : pgn_game.moves) {
         auto move_result = chesslib::san::from_string(board, node.san);
         if (!move_result) {
@@ -181,10 +197,21 @@ auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
         encoded_moves.push_back(chesslib::codec::encode(*move_result));
         chesslib::move_maker mmaker {board, *move_result};
         mmaker.make();
+
+        if (build_positions) {
+            position_rows.push_back(motif::db::position_row {
+                .zobrist_hash = board.hash(),
+                .game_id = 0,
+                .ply = static_cast<std::uint16_t>(encoded_moves.size()),
+                .result = result_int,
+                .white_elo = white_elo_opt,
+                .black_elo = black_elo_opt,
+            });
+        }
     }
 
     game_row.moves = std::move(encoded_moves);
-    return prepared_game {.game_row = std::move(game_row)};
+    return prepared_game {.game_row = std::move(game_row), .position_rows = std::move(position_rows)};
 }
 
 }  // namespace
@@ -287,6 +314,30 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     std::size_t checkpoint_offset = start_offset;
     std::optional<error_code> fatal_error;
 
+    bool const build_inline_positions = config.rebuild_positions_after_import && pre_committed == 0;
+    std::vector<motif::db::position_row> inline_positions;
+    bool any_inline_flushed = false;
+    constexpr std::size_t inline_flush_threshold = 200'000;
+
+    auto flush_inline_positions = [&]() -> bool
+    {
+        if (inline_positions.empty()) {
+            return true;
+        }
+        constexpr std::size_t flush_batch = 50'000;
+        std::span<motif::db::position_row const> const all_rows(inline_positions);
+        for (std::size_t offset = 0; offset < inline_positions.size(); offset += flush_batch) {
+            if (auto ins_res = db_.positions().insert_batch(all_rows.subspan(offset, std::min(flush_batch, all_rows.size() - offset)));
+                !ins_res)
+            {
+                return false;
+            }
+        }
+        any_inline_flushed = true;
+        inline_positions.clear();
+        return true;
+    };
+
     auto begin_sqlite_batch = [&]() -> bool
     {
         if (sqlite_tx_open) {
@@ -383,7 +434,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         if (slot.state != slot_state::ready) {
             return;
         }
-        auto prep = prepare_game(slot.pgn_game);
+        auto prep = prepare_game(slot.pgn_game, build_inline_positions);
         if (!prep) {
             slot.state = slot_state::parse_error;
             slot.error = prep.error();
@@ -453,6 +504,24 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
         checkpoint_offset = slot.next_game_offset;
         auto const game_id = *ins;
+
+        if (!prep.position_rows.empty()) {
+            for (auto& row : prep.position_rows) {
+                row.game_id = game_id;
+            }
+            inline_positions.insert(inline_positions.end(), prep.position_rows.begin(), prep.position_rows.end());
+        }
+
+        if (build_inline_positions && inline_positions.size() >= inline_flush_threshold) {
+            if (!flush_inline_positions()) {
+                fatal_error = error_code::io_failure;
+                eof_reached = true;
+                pflow.stop();
+                slot.prepared.reset();
+                slot.state = slot_state::empty;
+                return;
+            }
+        }
 
         last_game_id = static_cast<std::int64_t>(game_id);
         committed++;
@@ -537,7 +606,17 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         };
     }
 
-    if (config.rebuild_positions_after_import) {
+    if (build_inline_positions) {
+        phase_.store(import_phase::rebuilding, std::memory_order_relaxed);
+        if (!flush_inline_positions()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        if (any_inline_flushed && config.sort_positions_by_zobrist_after_rebuild) {
+            if (auto sort_res = db_.sort_positions(); !sort_res) {
+                return tl::unexpected {error_code::io_failure};
+            }
+        }
+    } else if (config.rebuild_positions_after_import) {
         phase_.store(import_phase::rebuilding, std::memory_order_relaxed);
         if (auto rebuild_res = db_.rebuild_position_store(config.sort_positions_by_zobrist_after_rebuild); !rebuild_res) {
             return tl::unexpected {error_code::io_failure};
