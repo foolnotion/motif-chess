@@ -7,15 +7,14 @@
 #include <fstream>
 #include <optional>
 #include <string>
-#include <thread>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "motif/import/import_pipeline.hpp"
 
-#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <fmt/format.h>
+#include <fmt/base.h>
 #include <pgnlib/types.hpp>
 #include <tl/expected.hpp>
 
