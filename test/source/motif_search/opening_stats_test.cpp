@@ -19,7 +19,7 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
-#include <fmt/format.h>
+#include <fmt/base.h>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
