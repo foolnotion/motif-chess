@@ -273,6 +273,80 @@ auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16
     return rows;
 }
 
+auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>
+{
+    constexpr auto cont_hash_col = 1;
+    constexpr auto root_ply_col = 2;
+    constexpr auto frequency_col = 3;
+    constexpr auto white_wins_col = 4;
+    constexpr auto draws_col = 5;
+    constexpr auto black_wins_col = 6;
+    constexpr auto avg_white_elo_col = 7;
+    constexpr auto avg_black_elo_col = 8;
+    constexpr auto eco_min_col = 9;
+    constexpr auto eco_max_col = 10;
+
+    duckdb_result res {};
+    std::ostringstream sql;
+    // One row per distinct continuation from this position; result aggregated in DuckDB.
+    // DISTINCT inside COUNT/SUM deduplicates games that revisit this position via repetition.
+    sql << "SELECT "
+           "p_cont.encoded_move, "
+           "p_cont.zobrist_hash AS child_hash, "
+           "MIN(p_root.ply) AS root_ply, "
+           "COUNT(DISTINCT p_root.game_id) AS frequency, "
+           "COUNT(DISTINCT CASE WHEN p_root.result > 0 THEN p_root.game_id END) AS white_wins, "
+           "COUNT(DISTINCT CASE WHEN p_root.result = 0 THEN p_root.game_id END) AS draws, "
+           "COUNT(DISTINCT CASE WHEN p_root.result < 0 THEN p_root.game_id END) AS black_wins, "
+           "AVG(CAST(p_root.white_elo AS DOUBLE)) AS avg_white_elo, "
+           "AVG(CAST(p_root.black_elo AS DOUBLE)) AS avg_black_elo, "
+           "MIN(p_root.game_id) AS eco_sample_min, "
+           "MAX(p_root.game_id) AS eco_sample_max "
+           "FROM position p_root "
+           "JOIN position p_cont "
+           "ON  p_cont.game_id = p_root.game_id "
+           "AND p_cont.ply = p_root.ply + 1 "
+        << "WHERE p_root.zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT) "
+        << "GROUP BY p_cont.encoded_move, p_cont.zobrist_hash";
+
+    if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
+        duckdb_destroy_result(&res);
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const row_count = static_cast<std::size_t>(duckdb_row_count(&res));
+    std::vector<opening_stat_agg_row> rows;
+    rows.reserve(row_count);
+
+    for (std::size_t i = 0; i < row_count; ++i) {
+        auto const row_idx = static_cast<idx_t>(i);
+        auto avg_white_elo = std::optional<double> {};
+        if (!duckdb_value_is_null(&res, avg_white_elo_col, row_idx)) {
+            avg_white_elo = duckdb_value_double(&res, avg_white_elo_col, row_idx);
+        }
+        auto avg_black_elo = std::optional<double> {};
+        if (!duckdb_value_is_null(&res, avg_black_elo_col, row_idx)) {
+            avg_black_elo = duckdb_value_double(&res, avg_black_elo_col, row_idx);
+        }
+        rows.push_back(opening_stat_agg_row {
+            .cont_encoded_move = duckdb_value_uint16(&res, 0, row_idx),
+            .cont_hash = duckdb_value_uint64(&res, cont_hash_col, row_idx),
+            .root_ply = duckdb_value_uint16(&res, root_ply_col, row_idx),
+            .frequency = duckdb_value_uint32(&res, frequency_col, row_idx),
+            .white_wins = duckdb_value_uint32(&res, white_wins_col, row_idx),
+            .draws = duckdb_value_uint32(&res, draws_col, row_idx),
+            .black_wins = duckdb_value_uint32(&res, black_wins_col, row_idx),
+            .avg_white_elo = avg_white_elo,
+            .avg_black_elo = avg_black_elo,
+            .eco_sample_min = duckdb_value_uint32(&res, eco_min_col, row_idx),
+            .eco_sample_max = duckdb_value_uint32(&res, eco_max_col, row_idx),
+        });
+    }
+
+    duckdb_destroy_result(&res);
+    return rows;
+}
+
 auto position_store::sample_zobrist_hashes(std::size_t const limit, std::uint64_t const seed) const -> result<std::vector<std::uint64_t>>
 {
     duckdb_result res {};
@@ -314,6 +388,21 @@ auto position_store::count_by_zobrist(std::uint64_t const zobrist_hash) const ->
     duckdb_result res {};
     std::ostringstream sql;
     sql << "SELECT COUNT(*) FROM position WHERE zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT)";
+    if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
+        duckdb_destroy_result(&res);
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const count = duckdb_value_int64(&res, 0, 0);
+    duckdb_destroy_result(&res);
+    return count;
+}
+
+auto position_store::count_distinct_games_by_zobrist(std::uint64_t const zobrist_hash) const -> result<std::int64_t>
+{
+    duckdb_result res {};
+    std::ostringstream sql;
+    sql << "SELECT COUNT(DISTINCT game_id) FROM position WHERE zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT)";
     if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
         duckdb_destroy_result(&res);
         return tl::unexpected {error_code::io_failure};

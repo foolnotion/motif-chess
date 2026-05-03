@@ -81,6 +81,25 @@ struct game_context
     std::vector<std::uint16_t> moves;
 };
 
+// One row per distinct continuation from a given position, with counts and
+// averages pre-aggregated in DuckDB. eco_sample_{min,max} are two candidate
+// game_ids for ECO attribution (the game with the lowest and highest id
+// among all games playing this continuation).
+struct opening_stat_agg_row
+{
+    std::uint16_t cont_encoded_move {};
+    std::uint64_t cont_hash {};
+    std::uint16_t root_ply {};  // MIN(p_root.ply) — for board reconstruction
+    std::uint32_t frequency {};
+    std::uint32_t white_wins {};
+    std::uint32_t draws {};
+    std::uint32_t black_wins {};
+    std::optional<double> avg_white_elo;
+    std::optional<double> avg_black_elo;
+    std::uint32_t eco_sample_min {};
+    std::uint32_t eco_sample_max {};
+};
+
 struct game_continuation_context
 {
     std::uint32_t game_id {};
