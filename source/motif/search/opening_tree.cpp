@@ -2,7 +2,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -82,7 +81,8 @@ struct tree_continuation_aggregate
     std::uint32_t white_elo_count {};
     std::int64_t black_elo_sum {};
     std::uint32_t black_elo_count {};
-    std::map<std::string, std::uint32_t, std::less<>> eco_counts;
+    std::optional<std::string> eco;
+    std::optional<std::string> opening_name;
     std::uint32_t sample_game_id {};  // one game that took this continuation, for eco lookup
 };
 
@@ -123,30 +123,6 @@ void note_elo(tree_continuation_aggregate& aggregate,
     }
 }
 
-void note_opening_name(std::map<std::string, std::string, std::less<>>& eco_lookup, std::string const& eco, std::string const& opening_name)
-{
-    auto const [lookup_it, inserted] = eco_lookup.emplace(eco, opening_name);
-    if (!inserted && opening_name.size() > lookup_it->second.size()) {
-        lookup_it->second = opening_name;
-    }
-}
-
-auto dominant_eco(tree_continuation_aggregate const& aggregate) -> std::optional<std::string>
-{
-    if (aggregate.eco_counts.empty()) {
-        return std::nullopt;
-    }
-
-    auto best = aggregate.eco_counts.begin();
-    for (auto it = std::next(aggregate.eco_counts.begin()); it != aggregate.eco_counts.end(); ++it) {
-        if (it->second > best->second) {
-            best = it;
-        }
-    }
-
-    return best->first;
-}
-
 auto replay_position(motif::db::game_context const& context, std::uint16_t const ply) -> motif::search::result<chesslib::board>
 {
     auto board = chesslib::board {};
@@ -167,26 +143,16 @@ auto replay_position(motif::db::game_context const& context, std::uint16_t const
 struct node_aggregate
 {
     std::map<std::uint16_t, tree_continuation_aggregate> continuations;
-    std::map<std::string, std::string, std::less<>> eco_lookup;
     std::uint32_t sample_game_id {};
     std::uint16_t sample_root_ply {};
     bool has_sample {false};
 };
 
 auto build_continuation(tree_continuation_aggregate const& aggregate,
-                        std::map<std::string, std::string, std::less<>> const& eco_lookup,
                         chesslib::board const& position,
                         bool const is_expanded,
                         std::uint64_t const child_hash) -> motif::search::opening_tree::node_continuation
 {
-    auto eco = dominant_eco(aggregate);
-    auto opening_name = std::optional<std::string> {};
-    if (eco.has_value()) {
-        if (auto lookup_it = eco_lookup.find(*eco); lookup_it != eco_lookup.end()) {
-            opening_name = lookup_it->second;
-        }
-    }
-
     auto const cont_move = chesslib::codec::decode(aggregate.encoded_move);
     auto san = chesslib::san::to_string(position, cont_move);
 
@@ -205,8 +171,8 @@ auto build_continuation(tree_continuation_aggregate const& aggregate,
         .black_wins = aggregate.black_wins,
         .average_white_elo = average_elo(aggregate.white_elo_sum, aggregate.white_elo_count),
         .average_black_elo = average_elo(aggregate.black_elo_sum, aggregate.black_elo_count),
-        .eco = std::move(eco),
-        .opening_name = std::move(opening_name),
+        .eco = aggregate.eco,
+        .opening_name = aggregate.opening_name,
         .subtree = std::move(child_node),
     };
 }
@@ -343,12 +309,8 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
                 continue;
             }
             auto const& ctx = ctx_it->second;
-            if (ctx.eco.has_value()) {
-                ++agg.eco_counts[*ctx.eco];
-                if (ctx.opening_name.has_value()) {
-                    note_opening_name(nag.eco_lookup, *ctx.eco, *ctx.opening_name);
-                }
-            }
+            agg.eco = ctx.eco;
+            agg.opening_name = ctx.opening_name;
         }
     }
 
@@ -418,7 +380,7 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
         for (auto const& [encoded_move, aggregate] : nag.continuations) {
             auto const child_key = node_key {.depth = static_cast<std::uint16_t>(nkey.depth + 1U), .parent_hash = aggregate.result_hash};
             auto const is_boundary = nkey.depth >= max_depth;
-            auto cont = build_continuation(aggregate, nag.eco_lookup, parent_board, !is_boundary, aggregate.result_hash);
+            auto cont = build_continuation(aggregate, parent_board, !is_boundary, aggregate.result_hash);
 
             auto const child_it = built_nodes.find(child_key);
             if (child_it != built_nodes.end()) {

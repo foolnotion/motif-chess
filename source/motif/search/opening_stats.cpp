@@ -41,8 +41,9 @@ auto replay_position(std::span<std::uint16_t const> moves, std::uint16_t const p
 
 using context_map = std::unordered_map<std::uint32_t, motif::db::game_context>;
 
-auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows, context_map const& contexts)
-    -> motif::search::result<chesslib::board>
+auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows,
+                     std::uint64_t const zobrist_hash,
+                     context_map const& contexts) -> motif::search::result<chesslib::board>
 {
     auto const root_ply = rows.front().root_ply;
     for (auto const& row : rows) {
@@ -52,10 +53,9 @@ auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows, c
                 continue;
             }
             auto replayed = replay_position(ctx_it->second.moves, root_ply);
-            if (replayed) {
+            if (replayed && replayed->hash() == zobrist_hash) {
                 return *replayed;
             }
-            break;
         }
     }
     return tl::unexpected {motif::search::error_code::io_failure};
@@ -115,7 +115,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
 
     auto position = chesslib::board {};
     if (!rows.empty() && rows.front().root_ply > 0U) {
-        auto board_res = find_root_board(rows, contexts);
+        auto board_res = find_root_board(rows, zobrist_hash, contexts);
         if (!board_res) {
             return stats {};
         }
@@ -128,10 +128,8 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
 
     for (auto const& row : rows) {
         auto eco_res = resolve_eco(row, contexts);
-        if (!eco_res) {
-            continue;
-        }
-        auto [eco, opening_name] = std::move(*eco_res);
+        auto [eco, opening_name] =
+            eco_res ? std::move(*eco_res) : std::make_pair(std::optional<std::string> {}, std::optional<std::string> {});
 
         auto const cont_move = chesslib::codec::decode(row.cont_encoded_move);
         auto const san = chesslib::san::to_string(position, cont_move);

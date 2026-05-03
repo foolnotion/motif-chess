@@ -17,7 +17,7 @@ namespace
 {
 
 // language=sql
-constexpr char const* create_position = R"sql(
+constexpr auto create_position = R"sql(
     CREATE TABLE IF NOT EXISTS position (
         zobrist_hash  UBIGINT   NOT NULL,
         game_id       UINTEGER  NOT NULL,
@@ -30,7 +30,7 @@ constexpr char const* create_position = R"sql(
 )sql";
 
 // language=sql
-constexpr char const* sort_position_by_zobrist = R"sql(
+constexpr auto sort_position_by_zobrist = R"sql(
     DROP TABLE IF EXISTS position_sorted;
 
     CREATE TABLE position_sorted AS
@@ -272,26 +272,40 @@ auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16
 auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>
 {
     std::ostringstream sql;
-    // One row per distinct continuation from this position; result aggregated in DuckDB.
-    // DISTINCT inside COUNT/SUM deduplicates games that revisit this position via repetition.
-    sql << "SELECT "
+    // CTE deduplicates per (game_id, continuation) so that AVG and COUNT(DISTINCT)
+    // aggregate over the same unique-game population. Without this, a game that
+    // revisits the root position via repetition inflates AVG without inflating COUNT.
+    sql << "WITH deduped AS ("
+           "SELECT "
+           "p_root.game_id, "
            "p_cont.encoded_move, "
            "p_cont.zobrist_hash AS child_hash, "
            "MIN(p_root.ply) AS root_ply, "
-           "COUNT(DISTINCT p_root.game_id) AS frequency, "
-           "COUNT(DISTINCT CASE WHEN p_root.result > 0 THEN p_root.game_id END) AS white_wins, "
-           "COUNT(DISTINCT CASE WHEN p_root.result = 0 THEN p_root.game_id END) AS draws, "
-           "COUNT(DISTINCT CASE WHEN p_root.result < 0 THEN p_root.game_id END) AS black_wins, "
-           "AVG(CAST(p_root.white_elo AS DOUBLE)) AS avg_white_elo, "
-           "AVG(CAST(p_root.black_elo AS DOUBLE)) AS avg_black_elo, "
-           "MIN(p_root.game_id) AS eco_sample_min, "
-           "MAX(p_root.game_id) AS eco_sample_max "
+           "p_root.result, "
+           "p_root.white_elo, "
+           "p_root.black_elo "
            "FROM position p_root "
            "JOIN position p_cont "
            "ON  p_cont.game_id = p_root.game_id "
            "AND p_cont.ply = p_root.ply + 1 "
         << "WHERE p_root.zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT) "
-        << "GROUP BY p_cont.encoded_move, p_cont.zobrist_hash";
+        << "GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash, "
+           "p_root.result, p_root.white_elo, p_root.black_elo"
+           ") "
+           "SELECT "
+           "encoded_move, "
+           "child_hash, "
+           "MIN(root_ply) AS root_ply, "
+           "COUNT(DISTINCT game_id) AS frequency, "
+           "COUNT(DISTINCT CASE WHEN result > 0 THEN game_id END) AS white_wins, "
+           "COUNT(DISTINCT CASE WHEN result = 0 THEN game_id END) AS draws, "
+           "COUNT(DISTINCT CASE WHEN result < 0 THEN game_id END) AS black_wins, "
+           "AVG(CAST(white_elo AS DOUBLE)) AS avg_white_elo, "
+           "AVG(CAST(black_elo AS DOUBLE)) AS avg_black_elo, "
+           "MIN(game_id) AS eco_sample_min, "
+           "MAX(game_id) AS eco_sample_max "
+           "FROM deduped "
+           "GROUP BY encoded_move, child_hash";
 
     result_guard guard {};
     if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {

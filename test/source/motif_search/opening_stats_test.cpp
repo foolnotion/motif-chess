@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
-#include <iostream>
 #include <optional>
 #include <ratio>
 #include <string>
@@ -20,6 +19,7 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
+#include <fmt/format.h>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
@@ -258,14 +258,17 @@ void run_opening_stats_perf_test()
 
     auto const result = measure_query_latencies(*manager, *sample_hashes, "opening_stats::query on sorted position store");
 
-    std::cout << "\n=== " << result.variant_name << " ===\n"
-              << "  queries:      " << result.num_queries << "\n"
-              << "  total:        " << result.total_ms << " ms\n"
-              << "  p50:          " << result.p50_us << " us\n"
-              << "  p99:          " << result.p99_us << " us\n"
-              << "  min:          " << result.min_us << " us\n"
-              << "  max:          " << result.max_us << " us\n"
-              << "  total rows:   " << result.total_rows_returned << "\n";
+    fmt::print("\n=== {} ===\n"
+               "  queries:      {}\n"
+               "  total:        {} ms\n"
+               "  p50:          {} us\n"
+               "  p99:          {} us\n"
+               "  min:          {} us\n"
+               "  max:          {} us\n"
+               "  total rows:   {}\n",
+               result.variant_name, result.num_queries, result.total_ms,
+               result.p50_us, result.p99_us, result.min_us, result.max_us,
+               result.total_rows_returned);
 
     CHECK(result.p99_us < perf_p99_limit_us);
 
@@ -481,13 +484,15 @@ TEST_CASE("opening_stats::query from starting position on real corpus", "[perfor
     auto const& top = stats_res->continuations.front();
     CHECK((top.san == "e4" || top.san == "d4"));
 
-    std::cout << "\n=== opening_stats::query from starting position ===\n"
-              << "  corpus:       " << pgn_file.filename().string() << "\n"
-              << "  committed:    " << summary->committed << " games\n"
-              << "  total_games:  " << stats_res->total_games << "\n"
-              << "  continuations:" << stats_res->continuations.size() << "\n"
-              << "  top move:     " << top.san << " (" << top.frequency << " games)\n"
-              << "  elapsed:      " << elapsed_ms << " ms\n";
+    fmt::print("\n=== opening_stats::query from starting position ===\n"
+               "  corpus:       {}\n"
+               "  committed:    {} games\n"
+               "  total_games:  {}\n"
+               "  continuations:{}\n"
+               "  top move:     {} ({} games)\n"
+               "  elapsed:      {} ms\n",
+               pgn_file.filename().string(), summary->committed, stats_res->total_games,
+               stats_res->continuations.size(), top.san, top.frequency, elapsed_ms);
 
     CHECK(elapsed_ms < startpos_elapsed_limit_ms);
 
