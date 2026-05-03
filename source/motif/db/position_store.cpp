@@ -22,6 +22,7 @@ constexpr char const* create_position = R"sql(
         zobrist_hash  UBIGINT   NOT NULL,
         game_id       UINTEGER  NOT NULL,
         ply           USMALLINT NOT NULL,
+        encoded_move  USMALLINT NOT NULL,
         result        TINYINT   NOT NULL,
         white_elo     SMALLINT,
         black_elo     SMALLINT
@@ -87,6 +88,7 @@ auto position_store::insert_batch(std::span<position_row const> rows) -> result<
         duckdb_append_uint64(appender, row.zobrist_hash);
         duckdb_append_uint32(appender, row.game_id);
         duckdb_append_uint16(appender, row.ply);
+        duckdb_append_uint16(appender, row.encoded_move);
         duckdb_append_int8(appender, row.result);
         if (row.white_elo.has_value()) {
             duckdb_append_int16(appender, *row.white_elo);
@@ -211,8 +213,10 @@ auto position_store::query_opening_moves(std::uint64_t const zobrist_hash) const
 auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16_t const max_depth) const
     -> result<std::vector<tree_position_row>>
 {
-    constexpr auto white_elo_col = 5;
-    constexpr auto black_elo_col = 6;
+    constexpr auto encoded_move_col = 4;
+    constexpr auto result_col = 5;
+    constexpr auto white_elo_col = 6;
+    constexpr auto black_elo_col = 7;
 
     duckdb_result res {};
     std::ostringstream sql;
@@ -221,6 +225,7 @@ auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16
            "p_root.ply AS root_ply, "
            "CAST(p_cont.ply - p_root.ply AS USMALLINT) AS depth, "
            "p_cont.zobrist_hash AS child_hash, "
+           "p_cont.encoded_move, "
            "p_cont.result, "
            "p_cont.white_elo, "
            "p_cont.black_elo "
@@ -256,8 +261,9 @@ auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16
             .game_id = duckdb_value_uint32(&res, 0, row_idx),
             .root_ply = duckdb_value_uint16(&res, 1, row_idx),
             .depth = duckdb_value_uint16(&res, 2, row_idx),
+            .encoded_move = duckdb_value_uint16(&res, encoded_move_col, row_idx),
             .child_hash = duckdb_value_uint64(&res, 3, row_idx),
-            .result = duckdb_value_int8(&res, 4, row_idx),
+            .result = duckdb_value_int8(&res, result_col, row_idx),
             .white_elo = white_elo,
             .black_elo = black_elo,
         });

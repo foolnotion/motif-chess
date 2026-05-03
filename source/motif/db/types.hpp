@@ -38,6 +38,7 @@ struct position_row
     std::uint64_t zobrist_hash {};
     std::uint32_t game_id {};
     std::uint16_t ply {};
+    std::uint16_t encoded_move {};  // move that reached this position; 0 for ply == 0
     std::int8_t result {};
     std::optional<std::int16_t> white_elo;
     std::optional<std::int16_t> black_elo;
@@ -66,6 +67,7 @@ struct tree_position_row
     std::uint32_t game_id {};
     std::uint16_t root_ply {};
     std::uint16_t depth {};
+    std::uint16_t encoded_move {};  // move that reached child_hash
     std::uint64_t child_hash {};
     std::int8_t result {};
     std::optional<std::int16_t> white_elo;

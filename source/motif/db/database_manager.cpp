@@ -136,6 +136,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
         .zobrist_hash = board.hash(),
         .game_id = game_id,
         .ply = 0,
+        .encoded_move = 0,
         .result = result_code,
         .white_elo = *white_elo,
         .black_elo = *black_elo,
@@ -149,6 +150,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
             .zobrist_hash = board.hash(),
             .game_id = game_id,
             .ply = static_cast<std::uint16_t>(i + 1),
+            .encoded_move = game.moves[i],
             .result = result_code,
             .white_elo = *white_elo,
             .black_elo = *black_elo,
@@ -510,10 +512,15 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
         duckdb_destroy_result(&rollback_res);
     };
 
-    duckdb_result del_res {};
-    auto const del_ret = duckdb_query(duck_con_, "DELETE FROM position", &del_res);
-    duckdb_destroy_result(&del_res);
-    if (del_ret == DuckDBError) {
+    // Drop and recreate so that any schema changes (new columns) are applied.
+    duckdb_result drop_res {};
+    if (duckdb_query(duck_con_, "DROP TABLE IF EXISTS position", &drop_res) == DuckDBError) {
+        duckdb_destroy_result(&drop_res);
+        rollback();
+        return tl::unexpected {error_code::io_failure};
+    }
+    duckdb_destroy_result(&drop_res);
+    if (auto schema_res = positions_->initialize_schema(); !schema_res) {
         rollback();
         return tl::unexpected {error_code::io_failure};
     }

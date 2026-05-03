@@ -183,6 +183,7 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
             .zobrist_hash = board.hash(),
             .game_id = 0,
             .ply = 0,
+            .encoded_move = 0,
             .result = result_int,
             .white_elo = white_elo_opt,
             .black_elo = black_elo_opt,
@@ -194,7 +195,8 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
         if (!move_result) {
             return tl::unexpected {error_code::parse_error};
         }
-        encoded_moves.push_back(chesslib::codec::encode(*move_result));
+        auto const enc = chesslib::codec::encode(*move_result);
+        encoded_moves.push_back(enc);
         chesslib::move_maker mmaker {board, *move_result};
         mmaker.make();
 
@@ -203,6 +205,7 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
                 .zobrist_hash = board.hash(),
                 .game_id = 0,
                 .ply = static_cast<std::uint16_t>(encoded_moves.size()),
+                .encoded_move = enc,
                 .result = result_int,
                 .white_elo = white_elo_opt,
                 .black_elo = black_elo_opt,
