@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -7,6 +8,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -973,6 +975,85 @@ auto game_store::get_provenance(std::uint32_t const game_id) const -> result<gam
     return prov;
 }
 
+auto game_store::update_text_field(std::uint32_t game_id, std::string_view column, std::string const& value) -> result<void>
+{
+    auto const sql = "UPDATE game SET " + std::string(column) + " = ? WHERE id = ?";
+    auto upd = prepare(db_, sql.c_str());
+    if (!upd) {
+        return tl::unexpected {upd.error()};
+    }
+    sqlite3_bind_text(upd->get(), 1, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+    if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+// Update player rows via find-or-insert/repoint semantics to avoid
+// mutating shared player rows used by other games.
+auto game_store::patch_player(std::uint32_t game_id,
+                              std::string_view id_col,
+                              player const& current,
+                              std::optional<std::string> const& name_patch,
+                              std::optional<std::int32_t> const& elo_patch) -> result<void>
+{
+    auto updated = current;
+    if (name_patch) {
+        updated.name = *name_patch;
+    }
+    if (elo_patch) {
+        updated.elo = elo_patch;
+    }
+    auto id_res = find_or_insert_player(updated);
+    if (!id_res) {
+        return tl::unexpected {id_res.error()};
+    }
+    auto const sql = "UPDATE game SET " + std::string(id_col) + " = ? WHERE id = ?";
+    auto upd = prepare(db_, sql.c_str());
+    if (!upd) {
+        return tl::unexpected {upd.error()};
+    }
+    sqlite3_bind_int64(upd->get(), 1, *id_res);
+    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+    if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+auto game_store::patch_event(std::uint32_t game_id,
+                             game const& current,
+                             std::optional<std::string> const& event_patch,
+                             std::optional<std::string> const& site_patch) -> result<void>
+{
+    auto const& existing = current.event_details;
+    auto const event_name = event_patch.value_or(existing ? existing->name : std::string {});
+    if (event_name.empty()) {
+        return {};
+    }
+    std::optional<std::string> const inherited_site = existing ? existing->site : std::nullopt;
+    std::optional<std::string> const site = site_patch.has_value() ? site_patch : inherited_site;
+    std::optional<std::string> const date = existing ? existing->date : std::nullopt;
+    auto id_res = find_or_insert_event({.name = event_name, .site = site, .date = date});
+    if (!id_res) {
+        return tl::unexpected {id_res.error()};
+    }
+    auto upd = prepare(db_, "UPDATE game SET event_id = ? WHERE id = ?");
+    if (!upd) {
+        return tl::unexpected {upd.error()};
+    }
+    sqlite3_bind_int64(upd->get(), 1, *id_res);
+    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+    if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+// NOLINTEND(bugprone-easily-swappable-parameters)
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& patch) -> result<void>
 {
@@ -989,167 +1070,57 @@ auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& p
         return tl::unexpected {error_code::io_failure};
     }
 
-    // Update player rows via find-or-insert/repoint semantics to avoid
-    // mutating shared player rows used by other games.
-    if (patch.white_name.has_value() || patch.white_elo.has_value()) {
-        auto cur_game = get(game_id);
-        if (!cur_game) {
-            return tl::unexpected {cur_game.error()};
+    if (patch.white_name || patch.white_elo || patch.black_name || patch.black_elo || patch.event || patch.site) {
+        auto cur = get(game_id);
+        if (!cur) {
+            return tl::unexpected {cur.error()};
         }
-        motif::db::player updated_white = cur_game->white;
-        if (patch.white_name.has_value()) {
-            updated_white.name = *patch.white_name;
-        }
-        if (patch.white_elo.has_value()) {
-            updated_white.elo = patch.white_elo;
-        }
-        auto white_id_res = find_or_insert_player(updated_white);
-        if (!white_id_res) {
-            return tl::unexpected {white_id_res.error()};
-        }
-        auto upd_stmt = prepare(db_, "UPDATE game SET white_id = ? WHERE id = ?");
-        if (!upd_stmt) {
-            return tl::unexpected {upd_stmt.error()};
-        }
-        sqlite3_bind_int64(upd_stmt->get(), 1, *white_id_res);
-        sqlite3_bind_int64(upd_stmt->get(), 2, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(upd_stmt->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    if (patch.black_name.has_value() || patch.black_elo.has_value()) {
-        auto cur_game = get(game_id);
-        if (!cur_game) {
-            return tl::unexpected {cur_game.error()};
-        }
-        motif::db::player updated_black = cur_game->black;
-        if (patch.black_name.has_value()) {
-            updated_black.name = *patch.black_name;
-        }
-        if (patch.black_elo.has_value()) {
-            updated_black.elo = patch.black_elo;
-        }
-        auto black_id_res = find_or_insert_player(updated_black);
-        if (!black_id_res) {
-            return tl::unexpected {black_id_res.error()};
-        }
-        auto upd_stmt = prepare(db_, "UPDATE game SET black_id = ? WHERE id = ?");
-        if (!upd_stmt) {
-            return tl::unexpected {upd_stmt.error()};
-        }
-        sqlite3_bind_int64(upd_stmt->get(), 1, *black_id_res);
-        sqlite3_bind_int64(upd_stmt->get(), 2, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(upd_stmt->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    if (patch.event.has_value() || patch.site.has_value()) {
-        auto cur_game = get(game_id);
-        if (!cur_game) {
-            return tl::unexpected {cur_game.error()};
-        }
-        auto const existing_details = cur_game->event_details;
-        auto const event_name = patch.event.value_or(existing_details ? existing_details->name : std::string {});
-        if (!event_name.empty()) {
-            std::optional<std::string> const inherited_site = existing_details ? existing_details->site : std::nullopt;
-            std::optional<std::string> const event_site = patch.site.has_value() ? patch.site : inherited_site;
-            std::optional<std::string> const event_date = existing_details ? existing_details->date : std::nullopt;
-            auto evt = motif::db::event {.name = event_name, .site = event_site, .date = event_date};
-            auto event_id_res = find_or_insert_event(evt);
-            if (!event_id_res) {
-                return tl::unexpected {event_id_res.error()};
+        if (patch.white_name || patch.white_elo) {
+            if (auto res = patch_player(game_id, "white_id", cur->white, patch.white_name, patch.white_elo); !res) {
+                return res;
             }
-            auto upd_stmt = prepare(db_, "UPDATE game SET event_id = ? WHERE id = ?");
-            if (!upd_stmt) {
-                return tl::unexpected {upd_stmt.error()};
+        }
+        if (patch.black_name || patch.black_elo) {
+            if (auto res = patch_player(game_id, "black_id", cur->black, patch.black_name, patch.black_elo); !res) {
+                return res;
             }
-            sqlite3_bind_int64(upd_stmt->get(), 1, *event_id_res);
-            sqlite3_bind_int64(upd_stmt->get(), 2, static_cast<std::int64_t>(game_id));
-            if (sqlite3_step(upd_stmt->get()) != SQLITE_DONE) {
-                return tl::unexpected {error_code::io_failure};
+        }
+        if (patch.event || patch.site) {
+            if (auto res = patch_event(game_id, *cur, patch.event, patch.site); !res) {
+                return res;
             }
         }
     }
 
-    // Direct field updates
-    if (patch.date.has_value()) {
-        auto upd = prepare(db_, "UPDATE game SET date = ? WHERE id = ?");
-        if (!upd) {
-            return tl::unexpected {upd.error()};
-        }
-        sqlite3_bind_text(upd->get(), 1, patch.date->c_str(), static_cast<int>(patch.date->size()), SQLITE_TRANSIENT);
-        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    if (patch.result.has_value()) {
-        auto upd = prepare(db_, "UPDATE game SET result = ? WHERE id = ?");
-        if (!upd) {
-            return tl::unexpected {upd.error()};
-        }
-        sqlite3_bind_text(upd->get(), 1, patch.result->c_str(), static_cast<int>(patch.result->size()), SQLITE_TRANSIENT);
-        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
+    using field_ptr = std::optional<std::string> game_patch::*;
+    static constexpr std::array<std::pair<std::string_view, field_ptr>, 5> scalar_fields = {{
+        {"date", &game_patch::date},
+        {"result", &game_patch::result},
+        {"eco", &game_patch::eco},
+        {"source_label", &game_patch::source_label},
+        {"review_status", &game_patch::review_status},
+    }};
+    for (auto const& [col, field] : scalar_fields) {
+        if (auto const& val = patch.*field; val) {
+            if (auto res = update_text_field(game_id, col, *val); !res) {
+                return res;
+            }
         }
     }
 
-    if (patch.eco.has_value()) {
-        auto upd = prepare(db_, "UPDATE game SET eco = ? WHERE id = ?");
-        if (!upd) {
-            return tl::unexpected {upd.error()};
+    if (patch.notes) {
+        // notes is stored as a reserved game tag with key "_notes"; replace if present
+        auto del = prepare(db_, R"sql(DELETE FROM game_tag WHERE game_id = ? AND tag_id = (SELECT id FROM tag WHERE name = '_notes'))sql");
+        if (!del) {
+            return tl::unexpected {del.error()};
         }
-        sqlite3_bind_text(upd->get(), 1, patch.eco->c_str(), static_cast<int>(patch.eco->size()), SQLITE_TRANSIENT);
-        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    if (patch.source_label.has_value()) {
-        auto upd = prepare(db_, "UPDATE game SET source_label = ? WHERE id = ?");
-        if (!upd) {
-            return tl::unexpected {upd.error()};
-        }
-        sqlite3_bind_text(upd->get(), 1, patch.source_label->c_str(), static_cast<int>(patch.source_label->size()), SQLITE_TRANSIENT);
-        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    if (patch.review_status.has_value()) {
-        auto upd = prepare(db_, "UPDATE game SET review_status = ? WHERE id = ?");
-        if (!upd) {
-            return tl::unexpected {upd.error()};
-        }
-        sqlite3_bind_text(upd->get(), 1, patch.review_status->c_str(), static_cast<int>(patch.review_status->size()), SQLITE_TRANSIENT);
-        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    if (patch.notes.has_value()) {
-        // notes is stored as a reserved game tag with key "_notes".
-        // Replace the existing tag if present.
-        auto del_stmt =
-            prepare(db_, R"sql(DELETE FROM game_tag WHERE game_id = ? AND tag_id = (SELECT id FROM tag WHERE name = '_notes'))sql");
-        if (!del_stmt) {
-            return tl::unexpected {del_stmt.error()};
-        }
-        sqlite3_bind_int64(del_stmt->get(), 1, static_cast<std::int64_t>(game_id));
-        if (sqlite3_step(del_stmt->get()) != SQLITE_DONE) {
+        sqlite3_bind_int64(del->get(), 1, static_cast<std::int64_t>(game_id));
+        if (sqlite3_step(del->get()) != SQLITE_DONE) {
             return tl::unexpected {error_code::io_failure};
         }
         if (!patch.notes->empty()) {
-            auto ins_res = insert_game_tags(game_id, {{"_notes", *patch.notes}});
-            if (!ins_res) {
-                return tl::unexpected {ins_res.error()};
+            if (auto res = insert_game_tags(game_id, {{"_notes", *patch.notes}}); !res) {
+                return res;
             }
         }
     }

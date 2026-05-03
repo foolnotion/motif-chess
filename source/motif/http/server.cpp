@@ -67,60 +67,24 @@ struct error_response
     std::string error;
 };
 
-struct game_player_response
-{
-    std::string name;
-    std::optional<std::int32_t> elo;
-    std::optional<std::string> title;
-    std::optional<std::string> country;
-};
-
-struct game_event_response
-{
-    std::string name;
-    std::optional<std::string> site;
-    std::optional<std::string> date;
-};
-
 struct game_tag_response
 {
     std::string key;
     std::string value;
 };
 
-struct game_provenance_response
-{
-    std::string source_type;
-    std::optional<std::string> source_label;
-    std::string review_status;
-};
-
 struct game_response
 {
     std::uint32_t id {};
-    game_player_response white;
-    game_player_response black;
-    std::optional<game_event_response> event;
+    motif::db::player white;
+    motif::db::player black;
+    std::optional<motif::db::event> event;
     std::optional<std::string> date;
     std::string result;
     std::optional<std::string> eco;
     std::vector<game_tag_response> tags;
     std::vector<std::uint16_t> moves;
-    game_provenance_response provenance;
-};
-
-struct game_list_entry_response
-{
-    std::uint32_t id {};
-    std::string white;
-    std::string black;
-    std::string result;
-    std::string event;
-    std::string date;
-    std::string eco;
-    std::string source_type;
-    std::optional<std::string> source_label;
-    std::string review_status;
+    motif::db::game_provenance provenance;
 };
 
 struct create_game_request
@@ -136,22 +100,6 @@ struct create_game_response
     std::string source_type;
     std::optional<std::string> source_label;
     std::string review_status;
-};
-
-struct patch_game_request
-{
-    std::optional<std::string> white_name;
-    std::optional<std::int32_t> white_elo;
-    std::optional<std::string> black_name;
-    std::optional<std::int32_t> black_elo;
-    std::optional<std::string> event;
-    std::optional<std::string> site;
-    std::optional<std::string> date;
-    std::optional<std::string> result;
-    std::optional<std::string> eco;
-    std::optional<std::string> source_label;
-    std::optional<std::string> review_status;
-    std::optional<std::string> notes;
 };
 
 struct opening_continuation_response
@@ -393,68 +341,24 @@ auto parse_game_id(std::string_view id_str) -> std::optional<std::uint32_t>
     return static_cast<std::uint32_t>(value);
 }
 
-auto to_game_player_response(motif::db::player const& source) -> detail::game_player_response
-{
-    return detail::game_player_response {
-        .name = source.name,
-        .elo = source.elo,
-        .title = source.title,
-        .country = source.country,
-    };
-}
-
-auto to_game_event_response(motif::db::event const& source) -> detail::game_event_response
-{
-    return detail::game_event_response {
-        .name = source.name,
-        .site = source.site,
-        .date = source.date,
-    };
-}
-
 auto to_game_response(std::uint32_t const game_id, motif::db::game const& source) -> detail::game_response
 {
     auto tags = std::vector<detail::game_tag_response> {};
     tags.reserve(source.extra_tags.size());
     for (auto const& [key, value] : source.extra_tags) {
-        tags.push_back(detail::game_tag_response {
-            .key = key,
-            .value = value,
-        });
+        tags.push_back({.key = key, .value = value});
     }
-
     return detail::game_response {
         .id = game_id,
-        .white = to_game_player_response(source.white),
-        .black = to_game_player_response(source.black),
-        .event = source.event_details.transform(to_game_event_response),
+        .white = source.white,
+        .black = source.black,
+        .event = source.event_details,
         .date = source.date,
         .result = source.result,
         .eco = source.eco,
         .tags = std::move(tags),
         .moves = source.moves,
-        .provenance =
-            detail::game_provenance_response {
-                .source_type = source.provenance.source_type,
-                .source_label = source.provenance.source_label,
-                .review_status = source.provenance.review_status,
-            },
-    };
-}
-
-auto to_game_list_entry_response(motif::db::game_list_entry const& src) -> detail::game_list_entry_response
-{
-    return detail::game_list_entry_response {
-        .id = src.id,
-        .white = src.white,
-        .black = src.black,
-        .result = src.result,
-        .event = src.event,
-        .date = src.date,
-        .eco = src.eco,
-        .source_type = src.source_type,
-        .source_label = src.source_label,
-        .review_status = src.review_status,
+        .provenance = source.provenance,
     };
 }
 
@@ -1112,14 +1016,8 @@ void server::impl::setup_routes()
                     return;
                 }
 
-                auto responses = std::vector<detail::game_list_entry_response> {};
-                responses.reserve(games->size());
-                for (auto const& entry : *games) {
-                    responses.push_back(to_game_list_entry_response(entry));
-                }
-
                 std::string body {};
-                [[maybe_unused]] auto const err = glz::write_json(responses, body);
+                [[maybe_unused]] auto const err = glz::write_json(*games, body);
                 res.set_content(body, "application/json");
                 res.status = http_ok;
             });
@@ -1314,41 +1212,26 @@ void server::impl::setup_routes()
                       return;
                   }
 
-                  detail::patch_game_request req_body;
-                  if (auto parse_err = glz::read_json(req_body, req.body); parse_err) {
+                  motif::db::game_patch patch;
+                  if (auto parse_err = glz::read_json(patch, req.body); parse_err) {
                       set_json_error(res, http_bad_request, "invalid request body");
                       return;
                   }
 
-                  if (req_body.result.has_value() && !is_valid_result(*req_body.result)) {
+                  if (patch.result.has_value() && !is_valid_result(*patch.result)) {
                       set_json_error(res, http_bad_request, "invalid result; allowed: 1-0, 0-1, 1/2-1/2, *");
                       return;
                   }
 
-                  if (req_body.review_status.has_value() && !is_valid_review_status(*req_body.review_status)) {
+                  if (patch.review_status.has_value() && !is_valid_review_status(*patch.review_status)) {
                       set_json_error(res, http_bad_request, "invalid review_status; allowed: new, needs_review, studied, archived");
                       return;
                   }
 
-                  auto db_patch = motif::db::game_patch {
-                      .white_name = req_body.white_name,
-                      .white_elo = req_body.white_elo,
-                      .black_name = req_body.black_name,
-                      .black_elo = req_body.black_elo,
-                      .event = req_body.event,
-                      .site = req_body.site,
-                      .date = req_body.date,
-                      .result = req_body.result,
-                      .eco = req_body.eco,
-                      .source_label = req_body.source_label,
-                      .review_status = req_body.review_status,
-                      .notes = req_body.notes,
-                  };
-
-                  auto patch_result = [this, &game_id, &db_patch]() -> motif::db::result<void>
+                  auto patch_result = [this, &game_id, &patch]() -> motif::db::result<void>
                   {
                       std::scoped_lock const lock {database_mutex};
-                      return database.store().patch_metadata(*game_id, db_patch);
+                      return database.store().patch_metadata(*game_id, patch);
                   }();
 
                   if (!patch_result) {
