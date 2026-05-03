@@ -741,69 +741,6 @@ auto game_store::get(std::uint32_t const game_id) const -> result<game>
     return out;
 }
 
-auto game_store::get_opening_context(std::uint32_t const game_id) -> result<opening_context>
-{
-    return const_cast<game_store const&>(*this).get_opening_context(game_id);
-}
-
-auto game_store::get_opening_context(std::uint32_t const game_id) const -> result<opening_context>
-{
-    // language=sql
-    static constexpr char const* sql = R"sql(
-        SELECT
-            w.elo,
-            b.elo,
-            g.eco,
-            (
-                SELECT gt.value
-                FROM game_tag gt
-                JOIN tag t ON t.id = gt.tag_id
-                WHERE gt.game_id = g.id AND t.name = 'Opening'
-                ORDER BY gt.rowid
-                LIMIT 1
-            ) AS opening_name,
-            g.moves
-        FROM game g
-        JOIN player w ON w.id = g.white_id
-        JOIN player b ON b.id = g.black_id
-        WHERE g.id = ?
-    )sql";
-
-    auto stmt = prepare(db_, sql);
-    if (!stmt) {
-        return tl::unexpected {stmt.error()};
-    }
-    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_id));
-
-    int const step_rc = sqlite3_step(stmt->get());
-    if (step_rc == SQLITE_DONE) {
-        return tl::unexpected {error_code::not_found};
-    }
-    if (step_rc != SQLITE_ROW) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    auto out = opening_context {};
-    out.white_elo = column_optional_int32(stmt->get(), 0);
-    out.black_elo = column_optional_int32(stmt->get(), 1);
-    out.eco = column_optional_text(stmt->get(), 2);
-    out.opening_name = column_optional_text(stmt->get(), 3);
-
-    auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), 4));
-    int const blob_bytes = sqlite3_column_bytes(stmt->get(), 4);
-    if (blob_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    auto const move_count = static_cast<std::size_t>(blob_bytes) / sizeof(std::uint16_t);
-    out.moves.resize(move_count);
-    if (move_count > 0 && blob != nullptr) {
-        std::memcpy(out.moves.data(), blob, static_cast<std::size_t>(blob_bytes));
-    }
-
-    return out;
-}
-
 auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<std::unordered_map<std::uint32_t, game_context>>
 {
     return const_cast<game_store const&>(*this).get_game_contexts(game_ids);
@@ -982,115 +919,6 @@ auto game_store::count_games() const -> result<std::int64_t>
     return sqlite3_column_int64(stmt->get(), 0);
 }
 
-auto game_store::get_continuation_contexts(std::vector<opening_move_stat> const& move_stats)
-    -> result<std::vector<game_continuation_context>>
-{
-    return const_cast<game_store const&>(*this).get_continuation_contexts(move_stats);
-}
-
-auto game_store::get_continuation_contexts(std::vector<opening_move_stat> const& move_stats) const
-    -> result<std::vector<game_continuation_context>>
-{
-    auto out = std::vector<game_continuation_context> {};
-    if (move_stats.empty()) {
-        return out;
-    }
-
-    constexpr std::size_t max_lookup_batch {300};
-    constexpr int row_index_col {0};
-    constexpr int game_id_col {1};
-    constexpr int ply_col {2};
-    constexpr int eco_col {3};
-    constexpr int opening_name_col {4};
-    constexpr int encoded_move_col {5};
-    out.reserve(move_stats.size());
-
-    for (std::size_t batch_begin = 0; batch_begin < move_stats.size(); batch_begin += max_lookup_batch) {
-        auto const batch_end = std::min(batch_begin + max_lookup_batch, move_stats.size());
-
-        auto sql = std::ostringstream {};
-        sql << R"sql(
-            WITH lookup(row_index, game_id, ply) AS (VALUES
-        )sql";
-        for (std::size_t index = batch_begin; index < batch_end; ++index) {
-            if (index > batch_begin) {
-                sql << ',';
-            }
-            sql << "(?, ?, ?)";
-        }
-        sql << R"sql(
-            )
-            SELECT
-                lookup.row_index,
-                lookup.game_id,
-                lookup.ply,
-                g.eco,
-                (
-                    SELECT gt.value
-                    FROM game_tag gt
-                    JOIN tag t ON t.id = gt.tag_id
-                    WHERE gt.game_id = g.id AND t.name = 'Opening'
-                    ORDER BY gt.rowid
-                    LIMIT 1
-                ) AS opening_name,
-                substr(g.moves, (CAST(lookup.ply AS INTEGER) * 2) + 1, 2) AS encoded_move
-            FROM lookup
-            JOIN game g ON g.id = lookup.game_id
-        )sql";
-
-        auto stmt = prepare(db_, sql.str().c_str());
-        if (!stmt) {
-            return tl::unexpected {stmt.error()};
-        }
-
-        int bind_index = 1;
-        for (std::size_t index = batch_begin; index < batch_end; ++index) {
-            auto const& move_stat = move_stats[index];
-            sqlite3_bind_int64(stmt->get(), bind_index++, static_cast<std::int64_t>(index));
-            sqlite3_bind_int64(stmt->get(), bind_index++, static_cast<std::int64_t>(move_stat.game_id));
-            sqlite3_bind_int64(stmt->get(), bind_index++, static_cast<std::int64_t>(move_stat.ply));
-        }
-
-        int step_rc = SQLITE_ROW;
-        while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
-            auto const row_index = static_cast<std::size_t>(sqlite3_column_int64(stmt->get(), row_index_col));
-            if (row_index >= move_stats.size()) {
-                return tl::unexpected {error_code::io_failure};
-            }
-
-            auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), encoded_move_col));
-            int const blob_bytes = sqlite3_column_bytes(stmt->get(), encoded_move_col);
-            if (blob_bytes == 0) {
-                continue;
-            }
-            if (std::cmp_not_equal(blob_bytes, sizeof(std::uint16_t)) || blob == nullptr) {
-                return tl::unexpected {error_code::io_failure};
-            }
-
-            std::uint16_t encoded_move {};
-            std::memcpy(&encoded_move, blob, sizeof(encoded_move));
-
-            auto const& move_stat = move_stats[row_index];
-            out.push_back(game_continuation_context {
-                .game_id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), game_id_col)),
-                .ply = static_cast<std::uint16_t>(sqlite3_column_int(stmt->get(), ply_col)),
-                .encoded_move = encoded_move,
-                .result = move_stat.result,
-                .white_elo = move_stat.white_elo,
-                .black_elo = move_stat.black_elo,
-                .eco = column_optional_text(stmt->get(), eco_col),
-                .opening_name = column_optional_text(stmt->get(), opening_name_col),
-            });
-        }
-
-        if (step_rc != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
-    return out;
-}
-
 auto game_store::remove(std::uint32_t game_id) -> result<void>
 {
     // ON DELETE CASCADE in game_tag handles tag row cleanup automatically.
@@ -1225,8 +1053,8 @@ auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& p
         auto const existing_details = cur_game->event_details;
         auto const event_name = patch.event.value_or(existing_details ? existing_details->name : std::string {});
         if (!event_name.empty()) {
-            std::optional<std::string> const event_site =
-                patch.site.has_value() ? patch.site : (existing_details ? existing_details->site : std::nullopt);
+            std::optional<std::string> inherited_site = existing_details ? existing_details->site : std::nullopt;
+            std::optional<std::string> const event_site = patch.site.has_value() ? patch.site : inherited_site;
             std::optional<std::string> const event_date = existing_details ? existing_details->date : std::nullopt;
             auto evt = motif::db::event {.name = event_name, .site = event_site, .date = event_date};
             auto event_id_res = find_or_insert_event(evt);

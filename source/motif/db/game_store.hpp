@@ -1,7 +1,7 @@
-// NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -50,17 +50,12 @@ class game_store
     // Retrieve a game by id.  Returns error_code::not_found if absent.
     auto get(std::uint32_t game_id) -> result<game>;
     auto get(std::uint32_t game_id) const -> result<game>;
-    auto get_opening_context(std::uint32_t game_id) -> result<opening_context>;
-    auto get_opening_context(std::uint32_t game_id) const -> result<opening_context>;
     // Precondition: game_ids contains no duplicates (duplicate entries are
     // silently dropped by the unordered_map; deduplicate before calling).
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<std::unordered_map<std::uint32_t, game_context>>;
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const -> result<std::unordered_map<std::uint32_t, game_context>>;
     auto list_games(game_list_query const& query) const -> result<std::vector<game_list_entry>>;
     auto count_games() const -> result<std::int64_t>;
-    auto get_continuation_contexts(std::vector<opening_move_stat> const& move_stats) -> result<std::vector<game_continuation_context>>;
-    auto get_continuation_contexts(std::vector<opening_move_stat> const& move_stats) const
-        -> result<std::vector<game_continuation_context>>;
 
     // Delete the game row and all associated game_tag rows.
     // Player and event rows are preserved.

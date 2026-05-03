@@ -1,4 +1,3 @@
-// NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
 #include <cstddef>
@@ -25,7 +24,6 @@ class position_store
     auto row_count() const -> result<std::int64_t>;
     auto query_by_zobrist(std::uint64_t zobrist_hash, std::size_t limit = 0, std::size_t offset = 0) const
         -> result<std::vector<position_match>>;
-    auto query_opening_moves(std::uint64_t zobrist_hash) const -> result<std::vector<opening_move_stat>>;
     auto query_tree_slice(std::uint64_t root_hash, std::uint16_t max_depth) const -> result<std::vector<tree_position_row>>;
     auto query_opening_stats(std::uint64_t zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>;
     auto sample_zobrist_hashes(std::size_t limit, std::uint64_t seed = 0) const -> result<std::vector<std::uint64_t>>;

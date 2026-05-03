@@ -172,44 +172,6 @@ auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash, std::siz
     return matches;
 }
 
-auto position_store::query_opening_moves(std::uint64_t const zobrist_hash) const -> result<std::vector<opening_move_stat>>
-{
-    duckdb_result res {};
-    std::ostringstream sql;
-    sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position " "WHERE zobrist_hash = CAST(" << zobrist_hash
-        << " AS UBIGINT)";
-    if (duckdb_query(con_, sql.str().c_str(), &res) == DuckDBError) {
-        duckdb_destroy_result(&res);
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    auto const row_count = static_cast<std::size_t>(duckdb_row_count(&res));
-    std::vector<opening_move_stat> stats;
-    stats.reserve(row_count);
-
-    for (std::size_t i = 0; i < row_count; ++i) {
-        auto const row_idx = static_cast<idx_t>(i);
-        auto white_elo = std::optional<std::int16_t> {};
-        if (!duckdb_value_is_null(&res, 3, row_idx)) {
-            white_elo = static_cast<std::int16_t>(duckdb_value_int16(&res, 3, row_idx));
-        }
-        auto black_elo = std::optional<std::int16_t> {};
-        if (!duckdb_value_is_null(&res, 4, row_idx)) {
-            black_elo = static_cast<std::int16_t>(duckdb_value_int16(&res, 4, row_idx));
-        }
-        stats.push_back(opening_move_stat {
-            .game_id = duckdb_value_uint32(&res, 0, row_idx),
-            .ply = duckdb_value_uint16(&res, 1, row_idx),
-            .result = duckdb_value_int8(&res, 2, row_idx),
-            .white_elo = white_elo,
-            .black_elo = black_elo,
-        });
-    }
-
-    duckdb_destroy_result(&res);
-    return stats;
-}
-
 auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16_t const max_depth) const
     -> result<std::vector<tree_position_row>>
 {

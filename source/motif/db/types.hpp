@@ -1,4 +1,3 @@
-// NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
 #include <cstddef>
@@ -26,13 +25,6 @@ struct event
     std::optional<std::string> date;
 };
 
-struct position
-{
-    std::uint64_t zobrist_hash {};
-    std::uint32_t game_id {};
-    std::uint16_t ply {};
-};
-
 struct position_row
 {
     std::uint64_t zobrist_hash {};
@@ -45,15 +37,6 @@ struct position_row
 };
 
 struct position_match
-{
-    std::uint32_t game_id {};
-    std::uint16_t ply {};
-    std::int8_t result {};
-    std::optional<std::int16_t> white_elo;
-    std::optional<std::int16_t> black_elo;
-};
-
-struct opening_move_stat
 {
     std::uint32_t game_id {};
     std::uint16_t ply {};
@@ -98,27 +81,6 @@ struct opening_stat_agg_row
     std::optional<double> avg_black_elo;
     std::uint32_t eco_sample_min {};
     std::uint32_t eco_sample_max {};
-};
-
-struct game_continuation_context
-{
-    std::uint32_t game_id {};
-    std::uint16_t ply {};
-    std::uint16_t encoded_move {};
-    std::int8_t result {};
-    std::optional<std::int16_t> white_elo;
-    std::optional<std::int16_t> black_elo;
-    std::optional<std::string> eco;
-    std::optional<std::string> opening_name;
-};
-
-struct opening_context
-{
-    std::optional<std::int32_t> white_elo;
-    std::optional<std::int32_t> black_elo;
-    std::optional<std::string> eco;
-    std::optional<std::string> opening_name;
-    std::vector<std::uint16_t> moves;
 };
 
 // source_type values: "manual" (user-added via API), "imported" (bulk import).

@@ -1,6 +1,6 @@
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -402,17 +402,13 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
 
 auto database_manager::store() noexcept -> game_store&
 {
-    if (!store_.has_value()) {
-        std::terminate();
-    }
+    assert(store_.has_value());
     return *store_;
 }
 
 auto database_manager::store() const noexcept -> game_store const&
 {
-    if (!store_.has_value()) {
-        std::terminate();
-    }
+    assert(store_.has_value());
     return *store_;
 }
 
@@ -428,17 +424,13 @@ auto database_manager::dir() const noexcept -> std::filesystem::path const&
 
 auto database_manager::positions() noexcept -> position_store&
 {
-    if (!positions_.has_value()) {
-        std::terminate();
-    }
+    assert(positions_.has_value());
     return *positions_;
 }
 
 auto database_manager::positions() const noexcept -> position_store const&
 {
-    if (!positions_.has_value()) {
-        std::terminate();
-    }
+    assert(positions_.has_value());
     return *positions_;
 }
 

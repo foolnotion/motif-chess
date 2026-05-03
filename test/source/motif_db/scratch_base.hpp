@@ -1,4 +1,3 @@
-// NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
 #include <optional>
