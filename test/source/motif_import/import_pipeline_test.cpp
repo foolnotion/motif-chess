@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <optional>
 #include <string>
 #include <thread>
@@ -16,6 +15,7 @@
 
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 #include <pgnlib/types.hpp>
 #include <tl/expected.hpp>
 
@@ -242,18 +242,19 @@ auto run_perf_import(motif::import::import_config const& config) -> motif::impor
 
 void print_import_perf_summary(std::string_view const label, motif::import::import_summary const& summary)
 {
-    std::cout << "\n=== " << label << " ===\n"
-              << "  attempted:    " << summary.total_attempted << "\n"
-              << "  committed:    " << summary.committed << "\n"
-              << "  skipped:      " << summary.skipped << "\n"
-              << "  errors:       " << summary.errors << "\n"
-              << "  elapsed:      " << summary.elapsed.count() << " ms\n";
+    fmt::print("\n=== {} ===\n"
+               "  attempted:    {}\n"
+               "  committed:    {}\n"
+               "  skipped:      {}\n"
+               "  errors:       {}\n"
+               "  elapsed:      {} ms\n",
+               label, summary.total_attempted, summary.committed, summary.skipped,
+               summary.errors, summary.elapsed.count());
 }
 
 void print_duration_result(std::string_view const label, std::chrono::milliseconds const elapsed)
 {
-    std::cout << "\n=== " << label << " ===\n"
-              << "  elapsed:      " << elapsed.count() << " ms\n";
+    fmt::print("\n=== {} ===\n" "  elapsed:      {} ms\n", label, elapsed.count());
 }
 
 void check_release_calibrated_perf(std::int64_t const elapsed_ms)
@@ -1107,8 +1108,11 @@ TEST_CASE("import_pipeline: 10k diagnostic summary", "[motif-import][diagnostic]
     auto summary = pipeline.run(pgn_file);
     REQUIRE(summary.has_value());
 
-    std::cout << "attempted=" << summary->total_attempted << " committed=" << summary->committed << " skipped=" << summary->skipped
-              << " errors=" << summary->errors << '\n';
+    fmt::print("attempted={} committed={} skipped={} errors={}\n",
+               summary->total_attempted,
+               summary->committed,
+               summary->skipped,
+               summary->errors);
 
     CHECK(summary->total_attempted == 10'000);
     CHECK(summary->committed + summary->skipped == summary->total_attempted);
@@ -1214,7 +1218,7 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist", "[performance][query-l
     auto& positions = mgr->positions();
     auto const row_count_res = positions.row_count();
     REQUIRE(row_count_res.has_value());
-    std::cout << "position row count: " << *row_count_res << "\n";
+    fmt::print("position row count: {}\n", *row_count_res);
 
     constexpr std::size_t num_warmup = 5;
     for (std::size_t i = 0; i < num_warmup; ++i) {
@@ -1228,18 +1232,20 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist", "[performance][query-l
     auto sample_hashes = std::move(*hashes_res);
 
     REQUIRE_FALSE(sample_hashes.empty());
-    std::cout << "sample hashes collected: " << sample_hashes.size() << "\n";
+    fmt::print("sample hashes collected: {}\n", sample_hashes.size());
 
     auto print_result = [](query_latency_result const& r)
     {
-        std::cout << "\n=== " << r.variant_name << " ===\n"
-                  << "  queries:      " << r.num_queries << "\n"
-                  << "  total:        " << r.total_ms << " ms\n"
-                  << "  p50:          " << r.p50_us << " us\n"
-                  << "  p99:          " << r.p99_us << " us\n"
-                  << "  min:          " << r.min_us << " us\n"
-                  << "  max:          " << r.max_us << " us\n"
-                  << "  total rows:   " << r.total_rows_returned << "\n";
+        fmt::print("\n=== {} ===\n"
+                   "  queries:      {}\n"
+                   "  total:        {} ms\n"
+                   "  p50:          {} us\n"
+                   "  p99:          {} us\n"
+                   "  min:          {} us\n"
+                   "  max:          {} us\n"
+                   "  total rows:   {}\n",
+                   r.variant_name, r.num_queries, r.total_ms,
+                   r.p50_us, r.p99_us, r.min_us, r.max_us, r.total_rows_returned);
     };
 
     auto r_unsorted = measure_query_latencies(*mgr, sample_hashes, "unsorted");
@@ -1287,12 +1293,14 @@ TEST_CASE("import_pipeline: inline path peak RSS on 1M", "[performance][motif-im
 
     REQUIRE(summary.has_value());
     auto const delta_mb = peak_rss > rss_baseline ? (peak_rss - rss_baseline) / bytes_per_mb : 0;
-    std::cout << "\n=== import_pipeline: inline path peak RSS on 1M ===\n"
-              << "  elapsed:      " << summary->elapsed.count() << " ms\n"
-              << "  committed:    " << summary->committed << "\n"
-              << "  baseline RSS: " << rss_baseline / bytes_per_mb << " MB\n"
-              << "  peak RSS:     " << peak_rss / bytes_per_mb << " MB\n"
-              << "  delta:        " << delta_mb << " MB\n";
+    fmt::print("\n=== import_pipeline: inline path peak RSS on 1M ===\n"
+               "  elapsed:      {} ms\n"
+               "  committed:    {}\n"
+               "  baseline RSS: {} MB\n"
+               "  peak RSS:     {} MB\n"
+               "  delta:        {} MB\n",
+               summary->elapsed.count(), summary->committed,
+               rss_baseline / bytes_per_mb, peak_rss / bytes_per_mb, delta_mb);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
@@ -1330,12 +1338,14 @@ TEST_CASE("import_pipeline: rebuild path peak RSS on 1M", "[performance][motif-i
     auto const peak_rss = sampler.peak();
 
     auto const delta_mb = peak_rss > rss_baseline ? (peak_rss - rss_baseline) / bytes_per_mb : 0;
-    std::cout << "\n=== import_pipeline: rebuild path peak RSS on 1M ===\n"
-              << "  elapsed:      " << summary->elapsed.count() << " ms\n"
-              << "  committed:    " << summary->committed << "\n"
-              << "  baseline RSS: " << rss_baseline / bytes_per_mb << " MB\n"
-              << "  peak RSS:     " << peak_rss / bytes_per_mb << " MB\n"
-              << "  delta:        " << delta_mb << " MB\n";
+    fmt::print("\n=== import_pipeline: rebuild path peak RSS on 1M ===\n"
+               "  elapsed:      {} ms\n"
+               "  committed:    {}\n"
+               "  baseline RSS: {} MB\n"
+               "  peak RSS:     {} MB\n"
+               "  delta:        {} MB\n",
+               summary->elapsed.count(), summary->committed,
+               rss_baseline / bytes_per_mb, peak_rss / bytes_per_mb, delta_mb);
 
     mgr->close();
     std::filesystem::remove_all(tmp);

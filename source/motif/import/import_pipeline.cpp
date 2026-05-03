@@ -320,7 +320,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     bool const build_inline_positions = config.rebuild_positions_after_import && pre_committed == 0;
     std::vector<motif::db::position_row> inline_positions;
     bool any_inline_flushed = false;
-    constexpr std::size_t inline_flush_threshold = 200'000;
 
     auto flush_inline_positions = [&]() -> bool
     {
@@ -515,17 +514,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             inline_positions.insert(inline_positions.end(), prep.position_rows.begin(), prep.position_rows.end());
         }
 
-        if (build_inline_positions && inline_positions.size() >= inline_flush_threshold) {
-            if (!flush_inline_positions()) {
-                fatal_error = error_code::io_failure;
-                eof_reached = true;
-                pflow.stop();
-                slot.prepared.reset();
-                slot.state = slot_state::empty;
-                return;
-            }
-        }
-
         last_game_id = static_cast<std::int64_t>(game_id);
         committed++;
         batch_pending++;
@@ -540,6 +528,15 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
                 if (log) {
                     log->error("SQLite batch commit failed");
                 }
+                slot.prepared.reset();
+                slot.state = slot_state::empty;
+                return;
+            }
+
+            if (build_inline_positions && !flush_inline_positions()) {
+                fatal_error = error_code::io_failure;
+                eof_reached = true;
+                pflow.stop();
                 slot.prepared.reset();
                 slot.state = slot_state::empty;
                 return;

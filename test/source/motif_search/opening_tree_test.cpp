@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
-#include <iostream>
 #include <limits>
 #include <optional>
 #include <ratio>
@@ -18,6 +17,7 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
+#include <fmt/format.h>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
@@ -653,11 +653,13 @@ TEST_CASE("opening_tree::open from starting position on real corpus", "[performa
     auto const& top = root.continuations[0];
     CHECK((top.san == "e4" || top.san == "d4"));
 
-    std::cout << "\n=== opening_tree::open from starting position ===\n"
-              << "  corpus:       " << pgn_file.filename().string() << "\n"
-              << "  committed:    " << summary->committed << " games\n"
-              << "  continuations:" << root.continuations.size() << "\n"
-              << "  elapsed:      " << elapsed_ms << " ms\n";
+    fmt::print("\n=== opening_tree::open from starting position ===\n"
+               "  corpus:       {}\n"
+               "  committed:    {} games\n"
+               "  continuations:{}\n"
+               "  elapsed:      {} ms\n",
+               pgn_file.filename().string(), summary->committed,
+               root.continuations.size(), elapsed_ms);
 
     auto const shutdown_result = motif::import::shutdown_logging();
     REQUIRE(shutdown_result.has_value());
@@ -720,10 +722,11 @@ TEST_CASE("opening_tree::open performance on sorted position store", "[performan
     auto const p99_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
     auto const p99_us = count > 0 ? latencies_us[p99_idx] : 0.0;
 
-    std::cout << "\n=== opening_tree::open performance ===\n"
-              << "  queries:      " << count << "\n"
-              << "  total:        " << total_ms << " ms\n"
-              << "  p99:          " << p99_us << " us\n";
+    fmt::print("\n=== opening_tree::open performance ===\n"
+               "  queries:      {}\n"
+               "  total:        {} ms\n"
+               "  p99:          {} us\n",
+               count, total_ms, p99_us);
 
     CHECK(p99_us < perf_p99_limit_us);
 
