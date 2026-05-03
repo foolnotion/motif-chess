@@ -27,6 +27,7 @@
 #include "motif/http/server.hpp"
 
 #include <chesslib/board/board.hpp>
+#include <chesslib/board/move_codec.hpp>
 #include <chesslib/board/move_generator.hpp>
 #include <chesslib/core/types.hpp>
 #include <chesslib/util/fen.hpp>
@@ -41,7 +42,6 @@
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
-#include "motif/db/move_codec.hpp"
 #include "motif/db/types.hpp"
 #include "motif/engine/engine_manager.hpp"
 #include "motif/engine/error.hpp"
@@ -320,7 +320,7 @@ constexpr int http_bad_request {400};
 constexpr int http_not_found {404};
 constexpr int http_conflict {409};
 constexpr int http_service_unavailable {503};
-constexpr int http_not_implemented {501};
+[[maybe_unused]] constexpr int http_not_implemented {501};
 constexpr int http_internal_error {500};
 
 constexpr std::array valid_results {"1-0", "0-1", "1/2-1/2", "*"};
@@ -591,16 +591,12 @@ auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> st
     };
 
     for (auto const encoded : game.moves) {
-        auto move_result = motif::db::decode_move(encoded);
+        auto const mov = chesslib::codec::decode(encoded);
         if (white_to_move) {
             append_token(fmt::format("{}.", move_number));
         }
-        if (move_result) {
-            append_token(chesslib::san::to_string(board, *move_result));
-            chesslib::move_maker {board, *move_result}.make();
-        } else {
-            append_token("?");
-        }
+        append_token(chesslib::san::to_string(board, mov));
+        chesslib::move_maker {board, mov}.make();
         if (white_to_move) {
             white_to_move = false;
         } else {
@@ -637,13 +633,9 @@ auto game_to_positions(motif::db::game const& game) -> detail::game_positions_re
     auto const starting_hash = fmt::format("{}", board.hash());
 
     for (auto const encoded : game.moves) {
-        auto move_result = motif::db::decode_move(encoded);
-        if (move_result) {
-            sans.push_back(chesslib::san::to_string(board, *move_result));
-            chesslib::move_maker {board, *move_result}.make();
-        } else {
-            sans.push_back("?");
-        }
+        auto const mov = chesslib::codec::decode(encoded);
+        sans.push_back(chesslib::san::to_string(board, mov));
+        chesslib::move_maker {board, mov}.make();
         fens.push_back(chesslib::fen::write(board));
         hashes.push_back(fmt::format("{}", board.hash()));
     }
@@ -1622,42 +1614,44 @@ void server::impl::setup_routes()
                 std::shared_ptr<analysis_sse_session> sse_sess;
                 {
                     std::scoped_lock const lock {analyses_mutex};
-                    auto const it = analyses.find(analysis_id);
-                    if (it == analyses.end()) {
+                    auto const analysis_it = analyses.find(analysis_id);
+                    if (analysis_it == analyses.end()) {
                         set_json_error(res, http_not_found, "analysis not found");
                         return;
                     }
-                    sse_sess = it->second;
+                    sse_sess = analysis_it->second;
                 }
 
-                res.set_chunked_content_provider(
-                    "text/event-stream",
-                    [sse_sess](size_t /*offset*/, httplib::DataSink& sink) -> bool
-                    {
-                        std::vector<std::string> pending;
-                        bool is_terminal = false;
-                        {
-                            std::unique_lock<std::mutex> lock {sse_sess->queue_mutex};
-                            sse_sess->cv.wait_for(lock,
-                                                  std::chrono::milliseconds {250},
-                                                  [&sse_sess] { return !sse_sess->event_queue.empty() || sse_sess->terminal.load(); });
-                            while (!sse_sess->event_queue.empty()) {
-                                pending.push_back(std::move(sse_sess->event_queue.front()));
-                                sse_sess->event_queue.pop_front();
-                            }
-                            is_terminal = sse_sess->terminal.load();
-                        }
-                        for (auto const& evt_str : pending) {
-                            if (!sink.write(evt_str.data(), evt_str.size())) {
-                                return false;
-                            }
-                        }
-                        if (is_terminal && pending.empty()) {
-                            sink.done();
-                            return false;
-                        }
-                        return !is_terminal;
-                    });
+                res.set_chunked_content_provider("text/event-stream",
+                                                 [sse_sess](size_t /*offset*/, httplib::DataSink& sink) -> bool
+                                                 {
+                                                     std::vector<std::string> pending;
+                                                     bool is_terminal = false;
+                                                     {
+                                                         std::unique_lock<std::mutex> lock {sse_sess->queue_mutex};
+                                                         constexpr auto sse_poll_interval_ms = std::chrono::milliseconds {250};
+                                                         sse_sess->cv.wait_for(
+                                                             lock,
+                                                             sse_poll_interval_ms,
+                                                             [&sse_sess]() -> bool
+                                                             { return !sse_sess->event_queue.empty() || sse_sess->terminal.load(); });
+                                                         while (!sse_sess->event_queue.empty()) {
+                                                             pending.push_back(std::move(sse_sess->event_queue.front()));
+                                                             sse_sess->event_queue.pop_front();
+                                                         }
+                                                         is_terminal = sse_sess->terminal.load();
+                                                     }
+                                                     for (auto const& evt_str : pending) {
+                                                         if (!sink.write(evt_str.data(), evt_str.size())) {
+                                                             return false;
+                                                         }
+                                                     }
+                                                     if (is_terminal && pending.empty()) {
+                                                         sink.done();
+                                                         return false;
+                                                     }
+                                                     return !is_terminal;
+                                                 });
             });
 
     // DELETE /api/engine/analyses/:analysis_id — stop an active analysis session.
@@ -1898,9 +1892,9 @@ void server::impl::setup_routes()
 
                         auto const prog = session->pipeline->progress();
                         auto const elapsed = static_cast<double>(prog.elapsed.count()) / 1000.0;
-                        auto const phase_str = [](motif::import::import_phase p) -> std::string_view
+                        auto const phase_str = [](motif::import::import_phase phase) -> std::string_view
                         {
-                            switch (p) {
+                            switch (phase) {
                                 case motif::import::import_phase::ingesting:
                                     return "ingesting";
                                 case motif::import::import_phase::rebuilding:
