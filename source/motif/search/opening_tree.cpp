@@ -83,6 +83,7 @@ struct tree_continuation_aggregate
     std::int64_t black_elo_sum {};
     std::uint32_t black_elo_count {};
     std::map<std::string, std::uint32_t, std::less<>> eco_counts;
+    std::uint32_t sample_game_id {};  // one game that took this continuation, for eco lookup
 };
 
 auto average_elo(std::int64_t const sum, std::uint32_t const count) -> std::optional<double>
@@ -257,59 +258,23 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
         };
     }
 
-    auto game_ids = std::vector<std::uint32_t> {};
-    game_ids.reserve(rows_res->size());
-    for (auto const& row : *rows_res) {
-        game_ids.push_back(row.game_id);
-    }
-    std::ranges::sort(game_ids);
-    auto const unique_end = std::ranges::unique(game_ids);
-    game_ids.erase(unique_end.begin(), unique_end.end());
-
-    auto contexts_res = database.store().get_game_contexts(game_ids);
-    if (!contexts_res) {
-        return tl::unexpected {error_code::io_failure};
-    }
-    auto const& contexts = *contexts_res;
-
+    // Group rows by (game_id, root_ply) occurrence.
     auto rows_by_occurrence = std::unordered_map<occurrence_key, std::vector<motif::db::tree_position_row>, occurrence_key_hash> {};
     for (auto const& row : *rows_res) {
-        rows_by_occurrence[occurrence_key {
-                               .game_id = row.game_id,
-                               .root_ply = row.root_ply,
-                           }]
-            .push_back(row);
+        rows_by_occurrence[occurrence_key {.game_id = row.game_id, .root_ply = row.root_ply}].push_back(row);
     }
 
+    // Aggregate occurrences using encoded_move from the position row directly —
+    // no SQLite round-trip needed here.
     auto node_aggregates = std::unordered_map<node_key, node_aggregate, node_key_hash> {};
 
-    // Process each root occurrence independently so repeated visits to the
-    // same root position inside one game contribute separate counts and build
-    // the correct descendant chain.
     for (auto& [occurrence, occurrence_rows] : rows_by_occurrence) {
         std::ranges::sort(occurrence_rows,
                           [](motif::db::tree_position_row const& left, motif::db::tree_position_row const& right) -> bool
                           { return left.depth < right.depth; });
 
-        auto const ctx_it = contexts.find(occurrence.game_id);
-        if (ctx_it == contexts.end()) {
-            return tl::unexpected {error_code::io_failure};
-        }
-        auto const& context = ctx_it->second;
-
-        auto root_board = replay_position(context, occurrence.root_ply);
-        if (!root_board || root_board->hash() != root_hash) {
-            return tl::unexpected {error_code::io_failure};
-        }
-
         auto parent_hash = root_hash;
         for (auto const& row : occurrence_rows) {
-            auto const move_ply = static_cast<std::size_t>(occurrence.root_ply + row.depth - 1U);
-            if (move_ply >= context.moves.size()) {
-                return tl::unexpected {error_code::io_failure};
-            }
-
-            auto const encoded_move = context.moves[move_ply];
             auto const nkey = node_key {.depth = row.depth, .parent_hash = parent_hash};
             auto& nag = node_aggregates.try_emplace(nkey, node_aggregate {}).first->second;
             if (!nag.has_sample) {
@@ -318,43 +283,21 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
                 nag.has_sample = true;
             }
 
-            auto& aggregate = nag.continuations.try_emplace(encoded_move, tree_continuation_aggregate {}).first->second;
-            aggregate.encoded_move = encoded_move;
+            auto& aggregate = nag.continuations.try_emplace(row.encoded_move, tree_continuation_aggregate {}).first->second;
+            aggregate.encoded_move = row.encoded_move;
             if (aggregate.frequency == 0U) {
                 aggregate.result_hash = row.child_hash;
+                aggregate.sample_game_id = occurrence.game_id;
             }
             ++aggregate.frequency;
             note_result(aggregate, row.result);
             note_elo(aggregate, row.white_elo, row.black_elo);
 
-            auto const eco = context.eco;
-            if (eco.has_value()) {
-                auto const& eco_value = eco.value();
-                ++aggregate.eco_counts[eco_value];
-                auto const& opening_name = context.opening_name;
-                if (opening_name.has_value()) {
-                    note_opening_name(nag.eco_lookup, eco_value, *opening_name);
-                }
-            }
-
-            auto replayed = replay_position(context, static_cast<std::uint16_t>(occurrence.root_ply + row.depth));
-            if (!replayed || replayed->hash() != row.child_hash) {
-                return tl::unexpected {error_code::io_failure};
-            }
-
             parent_hash = row.child_hash;
         }
     }
 
-    // Now build the tree iteratively using BFS.
-    // We'll build node objects from the aggregated data.
-    // First, build all nodes at each depth and link them.
-    // We need: for each (depth, parent_hash), build a node with
-    // continuations, where each continuation's subtree points to the
-    // child node at (depth+1, result_hash) if depth < max_depth,
-    // or to a leaf node if depth == max_depth.
-
-    // Collect all node_keys sorted by depth (ascending) for BFS order.
+    // Sort keys by depth (ascending) for the forward and reverse passes.
     auto all_keys = std::vector<node_key> {};
     all_keys.reserve(node_aggregates.size());
     for (auto const& [nkey, nag] : node_aggregates) {
@@ -369,10 +312,94 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
                           return left.parent_hash < right.parent_hash;
                       });
 
-    // Map from (depth, parent_hash) → built node
+    // Fetch game contexts for sample games only (one per distinct node/continuation,
+    // O(distinct positions) rather than O(games)).  Used for eco/opening attribution
+    // and to reconstruct the root board when root_ply > 0.
+    auto sample_ids = std::vector<std::uint32_t> {};
+    sample_ids.reserve(node_aggregates.size() * 4U);
+    for (auto const& [nkey, nag] : node_aggregates) {
+        if (nag.has_sample) {
+            sample_ids.push_back(nag.sample_game_id);
+        }
+        for (auto const& [enc, agg] : nag.continuations) {
+            sample_ids.push_back(agg.sample_game_id);
+        }
+    }
+    std::ranges::sort(sample_ids);
+    auto const sample_unique_end = std::ranges::unique(sample_ids);
+    sample_ids.erase(sample_unique_end.begin(), sample_unique_end.end());
+
+    auto sample_contexts_res = database.store().get_game_contexts(sample_ids);
+    if (!sample_contexts_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const& sample_contexts = *sample_contexts_res;
+
+    // Populate eco/opening into each continuation aggregate from its sample game.
+    for (auto& [nkey, nag] : node_aggregates) {
+        for (auto& [enc, agg] : nag.continuations) {
+            auto const ctx_it = sample_contexts.find(agg.sample_game_id);
+            if (ctx_it == sample_contexts.end()) {
+                continue;
+            }
+            auto const& ctx = ctx_it->second;
+            if (ctx.eco.has_value()) {
+                ++agg.eco_counts[*ctx.eco];
+                if (ctx.opening_name.has_value()) {
+                    note_opening_name(nag.eco_lookup, *ctx.eco, *ctx.opening_name);
+                }
+            }
+        }
+    }
+
+    // Get root board.  For root_ply == 0 (the common case — starting position)
+    // no context fetch is needed.  For deeper roots, replay one sample game.
+    auto root_board = [&]() -> result<chesslib::board>
+    {
+        auto const depth1_key = node_key {.depth = 1U, .parent_hash = root_hash};
+        auto const nag_it = node_aggregates.find(depth1_key);
+        if (nag_it == node_aggregates.end()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        if (nag_it->second.sample_root_ply == 0U) {
+            return chesslib::board {};
+        }
+        auto const ctx_it = sample_contexts.find(nag_it->second.sample_game_id);
+        if (ctx_it == sample_contexts.end()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        return replay_position(ctx_it->second, nag_it->second.sample_root_ply);
+    }();
+    if (!root_board) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    // Forward BFS: build a map from zobrist_hash → board state by applying
+    // encoded moves from the root outward.  This replaces per-node replay_position
+    // calls in the build loop below.
+    auto board_at_hash = std::unordered_map<std::uint64_t, chesslib::board> {};
+    board_at_hash.emplace(root_hash, *root_board);
+
+    for (auto const& nkey : all_keys) {
+        auto const parent_it = board_at_hash.find(nkey.parent_hash);
+        if (parent_it == board_at_hash.end()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto const& parent_board = parent_it->second;
+        auto const& nag = node_aggregates.at(nkey);
+        for (auto const& [enc, agg] : nag.continuations) {
+            if (!board_at_hash.contains(agg.result_hash)) {
+                auto child_board = parent_board;
+                chesslib::move_maker maker {child_board, chesslib::codec::decode(enc)};
+                maker.make();
+                board_at_hash.emplace(agg.result_hash, child_board);
+            }
+        }
+    }
+
+    // Build nodes bottom-up (max_depth → 1).
     auto built_nodes = std::unordered_map<node_key, std::unique_ptr<node>, node_key_hash> {};
 
-    // Build nodes bottom-up (from max_depth to 1)
     for (auto const& nkey : all_keys | std::views::reverse) {
         auto const nag_it = node_aggregates.find(nkey);
         if (nag_it == node_aggregates.end()) {
@@ -380,27 +407,21 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
         }
         auto const& nag = nag_it->second;
 
-        auto const ctx_it = contexts.find(nag.sample_game_id);
-        if (ctx_it == contexts.end()) {
+        auto const parent_board_it = board_at_hash.find(nkey.parent_hash);
+        if (parent_board_it == board_at_hash.end()) {
             return tl::unexpected {error_code::io_failure};
         }
-
-        auto const parent_ply = static_cast<std::uint16_t>(nag.sample_root_ply + nkey.depth - 1U);
-        auto parent_board = replay_position(ctx_it->second, parent_ply);
-        if (!parent_board || parent_board->hash() != nkey.parent_hash) {
-            return tl::unexpected {error_code::io_failure};
-        }
+        auto const& parent_board = parent_board_it->second;
 
         auto current_node = std::make_unique<node>(node {.zobrist_hash = nkey.parent_hash, .continuations = {}, .is_expanded = true});
 
         for (auto const& [encoded_move, aggregate] : nag.continuations) {
             auto const child_key = node_key {.depth = static_cast<std::uint16_t>(nkey.depth + 1U), .parent_hash = aggregate.result_hash};
-            auto child_it = built_nodes.find(child_key);
             auto const is_boundary = nkey.depth >= max_depth;
-            auto cont = build_continuation(aggregate, nag.eco_lookup, *parent_board, !is_boundary, aggregate.result_hash);
+            auto cont = build_continuation(aggregate, nag.eco_lookup, parent_board, !is_boundary, aggregate.result_hash);
 
+            auto const child_it = built_nodes.find(child_key);
             if (child_it != built_nodes.end()) {
-                // Attach pre-built child subtree
                 cont.subtree = std::move(child_it->second);
             }
 
@@ -411,26 +432,17 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
         built_nodes[nkey] = std::move(current_node);
     }
 
-    // The root node is at depth 0, but it's built from depth-1
-    // aggregates. The root node key doesn't match the pattern —
-    // we need to special-case it.
-    // Actually the root is: its continuations come from depth=1
-    // nodes whose parent_hash == root_hash.
-    auto result_tree = tree {};
-    result_tree.root.zobrist_hash = root_hash;
-    result_tree.root.is_expanded = true;
-    result_tree.prefetch_depth = prefetch_depth;
-
-    // Find the root's children: depth=1, parent_hash=root_hash
     auto const root_key = node_key {.depth = 1U, .parent_hash = root_hash};
     auto root_node_it = built_nodes.find(root_key);
     if (root_node_it == built_nodes.end()) {
         return tl::unexpected {error_code::io_failure};
     }
 
+    auto result_tree = tree {};
     result_tree.root = std::move(*root_node_it->second);
     result_tree.root.zobrist_hash = root_hash;
     result_tree.root.is_expanded = true;
+    result_tree.prefetch_depth = prefetch_depth;
 
     return result_tree;
 }
