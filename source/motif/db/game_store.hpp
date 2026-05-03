@@ -102,6 +102,17 @@ class game_store
     auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
     auto insert_game_tags(std::uint32_t game_id, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
     auto prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql) -> result<sqlite3_stmt*>;
+
+    auto update_text_field(std::uint32_t game_id, std::string_view column, std::string const& value) -> result<void>;
+    auto patch_player(std::uint32_t game_id,
+                      std::string_view id_col,
+                      player const& current,
+                      std::optional<std::string> const& name_patch,
+                      std::optional<std::int32_t> const& elo_patch) -> result<void>;
+    auto patch_event(std::uint32_t game_id,
+                     game const& current,
+                     std::optional<std::string> const& event_patch,
+                     std::optional<std::string> const& site_patch) -> result<void>;
 };
 
 }  // namespace motif::db
