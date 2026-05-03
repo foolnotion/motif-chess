@@ -1053,7 +1053,7 @@ auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& p
         auto const existing_details = cur_game->event_details;
         auto const event_name = patch.event.value_or(existing_details ? existing_details->name : std::string {});
         if (!event_name.empty()) {
-            std::optional<std::string> inherited_site = existing_details ? existing_details->site : std::nullopt;
+            std::optional<std::string> const inherited_site = existing_details ? existing_details->site : std::nullopt;
             std::optional<std::string> const event_site = patch.site.has_value() ? patch.site : inherited_site;
             std::optional<std::string> const event_date = existing_details ? existing_details->date : std::nullopt;
             auto evt = motif::db::event {.name = event_name, .site = event_site, .date = event_date};
