@@ -272,9 +272,10 @@ auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16
 auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>
 {
     std::ostringstream sql;
-    // CTE deduplicates per (game_id, continuation) so that AVG and COUNT(DISTINCT)
-    // aggregate over the same unique-game population. Without this, a game that
-    // revisits the root position via repetition inflates AVG without inflating COUNT.
+    // deduped: one row per (game, move, child) that visited the root position.
+    // child_agg: global stats for each child position across ALL games (not just
+    // those that came through this parent), so transpositions are counted.
+    // eco_sample uses game_ids from deduped (P→Q path) for board reconstruction.
     sql << "WITH deduped AS ("
            "SELECT "
            "p_root.game_id, "
@@ -291,21 +292,41 @@ auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const
         << "WHERE p_root.zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT) "
         << "GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash, "
            "p_root.result, p_root.white_elo, p_root.black_elo"
+           "), "
+           "child_hashes AS ("
+           "SELECT DISTINCT child_hash FROM deduped"
+           "), "
+           "child_agg AS ("
+           "SELECT "
+           "uniq.zobrist_hash, "
+           "COUNT(*) AS frequency, "
+           "COUNT(CASE WHEN uniq.result > 0 THEN 1 END) AS white_wins, "
+           "COUNT(CASE WHEN uniq.result = 0 THEN 1 END) AS draws, "
+           "COUNT(CASE WHEN uniq.result < 0 THEN 1 END) AS black_wins, "
+           "AVG(CAST(uniq.white_elo AS DOUBLE)) AS avg_white_elo, "
+           "AVG(CAST(uniq.black_elo AS DOUBLE)) AS avg_black_elo "
+           "FROM ("
+           "SELECT DISTINCT p.zobrist_hash, p.game_id, p.result, p.white_elo, p.black_elo "
+           "FROM position p "
+           "JOIN child_hashes ON child_hashes.child_hash = p.zobrist_hash"
+           ") AS uniq "
+           "GROUP BY uniq.zobrist_hash"
            ") "
            "SELECT "
-           "encoded_move, "
-           "child_hash, "
-           "MIN(root_ply) AS root_ply, "
-           "COUNT(DISTINCT game_id) AS frequency, "
-           "COUNT(DISTINCT CASE WHEN result > 0 THEN game_id END) AS white_wins, "
-           "COUNT(DISTINCT CASE WHEN result = 0 THEN game_id END) AS draws, "
-           "COUNT(DISTINCT CASE WHEN result < 0 THEN game_id END) AS black_wins, "
-           "AVG(CAST(white_elo AS DOUBLE)) AS avg_white_elo, "
-           "AVG(CAST(black_elo AS DOUBLE)) AS avg_black_elo, "
-           "MIN(game_id) AS eco_sample_min, "
-           "MAX(game_id) AS eco_sample_max "
-           "FROM deduped "
-           "GROUP BY encoded_move, child_hash";
+           "d.encoded_move, "
+           "d.child_hash, "
+           "MIN(d.root_ply) AS root_ply, "
+           "MIN(ca.frequency) AS frequency, "
+           "MIN(ca.white_wins) AS white_wins, "
+           "MIN(ca.draws) AS draws, "
+           "MIN(ca.black_wins) AS black_wins, "
+           "MIN(ca.avg_white_elo) AS avg_white_elo, "
+           "MIN(ca.avg_black_elo) AS avg_black_elo, "
+           "MIN(d.game_id) AS eco_sample_min, "
+           "MAX(d.game_id) AS eco_sample_max "
+           "FROM deduped d "
+           "JOIN child_agg ca ON ca.zobrist_hash = d.child_hash "
+           "GROUP BY d.encoded_move, d.child_hash";
 
     result_guard guard {};
     if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
