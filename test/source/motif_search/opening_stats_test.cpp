@@ -681,7 +681,7 @@ TEST_CASE("opening_stats::query orphaned rows inflate counts until position stor
     CHECK(cont.frequency == 2);
 }
 
-TEST_CASE("opening_stats::query returns empty stats for terminal positions", "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query counts terminal positions in total_games", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"terminal_total_games"};
 
@@ -698,21 +698,19 @@ TEST_CASE("opening_stats::query returns empty stats for terminal positions", "[m
                                             .opening_name = {}}),
                              });
 
-    // total_games = "games that play a move from this position"; a terminal
-    // position has no continuations so the result is empty (total_games = 0).
     auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
     REQUIRE(stats.has_value());
-    CHECK(stats->total_games == 0);
+    CHECK(stats->total_games == 1);
     CHECK(stats->continuations.empty());
 }
 
-TEST_CASE("opening_stats::query with parent_hash excludes transpositions from total_games", "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query counts transpositions in total_games", "[motif-search][opening_stats]")
 {
     // 1.Nf3 Nc6 2.Nc3 Nf6 and 1.Nc3 Nf6 2.Nf3 Nc6 are pure knight moves so
     // they produce no en-passant state and reach the identical position at ply 4.
-    // Without parent_hash both games inflate the count; with parent_hash anchored
-    // at the 1.Nf3 Nc6 path only game 1 qualifies.
-    tmp_dir const tdir {"parent_hash_transposition"};
+    // The explorer counts all games containing a position regardless of move order,
+    // so both games must contribute to total_games.
+    tmp_dir const tdir {"transposition_count"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "transposition-db");
     REQUIRE(manager.has_value());
@@ -731,26 +729,15 @@ TEST_CASE("opening_stats::query with parent_hash excludes transpositions from to
                                          .eco = {},
                                          .opening_name = {}})});
 
-    // The transposition position (ply 4) and its immediate predecessor (ply 3)
-    // on game 1's path. parent_hash must be exactly one ply before the queried
-    // position, so we use the ply-3 position (after 1.Nf3 Nc6 2.Nc3), not ply 2.
-    auto const hash_nf3_nc6_nc3 = hash_after_sans({"Nf3", "Nc6", "Nc3"});
-    auto const hash_nf3_nc6_nc3_nf6 = hash_after_sans({"Nf3", "Nc6", "Nc3", "Nf6"});
-    // Verify the transposition: both paths arrive at the same position.
-    CHECK(hash_nf3_nc6_nc3_nf6 == hash_after_sans({"Nc3", "Nf6", "Nf3", "Nc6"}));
+    auto const hash_transposition = hash_after_sans({"Nf3", "Nc6", "Nc3", "Nf6"});
+    CHECK(hash_transposition == hash_after_sans({"Nc3", "Nf6", "Nf3", "Nc6"}));
 
-    // Without parent context both games are counted (transposition inflation).
-    auto stats_global = motif::search::opening_stats::query(*manager, hash_nf3_nc6_nc3_nf6);
-    REQUIRE(stats_global.has_value());
-    CHECK(stats_global->total_games == 2);
-
-    // With parent anchored at game 1's ply-3 position, only game 1 qualifies.
-    // Game 2's ply-3 parent is a different position (Nc3 Nf6 Nf3), so it is excluded.
-    auto stats_anchored = motif::search::opening_stats::query(*manager, hash_nf3_nc6_nc3_nf6, hash_nf3_nc6_nc3);
-    REQUIRE(stats_anchored.has_value());
-    CHECK(stats_anchored->total_games == 1);
-    REQUIRE(stats_anchored->continuations.size() == 1);
-    CHECK(stats_anchored->continuations.front().frequency == 1);
+    auto stats = motif::search::opening_stats::query(*manager, hash_transposition);
+    REQUIRE(stats.has_value());
+    // Both games reach this position — transpositions are intentionally included.
+    CHECK(stats->total_games == 2);
+    REQUIRE(stats->continuations.size() == 1);
+    CHECK(stats->continuations.front().frequency == 2);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
