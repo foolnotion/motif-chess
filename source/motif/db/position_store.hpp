@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -25,7 +26,8 @@ class position_store
     auto query_by_zobrist(std::uint64_t zobrist_hash, std::size_t limit = 0, std::size_t offset = 0) const
         -> result<std::vector<position_match>>;
     auto query_tree_slice(std::uint64_t root_hash, std::uint16_t max_depth) const -> result<std::vector<tree_position_row>>;
-    auto query_opening_stats(std::uint64_t zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>;
+    auto query_opening_stats(std::uint64_t zobrist_hash, std::optional<std::uint64_t> parent_hash = std::nullopt) const
+        -> result<std::vector<opening_stat_agg_row>>;
     auto sample_zobrist_hashes(std::size_t limit, std::uint64_t seed = 0) const -> result<std::vector<std::uint64_t>>;
     auto delete_by_game_id(std::uint32_t game_id) -> result<void>;
     auto count_by_zobrist(std::uint64_t zobrist_hash) const -> result<std::int64_t>;

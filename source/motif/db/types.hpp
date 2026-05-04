@@ -81,6 +81,9 @@ struct opening_stat_agg_row
     std::optional<double> avg_black_elo;
     std::uint32_t eco_sample_min {};
     std::uint32_t eco_sample_max {};
+    // Distinct games that have this position AND play a move from it (same
+    // population as the frequency counts). Does not include terminal games.
+    std::uint32_t total_games {};
 };
 
 // source_type values: "manual" (user-added via API), "imported" (bulk import).
