@@ -418,7 +418,69 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         }
     };
 
-    // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+    auto log_skipped_game = [&](pipeline_slot const& slot) -> void
+    {
+        if (!log) {
+            return;
+        }
+        auto const error_desc = slot.error ? to_string(*slot.error) : "pgn read error";
+        if (!slot.pgn_game.tags.empty()) {
+            auto const white = find_tag(slot.pgn_game.tags, "White");
+            auto const black = find_tag(slot.pgn_game.tags, "Black");
+            auto const event = find_tag(slot.pgn_game.tags, "Event");
+            log->warn("Skipped game at offset {}: {}. White: \"{}\", Black: \"{}\", Event: \"{}\"",
+                      slot.game_start_offset,
+                      error_desc,
+                      white.empty() ? "N/A" : white,
+                      black.empty() ? "N/A" : black,
+                      event.empty() ? "N/A" : event);
+        } else {
+            log->warn("Skipped game at offset {}: {} (headers unavailable)", slot.game_start_offset, error_desc);
+        }
+    };
+
+    // Returns false if the pipeline should stop (fatal_error or stop_requested set).
+    auto try_flush_batch = [&](tf::Pipeflow& pflow) -> bool
+    {
+        if (batch_pending < config.batch_size) {
+            return true;
+        }
+        if (!commit_sqlite_batch()) {
+            rollback_sqlite_batch();
+            fatal_error = error_code::io_failure;
+            eof_reached = true;
+            pflow.stop();
+            if (log) {
+                log->error("SQLite batch commit failed");
+            }
+            return false;
+        }
+        if (build_inline_positions && !flush_inline_positions()) {
+            fatal_error = error_code::io_failure;
+            eof_reached = true;
+            pflow.stop();
+            return false;
+        }
+        write_progress_checkpoint();
+        batch_pending = 0;
+        if (stop_requested_.load(std::memory_order_relaxed)) {
+            stopped = true;
+            eof_reached = true;
+            pflow.stop();
+            return false;
+        }
+        if (!begin_sqlite_batch()) {
+            fatal_error = error_code::io_failure;
+            eof_reached = true;
+            pflow.stop();
+            if (log) {
+                log->error("SQLite batch begin failed");
+            }
+            return false;
+        }
+        return true;
+    };
+
     auto stage2 = [&](tf::Pipeflow& pflow) -> void
     {
         auto& slot = slots[pflow.line()];
@@ -427,24 +489,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         if (slot.state == slot_state::parse_error) {
             games_skipped_.fetch_add(1, std::memory_order_relaxed);
             games_errored_.fetch_add(1, std::memory_order_relaxed);
-            if (log) {
-                auto const error_desc = slot.error ? to_string(*slot.error) : "pgn read error";
-                auto const tags_available = !slot.pgn_game.tags.empty();
-                if (tags_available) {
-                    auto const white = find_tag(slot.pgn_game.tags, "White");
-                    auto const black = find_tag(slot.pgn_game.tags, "Black");
-                    auto const event = find_tag(slot.pgn_game.tags, "Event");
-                    log->warn(
-                        "Skipped game at offset {}: {}. White: \"{}\", " "Black: \"{}\", Event: \"{}\"",
-                        slot.game_start_offset,
-                        error_desc,
-                        white.empty() ? "N/A" : white,
-                        black.empty() ? "N/A" : black,
-                        event.empty() ? "N/A" : event);
-                } else {
-                    log->warn("Skipped game at offset {}: {} (headers unavailable)", slot.game_start_offset, error_desc);
-                }
-            }
+            log_skipped_game(slot);
             slot.state = slot_state::empty;
             return;
         }
@@ -454,7 +499,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         }
 
         auto& prep = *slot.prepared;
-
         auto ins = db_.store().insert(prep.game_row);
         if (!ins) {
             if (ins.error() == motif::db::error_code::duplicate) {
@@ -492,50 +536,10 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         batch_pending++;
         games_committed_.fetch_add(1, std::memory_order_relaxed);
 
-        if (batch_pending >= config.batch_size) {
-            if (!commit_sqlite_batch()) {
-                rollback_sqlite_batch();
-                fatal_error = error_code::io_failure;
-                eof_reached = true;
-                pflow.stop();
-                if (log) {
-                    log->error("SQLite batch commit failed");
-                }
-                slot.prepared.reset();
-                slot.state = slot_state::empty;
-                return;
-            }
-
-            if (build_inline_positions && !flush_inline_positions()) {
-                fatal_error = error_code::io_failure;
-                eof_reached = true;
-                pflow.stop();
-                slot.prepared.reset();
-                slot.state = slot_state::empty;
-                return;
-            }
-
-            write_progress_checkpoint();
-            batch_pending = 0;
-            if (stop_requested_.load(std::memory_order_relaxed)) {
-                stopped = true;
-                eof_reached = true;
-                pflow.stop();
-                slot.prepared.reset();
-                slot.state = slot_state::empty;
-                return;
-            }
-            if (!begin_sqlite_batch()) {
-                fatal_error = error_code::io_failure;
-                eof_reached = true;
-                pflow.stop();
-                if (log) {
-                    log->error("SQLite batch begin failed");
-                }
-                slot.prepared.reset();
-                slot.state = slot_state::empty;
-                return;
-            }
+        if (!try_flush_batch(pflow)) {
+            slot.prepared.reset();
+            slot.state = slot_state::empty;
+            return;
         }
 
         slot.prepared.reset();
