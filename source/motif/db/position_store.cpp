@@ -79,6 +79,7 @@ constexpr idx_t avg_white_elo = 7;
 constexpr idx_t avg_black_elo = 8;
 constexpr idx_t eco_min = 9;
 constexpr idx_t eco_max = 10;
+constexpr idx_t total_games = 11;
 }  // namespace opening_stats_col
 
 struct result_guard
@@ -269,12 +270,18 @@ auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16
     return rows;
 }
 
-auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>
+auto position_store::query_opening_stats(std::uint64_t const zobrist_hash, std::optional<std::uint64_t> const parent_hash) const
+    -> result<std::vector<opening_stat_agg_row>>
 {
+    // The deduped CTE aggregates per (game_id, continuation) so that AVG and
+    // COUNT(DISTINCT) work over the same unique-game population. Without this, a
+    // game that revisits the root via repetition inflates AVG without COUNT.
+    //
+    // When parent_hash is provided the CTE is further constrained: only games
+    // where parent_hash appears at ply N and zobrist_hash at ply N+1 are included.
+    // This eliminates transposition inflation — a position reachable via multiple
+    // move orders is counted only through the specific path the client navigated.
     std::ostringstream sql;
-    // CTE deduplicates per (game_id, continuation) so that AVG and COUNT(DISTINCT)
-    // aggregate over the same unique-game population. Without this, a game that
-    // revisits the root position via repetition inflates AVG without inflating COUNT.
     sql << "WITH deduped AS ("
            "SELECT "
            "p_root.game_id, "
@@ -284,12 +291,27 @@ auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const
            "p_root.result, "
            "p_root.white_elo, "
            "p_root.black_elo "
-           "FROM position p_root "
-           "JOIN position p_cont "
-           "ON  p_cont.game_id = p_root.game_id "
-           "AND p_cont.ply = p_root.ply + 1 "
-        << "WHERE p_root.zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT) "
-        << "GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash, "
+           "FROM position ";
+
+    if (parent_hash.has_value()) {
+        sql << "p_parent "
+               "JOIN position p_root "
+               "ON  p_root.game_id = p_parent.game_id "
+               "AND p_root.ply = p_parent.ply + 1 "
+            << "JOIN position p_cont "
+               "ON  p_cont.game_id = p_root.game_id "
+               "AND p_cont.ply = p_root.ply + 1 "
+            << "WHERE p_parent.zobrist_hash = CAST(" << *parent_hash << " AS UBIGINT) "
+            << "AND p_root.zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT) ";
+    } else {
+        sql << "p_root "
+               "JOIN position p_cont "
+               "ON  p_cont.game_id = p_root.game_id "
+               "AND p_cont.ply = p_root.ply + 1 "
+            << "WHERE p_root.zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT) ";
+    }
+
+    sql << "GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash, "
            "p_root.result, p_root.white_elo, p_root.black_elo"
            ") "
            "SELECT "
@@ -303,7 +325,8 @@ auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const
            "AVG(CAST(white_elo AS DOUBLE)) AS avg_white_elo, "
            "AVG(CAST(black_elo AS DOUBLE)) AS avg_black_elo, "
            "MIN(game_id) AS eco_sample_min, "
-           "MAX(game_id) AS eco_sample_max "
+           "MAX(game_id) AS eco_sample_max, "
+           "(SELECT COUNT(DISTINCT game_id) FROM deduped) AS total_games "
            "FROM deduped "
            "GROUP BY encoded_move, child_hash";
 
@@ -330,6 +353,7 @@ auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const
             .avg_black_elo = read_optional_double(guard.res, opening_stats_col::avg_black_elo, row),
             .eco_sample_min = duckdb_value_uint32(&guard.res, opening_stats_col::eco_min, row),
             .eco_sample_max = duckdb_value_uint32(&guard.res, opening_stats_col::eco_max, row),
+            .total_games = duckdb_value_uint32(&guard.res, opening_stats_col::total_games, row),
         });
     }
 

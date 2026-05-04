@@ -79,21 +79,18 @@ auto resolve_eco(motif::db::opening_stat_agg_row const& row, context_map const& 
 namespace motif::search::opening_stats
 {
 
-auto query(motif::db::database_manager const& database, std::uint64_t const zobrist_hash) -> result<stats>
+auto query(motif::db::database_manager const& database, std::uint64_t const zobrist_hash, std::optional<std::uint64_t> const parent_hash)
+    -> result<stats>
 {
-    auto total_count_res = database.positions().count_distinct_games_by_zobrist(zobrist_hash);
-    if (!total_count_res) {
-        return tl::unexpected {error_code::io_failure};
-    }
-    if (*total_count_res == 0) {
-        return stats {};
-    }
-
-    auto rows_res = database.positions().query_opening_stats(zobrist_hash);
+    auto rows_res = database.positions().query_opening_stats(zobrist_hash, parent_hash);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }
     auto const& rows = *rows_res;
+
+    if (rows.empty()) {
+        return stats {};
+    }
 
     auto candidate_ids = std::vector<std::uint32_t> {};
     candidate_ids.reserve(rows.size() * 2);
@@ -123,7 +120,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
     }
 
     auto output = stats {};
-    output.total_games = static_cast<std::uint32_t>(*total_count_res);
+    output.total_games = rows.front().total_games;
     output.continuations.reserve(rows.size());
 
     for (auto const& row : rows) {

@@ -945,10 +945,23 @@ void server::impl::setup_routes()
                     // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
                 }
 
-                auto query_result = [this, hash_val]() -> decltype(motif::search::opening_stats::query(database, hash_val))
+                std::optional<std::uint64_t> parent_hash;
+                if (req.has_param("parent_hash")) {
+                    auto const& ph_str = req.get_param_value("parent_hash");
+                    std::uint64_t ph_val {};
+                    // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+                    auto const [ptr, ec] = std::from_chars(ph_str.data(), ph_str.data() + ph_str.size(), ph_val);
+                    // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+                    if (ec == std::errc {} && ptr == ph_str.data() + ph_str.size()) {
+                        parent_hash = ph_val;
+                    }
+                }
+
+                auto query_result =
+                    [this, hash_val, parent_hash]() -> decltype(motif::search::opening_stats::query(database, hash_val, parent_hash))
                 {
                     std::scoped_lock const lock {database_mutex};
-                    return motif::search::opening_stats::query(database, hash_val);
+                    return motif::search::opening_stats::query(database, hash_val, parent_hash);
                 }();
                 if (!query_result) {
                     set_json_error(res, http_internal_error, "stats query failed");
