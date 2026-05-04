@@ -740,6 +740,47 @@ TEST_CASE("opening_stats::query counts transpositions in total_games", "[motif-s
     CHECK(stats->continuations.front().frequency == 2);
 }
 
+TEST_CASE("opening_stats::query continuation frequency counts all paths to child", "[motif-search][opening_stats]")
+{
+    // Game 1 arrives at the transposition position via 1.Nf3 Nc6 2.Nc3 Nf6 (parent = after Nf3 Nc6 Nc3).
+    // Game 2 arrives via 1.Nc3 Nf6 2.Nf3 Nc6 (different parent).
+    // Querying from game 1's parent should report frequency == 2 for the Nf6 continuation,
+    // because the child position is reached by both games regardless of path.
+    tmp_dir const tdir {"transposition_parent"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "transposition-parent-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"Nf3", "Nc6", "Nc3", "Nf6", "e4"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = {},
+                                         .opening_name = {}}),
+                              make_game({.sans = {"Nc3", "Nf6", "Nf3", "Nc6", "e4"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_high,
+                                         .eco = {},
+                                         .opening_name = {}})});
+
+    // This is game 1's parent at ply 3 — only game 1 passed through it.
+    auto const hash_parent = hash_after_sans({"Nf3", "Nc6", "Nc3"});
+    auto const hash_child = hash_after_sans({"Nf3", "Nc6", "Nc3", "Nf6"});
+
+    auto stats = motif::search::opening_stats::query(*manager, hash_parent);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 1);
+    REQUIRE(stats->continuations.size() == 1);
+
+    auto const& cont = stats->continuations.front();
+    CHECK(cont.san == "Nf6");
+    CHECK(cont.result_hash == hash_child);
+    // Child is reached by 2 games (via transposition) — frequency must reflect that.
+    CHECK(cont.frequency == 2);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("rebuild_position_store makes total_games consistent with game count", "[motif-db][database_manager]")
 {
