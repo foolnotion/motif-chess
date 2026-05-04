@@ -164,6 +164,8 @@ constexpr int eco = 6;
 constexpr int source_type = 7;
 constexpr int source_label = 8;
 constexpr int review_status = 9;
+constexpr int white_elo = 10;
+constexpr int black_elo = 11;
 }  // namespace list_col
 
 namespace list_param
@@ -173,8 +175,20 @@ constexpr int white_player = 2;
 constexpr int black_player = 3;
 constexpr int result_is_null = 4;
 constexpr int result = 5;
-constexpr int limit = 6;
-constexpr int offset = 7;
+constexpr int eco_is_null = 6;
+constexpr int eco_prefix = 7;
+constexpr int date_from_is_null = 8;
+constexpr int date_from = 9;
+constexpr int date_to_is_null = 10;
+constexpr int date_to = 11;
+constexpr int min_elo_is_null = 12;
+constexpr int min_elo_white = 13;
+constexpr int min_elo_black = 14;
+constexpr int max_elo_is_null = 15;
+constexpr int max_elo_white = 16;
+constexpr int max_elo_black = 17;
+constexpr int limit = 18;
+constexpr int offset = 19;
 }  // namespace list_param
 
 // NOLINT(llvm-prefer-static-over-anonymous-namespace): conflicts with
@@ -845,13 +859,20 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
             COALESCE(g.eco, ''),
             COALESCE(g.source_type, 'imported'),
             g.source_label,
-            COALESCE(g.review_status, 'new')
+            COALESCE(g.review_status, 'new'),
+            w.elo,
+            b.elo
         FROM game g
         JOIN player w ON w.id = g.white_id
         JOIN player b ON b.id = g.black_id
         LEFT JOIN event e ON e.id = g.event_id
         WHERE (? IS NULL OR instr(lower(w.name), lower(?)) > 0 OR instr(lower(b.name), lower(?)) > 0)
           AND (? IS NULL OR g.result = ?)
+          AND (? IS NULL OR g.eco LIKE ? || '%')
+          AND (? IS NULL OR g.date >= ?)
+          AND (? IS NULL OR g.date <= ?)
+          AND (? IS NULL OR w.elo >= ? OR b.elo >= ?)
+          AND (? IS NULL OR w.elo <= ? OR b.elo <= ?)
         ORDER BY g.id ASC
         LIMIT ? OFFSET ?
     )sql";
@@ -871,6 +892,18 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
     bind_optional_text(stmt->get(), list_param::black_player, query.player);
     bind_optional_text(stmt->get(), list_param::result_is_null, query.result);
     bind_optional_text(stmt->get(), list_param::result, query.result);
+    bind_optional_text(stmt->get(), list_param::eco_is_null, query.eco_prefix);
+    bind_optional_text(stmt->get(), list_param::eco_prefix, query.eco_prefix);
+    bind_optional_text(stmt->get(), list_param::date_from_is_null, query.date_from);
+    bind_optional_text(stmt->get(), list_param::date_from, query.date_from);
+    bind_optional_text(stmt->get(), list_param::date_to_is_null, query.date_to);
+    bind_optional_text(stmt->get(), list_param::date_to, query.date_to);
+    bind_optional_int(stmt->get(), list_param::min_elo_is_null, query.min_elo);
+    bind_optional_int(stmt->get(), list_param::min_elo_white, query.min_elo);
+    bind_optional_int(stmt->get(), list_param::min_elo_black, query.min_elo);
+    bind_optional_int(stmt->get(), list_param::max_elo_is_null, query.max_elo);
+    bind_optional_int(stmt->get(), list_param::max_elo_white, query.max_elo);
+    bind_optional_int(stmt->get(), list_param::max_elo_black, query.max_elo);
     if (sqlite3_bind_int64(stmt->get(), list_param::limit, static_cast<sqlite3_int64>(query.limit)) != SQLITE_OK
         || sqlite3_bind_int64(stmt->get(), list_param::offset, static_cast<sqlite3_int64>(query.offset)) != SQLITE_OK)
     {
@@ -889,6 +922,8 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
             .id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), list_col::game_id)),
             .white = column_text(stmt->get(), list_col::white),
             .black = column_text(stmt->get(), list_col::black),
+            .white_elo = column_optional_int32(stmt->get(), list_col::white_elo),
+            .black_elo = column_optional_int32(stmt->get(), list_col::black_elo),
             .result = column_text(stmt->get(), list_col::result),
             .event = column_text(stmt->get(), list_col::event),
             .date = column_text(stmt->get(), list_col::date),

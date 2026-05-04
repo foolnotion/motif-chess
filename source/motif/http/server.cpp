@@ -1002,6 +1002,11 @@ void server::impl::setup_routes()
                 auto query = motif::db::game_list_query {
                     .player = req.has_param("player") ? to_filter(req.get_param_value("player")) : std::nullopt,
                     .result = req.has_param("result") ? to_filter(req.get_param_value("result")) : std::nullopt,
+                    .eco_prefix = req.has_param("eco") ? to_filter(req.get_param_value("eco")) : std::nullopt,
+                    .date_from = req.has_param("date_from") ? to_filter(req.get_param_value("date_from")) : std::nullopt,
+                    .date_to = req.has_param("date_to") ? to_filter(req.get_param_value("date_to")) : std::nullopt,
+                    .min_elo = std::nullopt,
+                    .max_elo = std::nullopt,
                     .limit = limit,
                     .offset = offset,
                 };
