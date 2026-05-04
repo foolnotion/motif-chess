@@ -972,6 +972,59 @@ TEST_CASE("pgn_helpers preserve PGN helper behavior", "[motif-import]")
     CHECK(motif::import::pgn_result_to_int8(pgn::result::unknown) == 0);
 }
 
+TEST_CASE("import_pipeline: non-standard PGN tags are stored in extra_tags", "[motif-import]")
+{
+    constexpr auto pgn_with_extra = R"pgn(
+[Event "Test"]
+[Site "?"]
+[Date "2024.01.01"]
+[Round "5"]
+[White "Alpha"]
+[Black "Beta"]
+[Result "1-0"]
+[WhiteElo "2000"]
+[BlackElo "1900"]
+[Annotator "Test Suite"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 1-0
+)pgn";
+
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_extra_tags";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "game.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << pgn_with_extra;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+
+    motif::import::import_pipeline pipeline {*mgr};
+    auto summary = pipeline.run(pgn_file, k_single_worker);
+    REQUIRE(summary.has_value());
+    REQUIRE(summary->committed == 1);
+
+    auto entries = mgr->store().list_games(motif::db::game_list_query {});
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+
+    auto game = mgr->store().get(entries->front().id);
+    REQUIRE(game.has_value());
+
+    auto const has_round =
+        std::ranges::any_of(game->extra_tags, [](auto const& kv) -> bool { return kv.first == "Round" && kv.second == "5"; });
+    auto const has_annotator =
+        std::ranges::any_of(game->extra_tags, [](auto const& kv) -> bool { return kv.first == "Annotator" && kv.second == "Test Suite"; });
+    CHECK(has_round);
+    CHECK(has_annotator);
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
 TEST_CASE("import_config defaults preserve measured fast path", "[motif-import]")
 {
     auto const config = motif::import::import_config {};
