@@ -473,6 +473,40 @@ auto database_manager::positions() const noexcept -> position_store const&
     return *positions_;
 }
 
+auto database_manager::patch_game_metadata(std::uint32_t const game_id, game_patch const& patch) -> result<void>
+{
+    if (!positions_ || !store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    // Validate and narrow elo values before touching any state.
+    auto new_white = std::optional<std::int16_t> {};
+    if (patch.white_elo) {
+        auto res = narrow_elo(patch.white_elo);
+        if (!res) {
+            return tl::unexpected {res.error()};
+        }
+        new_white = *res;
+    }
+    auto new_black = std::optional<std::int16_t> {};
+    if (patch.black_elo) {
+        auto res = narrow_elo(patch.black_elo);
+        if (!res) {
+            return tl::unexpected {res.error()};
+        }
+        new_black = *res;
+    }
+
+    if (auto res = store_->patch_metadata(game_id, patch); !res) {
+        return res;
+    }
+
+    if (new_white || new_black) {
+        return positions_->update_elo_for_game(game_id, new_white, new_black);
+    }
+    return {};
+}
+
 auto database_manager::remove_game(std::uint32_t const game_id) -> result<void>
 {
     if (!positions_ || !store_) {

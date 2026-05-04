@@ -11,6 +11,7 @@
 #include "motif/db/game_store.hpp"
 #include "motif/db/manifest.hpp"
 #include "motif/db/position_store.hpp"
+#include "motif/db/types.hpp"
 
 struct sqlite3;
 
@@ -55,6 +56,11 @@ class database_manager
 
     // Directory containing the database bundle files.
     [[nodiscard]] auto dir() const noexcept -> std::filesystem::path const&;
+
+    // Patch game metadata in SQLite and sync the denormalised elo columns in the
+    // DuckDB position table.  Only user-added games may be patched; returns
+    // error_code::not_editable otherwise.
+    auto patch_game_metadata(std::uint32_t game_id, game_patch const& patch) -> result<void>;
 
     // Delete a game from both the SQLite game store and the DuckDB position
     // index.  Position rows are removed first; if the subsequent SQLite delete

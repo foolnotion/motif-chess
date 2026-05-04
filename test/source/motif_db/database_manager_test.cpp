@@ -10,6 +10,7 @@
 #include "motif/db/database_manager.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/core/types.hpp>
 #include <duckdb.h>
@@ -650,4 +651,131 @@ TEST_CASE("database_manager::open rebuilds position store when dirty flag is set
     REQUIRE(rows_after.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(*rows_after == rows_before);
+}
+
+// ── patch_game_metadata
+// ──────────────────────────────────────────────────────────
+
+TEST_CASE("database_manager::patch_game_metadata syncs elo to DuckDB position rows", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"patch_elo_sync"};
+
+    auto mgr = motif::db::database_manager::create(tdir.path, "patch-elo-db");
+    REQUIRE(mgr.has_value());
+
+    constexpr auto initial_white_elo = std::int32_t {2400};
+    constexpr auto initial_black_elo = std::int32_t {2300};
+    constexpr auto patched_white_elo = std::int32_t {2600};
+    constexpr auto patched_black_elo = std::int32_t {2500};
+
+    chesslib::move e2e4 {};
+    e2e4.source_square = chesslib::square::e2;
+    e2e4.target_square = chesslib::square::e4;
+    e2e4.double_pawn = 1;
+
+    motif::db::game const game {
+        .white = {.name = "White Player", .elo = initial_white_elo, .title = {}, .country = {}},
+        .black = {.name = "Black Player", .elo = initial_black_elo, .title = {}, .country = {}},
+        .event_details = {},
+        .date = {},
+        .result = "1-0",
+        .eco = {},
+        .moves = {chesslib::codec::encode(e2e4)},
+        .extra_tags = {},
+        .provenance = {},
+    };
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const game_id = mgr->store().insert(game);
+    REQUIRE(game_id.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->rebuild_position_store().has_value());
+
+    auto const start_hash = chesslib::board {}.hash();
+
+    // Verify initial elos are in DuckDB.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto rows_before = mgr->positions().query_by_zobrist(start_hash);
+    REQUIRE(rows_before.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(rows_before->size() == 1);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows_before->front().white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(initial_white_elo)});
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows_before->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(initial_black_elo)});
+
+    // Patch both elos.
+    auto patch = motif::db::game_patch {};
+    patch.white_elo = patched_white_elo;
+    patch.black_elo = patched_black_elo;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
+
+    // DuckDB position rows must reflect the new elos without a rebuild.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto rows_after = mgr->positions().query_by_zobrist(start_hash);
+    REQUIRE(rows_after.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(rows_after->size() == 1);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows_after->front().white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_white_elo)});
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows_after->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_black_elo)});
+}
+
+TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other column unchanged", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"patch_elo_partial"};
+
+    auto mgr = motif::db::database_manager::create(tdir.path, "patch-elo-partial-db");
+    REQUIRE(mgr.has_value());
+
+    constexpr auto initial_white_elo = std::int32_t {2000};
+    constexpr auto initial_black_elo = std::int32_t {1900};
+    constexpr auto patched_white_elo = std::int32_t {2100};
+
+    chesslib::move e2e4 {};
+    e2e4.source_square = chesslib::square::e2;
+    e2e4.target_square = chesslib::square::e4;
+    e2e4.double_pawn = 1;
+
+    motif::db::game const game {
+        .white = {.name = "White Partial", .elo = initial_white_elo, .title = {}, .country = {}},
+        .black = {.name = "Black Partial", .elo = initial_black_elo, .title = {}, .country = {}},
+        .event_details = {},
+        .date = {},
+        .result = "1/2-1/2",
+        .eco = {},
+        .moves = {chesslib::codec::encode(e2e4)},
+        .extra_tags = {},
+        .provenance = {},
+    };
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const game_id = mgr->store().insert(game);
+    REQUIRE(game_id.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->rebuild_position_store().has_value());
+
+    // Patch only white elo.
+    auto patch = motif::db::game_patch {};
+    patch.white_elo = patched_white_elo;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
+
+    auto const start_hash = chesslib::board {}.hash();
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto rows = mgr->positions().query_by_zobrist(start_hash);
+    REQUIRE(rows.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(rows->size() == 1);
+    // White elo updated; black elo unchanged.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows->front().white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_white_elo)});
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(initial_black_elo)});
 }
