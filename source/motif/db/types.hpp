@@ -116,7 +116,9 @@ struct game_list_query
     std::optional<std::string> result;
     // ECO prefix: "C4" matches C40, C41, … (case-sensitive, PGN convention).
     std::optional<std::string> eco_prefix;
-    // ISO 8601 date strings ("YYYY.MM.DD" or "YYYY-MM-DD"); inclusive.
+    // Date strings in YYYY-MM-DD format (ISO 8601); inclusive.
+    // Note: games store dates as YYYY.MM.DD (PGN convention) — callers must
+    // convert before filtering or queries will silently return wrong results.
     std::optional<std::string> date_from;
     std::optional<std::string> date_to;
     // Elo filters: at least one player must satisfy each bound.

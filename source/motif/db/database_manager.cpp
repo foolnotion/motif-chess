@@ -328,6 +328,14 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
         return tl::unexpected {schema_res.error()};
     }
 
+    // Mark in-use so that a crash before the first close() triggers a rebuild.
+    mgr.manifest_.position_index_dirty = true;
+    if (auto dirty_write_res = write_manifest(manifest_path, mgr.manifest_); !dirty_write_res) {
+        mgr.close();
+        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
+        return tl::unexpected {dirty_write_res.error()};
+    }
+
     return mgr;
 }
 
@@ -408,7 +416,11 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
     // rebuild the position index from SQLite to guarantee consistency.
     if (mgr.manifest_.position_index_dirty) {
         if (auto rebuild_res = mgr.rebuild_position_store(); !rebuild_res) {
+            // close() would clear the dirty flag on disk, which would hide the
+            // inconsistency from the next open().  Re-write it as true afterward.
             mgr.close();
+            mgr.manifest_.position_index_dirty = true;
+            (void)write_manifest(manifest_path, mgr.manifest_);
             return tl::unexpected {rebuild_res.error()};
         }
     }
