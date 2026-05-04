@@ -133,39 +133,12 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
         return tl::unexpected {error_code::empty_game};
     }
 
-    auto const& tags = pgn_game.tags;
+    auto game_row = pgn_to_game(pgn_game);
 
-    auto const white_elo_opt = parse_elo(find_tag(tags, "WhiteElo"));
-    auto const black_elo_opt = parse_elo(find_tag(tags, "BlackElo"));
-    auto const white_title_raw = find_tag(tags, "WhiteTitle");
-    auto const black_title_raw = find_tag(tags, "BlackTitle");
-    auto const event_name = find_tag(tags, "Event");
-    auto const site_raw = find_tag(tags, "Site");
-    auto const date_raw = find_tag(tags, "Date");
-    auto const eco_raw = find_tag(tags, "ECO");
-
-    auto const valid_date = (!date_raw.empty() && date_raw != "????.??.??") ? std::optional<std::string> {date_raw} : std::nullopt;
-
-    motif::db::game game_row;
-    game_row.white.name = find_tag(tags, "White");
-    game_row.white.elo = white_elo_opt ? std::optional<std::int32_t> {*white_elo_opt} : std::nullopt;
-    game_row.white.title = white_title_raw.empty() ? std::nullopt : std::optional<std::string> {white_title_raw};
-
-    game_row.black.name = find_tag(tags, "Black");
-    game_row.black.elo = black_elo_opt ? std::optional<std::int32_t> {*black_elo_opt} : std::nullopt;
-    game_row.black.title = black_title_raw.empty() ? std::nullopt : std::optional<std::string> {black_title_raw};
-
-    if (!event_name.empty()) {
-        game_row.event_details = motif::db::event {
-            .name = event_name,
-            .site = site_raw.empty() ? std::nullopt : std::optional<std::string> {site_raw},
-            .date = valid_date,
-        };
-    }
-
-    game_row.date = valid_date;
-    game_row.eco = eco_raw.empty() ? std::nullopt : std::optional<std::string> {eco_raw};
-    game_row.result = pgn_result_to_string(pgn_game.result);
+    auto const white_elo_opt =
+        game_row.white.elo ? std::optional<std::int16_t> {static_cast<std::int16_t>(*game_row.white.elo)} : std::nullopt;
+    auto const black_elo_opt =
+        game_row.black.elo ? std::optional<std::int16_t> {static_cast<std::int16_t>(*game_row.black.elo)} : std::nullopt;
 
     if (pgn_game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
         return tl::unexpected {error_code::parse_error};
