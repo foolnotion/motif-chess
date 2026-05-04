@@ -7,7 +7,6 @@ find_package(SQLite3 REQUIRED)
 find_package(DuckDB REQUIRED)
 
 add_library(motif_db STATIC
-    motif_db.cpp
     game_store.cpp
     schema.cpp
     manifest.cpp
