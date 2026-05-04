@@ -81,7 +81,7 @@ namespace motif::search::opening_stats
 
 auto query(motif::db::database_manager const& database, std::uint64_t const zobrist_hash) -> result<stats>
 {
-    auto total_count_res = database.positions().count_distinct_games_by_zobrist(zobrist_hash);
+    auto const total_count_res = database.positions().count_distinct_games_by_zobrist(zobrist_hash);
     if (!total_count_res) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -89,7 +89,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
         return stats {};
     }
 
-    auto rows_res = database.positions().query_opening_stats(zobrist_hash);
+    auto const rows_res = database.positions().query_opening_stats(zobrist_hash);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -107,7 +107,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
     auto const tail = std::ranges::unique(candidate_ids);
     candidate_ids.erase(tail.begin(), tail.end());
 
-    auto contexts_res = database.store().get_game_contexts(candidate_ids);
+    auto const contexts_res = database.store().get_game_contexts(candidate_ids);
     if (!contexts_res) {
         return tl::unexpected {error_code::io_failure};
     }
