@@ -4,7 +4,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -53,8 +52,8 @@ class game_store
     auto get(std::uint32_t game_id) const -> result<game>;
     // Precondition: game_ids contains no duplicates (duplicate entries are
     // silently dropped by the unordered_map; deduplicate before calling).
-    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<std::unordered_map<std::uint32_t, game_context>>;
-    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const -> result<std::unordered_map<std::uint32_t, game_context>>;
+    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<gtl::flat_hash_map<std::uint32_t, game_context>>;
+    auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const -> result<gtl::flat_hash_map<std::uint32_t, game_context>>;
     auto list_games(game_list_query const& query) const -> result<std::vector<game_list_entry>>;
     auto count_games() const -> result<std::int64_t>;
 
@@ -83,6 +82,10 @@ class game_store
     // Returns error_code::not_found if the id does not exist.
     auto set_manual_provenance(std::uint32_t game_id, std::optional<std::string> const& source_label, std::string const& review_status)
         -> result<void>;
+
+    // Release player, event, and tag id caches.  Call after a bulk import to
+    // reclaim memory; subsequent inserts will re-populate the caches on demand.
+    void clear_insert_caches() noexcept;
 
   private:
     sqlite3* db_;

@@ -8,7 +8,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -18,6 +17,7 @@
 #include <chesslib/util/uci.hpp>
 #include <fmt/base.h>
 #include <fmt/format.h>
+#include <gtl/phmap.hpp>
 #include <tl/expected.hpp>
 #include <ucilib/engine.hpp>
 #include <ucilib/types.hpp>
@@ -122,9 +122,9 @@ struct session
 struct engine_manager::impl
 {
     std::mutex mutex;
-    std::unordered_map<std::string, engine_config> engines;
+    gtl::flat_hash_map<std::string, engine_config> engines;
     std::vector<std::string> engine_order;
-    std::unordered_map<std::string, std::unique_ptr<session>> sessions;
+    gtl::flat_hash_map<std::string, std::unique_ptr<session>> sessions;
 };
 
 // ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ auto validate_params(analysis_params const& params) -> tl::expected<void, error_
     return {};
 }
 
-auto resolve_engine_config(std::unordered_map<std::string, engine_config> const& engines,
+auto resolve_engine_config(gtl::flat_hash_map<std::string, engine_config> const& engines,
                            std::vector<std::string> const& engine_order,
                            std::string const& engine_name) -> tl::expected<engine_config, error_code>
 {
@@ -210,7 +210,7 @@ auto make_go_params(analysis_params const& params) -> uci::go_params
     return go_cmd;
 }
 
-auto reserve_analysis_id(std::unordered_map<std::string, std::unique_ptr<session>> const& sessions) -> std::string
+auto reserve_analysis_id(gtl::flat_hash_map<std::string, std::unique_ptr<session>> const& sessions) -> std::string
 {
     auto analysis_id = generate_analysis_id();
     while (sessions.contains(analysis_id)) {
@@ -310,13 +310,13 @@ engine_manager::~engine_manager()
     //
     // We move sessions out of the map and quit them outside the lock to avoid
     // any lock-order issues with callbacks that might try to acquire impl_->mutex.
-    std::unordered_map<std::string, std::unique_ptr<session>> sessions_to_quit;
+    gtl::flat_hash_map<std::string, std::unique_ptr<session>> sessions_to_quit;
     {
         const std::scoped_lock lock {impl_->mutex};
         sessions_to_quit = std::move(impl_->sessions);
     }
-    for (auto& [id, sess] : sessions_to_quit) {
-        static_cast<void>(id);
+    for (auto& [session_id, sess] : sessions_to_quit) {
+        static_cast<void>(session_id);
         static_cast<void>(sess->engine.quit());
     }
     // sessions_to_quit destructs here — engines have been quit, so ~engine() is safe.
