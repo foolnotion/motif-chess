@@ -239,6 +239,16 @@ auto database_manager::operator=(database_manager&& other) noexcept -> database_
 
 void database_manager::close() noexcept
 {
+    // Refresh game_count and mark clean before tearing down connections.
+    // Best-effort — errors are swallowed since close() is noexcept.
+    if (!dir_.empty() && store_ && conn_ != nullptr) {
+        if (auto count_res = store_->count_games(); count_res) {
+            manifest_.game_count = static_cast<std::uint64_t>(*count_res);
+        }
+        manifest_.position_index_dirty = false;
+        (void)write_manifest(dir_ / "manifest.json", manifest_);
+    }
+
     positions_.reset();
     if (duck_con_ != nullptr) {
         duckdb_disconnect(&duck_con_);
@@ -394,6 +404,23 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
         return tl::unexpected {schema_res.error()};
     }
 
+    // If the previous session did not close cleanly (crash, SIGKILL, etc.),
+    // rebuild the position index from SQLite to guarantee consistency.
+    if (mgr.manifest_.position_index_dirty) {
+        if (auto rebuild_res = mgr.rebuild_position_store(); !rebuild_res) {
+            mgr.close();
+            return tl::unexpected {rebuild_res.error()};
+        }
+    }
+
+    // Mark in-use: a crash before close() will leave this set and trigger
+    // a rebuild on the next open().
+    mgr.manifest_.position_index_dirty = true;
+    if (auto write_res = write_manifest(manifest_path, mgr.manifest_); !write_res) {
+        mgr.close();
+        return tl::unexpected {write_res.error()};
+    }
+
     return mgr;
 }
 
@@ -432,6 +459,20 @@ auto database_manager::positions() const noexcept -> position_store const&
 {
     assert(positions_.has_value());
     return *positions_;
+}
+
+auto database_manager::remove_game(std::uint32_t const game_id) -> result<void>
+{
+    if (!positions_ || !store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    // Position rows are removed first: they can always be restored by
+    // rebuild_position_store(), whereas a game deleted from SQLite cannot.
+    // The two operations are not atomic across a crash boundary.
+    if (auto res = positions_->delete_by_game_id(game_id); !res) {
+        return res;
+    }
+    return store_->remove(game_id);
 }
 
 auto database_manager::sort_positions() -> result<void>
