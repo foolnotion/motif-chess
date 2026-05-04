@@ -4,7 +4,6 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -13,6 +12,7 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
+#include <gtl/phmap.hpp>
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
@@ -39,7 +39,7 @@ auto replay_position(std::span<std::uint16_t const> moves, std::uint16_t const p
     return board;
 }
 
-using context_map = std::unordered_map<std::uint32_t, motif::db::game_context>;
+using context_map = gtl::flat_hash_map<std::uint32_t, motif::db::game_context>;
 
 auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows,
                      std::uint64_t const zobrist_hash,

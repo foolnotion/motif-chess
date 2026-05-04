@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -28,6 +29,8 @@ class position_store
     auto query_opening_stats(std::uint64_t zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>;
     auto sample_zobrist_hashes(std::size_t limit, std::uint64_t seed = 0) const -> result<std::vector<std::uint64_t>>;
     auto delete_by_game_id(std::uint32_t game_id) -> result<void>;
+    auto update_elo_for_game(std::uint32_t game_id, std::optional<std::int16_t> new_white_elo, std::optional<std::int16_t> new_black_elo)
+        -> result<void>;
     auto count_by_zobrist(std::uint64_t zobrist_hash) const -> result<std::int64_t>;
     auto count_distinct_games_by_zobrist(std::uint64_t zobrist_hash) const -> result<std::int64_t>;
 

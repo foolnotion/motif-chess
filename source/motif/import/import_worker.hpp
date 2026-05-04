@@ -5,9 +5,12 @@
 
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 
-#include "motif/db/game_store.hpp"
-#include "motif/db/position_store.hpp"
 #include "motif/import/error.hpp"
+
+namespace motif::db
+{
+class database_manager;
+}  // namespace motif::db
 
 namespace motif::import
 {
@@ -21,20 +24,19 @@ struct process_result
 class import_worker
 {
   public:
-    explicit import_worker(motif::db::game_store& store, motif::db::position_store& positions) noexcept;
+    explicit import_worker(motif::db::database_manager& database) noexcept;
 
     // Convert pgn::game to stored game row + DuckDB position rows.
     // Errors:
+    //   empty_game  — game has no moves; no rows written
     //   duplicate   — identity key already in DB; no rows written
-    //   parse_error — chesslib rejected a SAN move in the main line; no rows
-    //   written io_failure  — a DB write failed
+    //   parse_error — chesslib rejected a SAN move in the main line; no rows written
+    //   io_failure  — a DB write failed
     [[nodiscard]] auto process(pgn::game const& pgn_game) -> result<process_result>;
 
   private:
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
-    motif::db::game_store& store_;
-    // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
-    motif::db::position_store& positions_;
+    motif::db::database_manager& db_;
 };
 
 }  // namespace motif::import
