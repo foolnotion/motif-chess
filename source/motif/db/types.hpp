@@ -99,6 +99,8 @@ struct game_list_entry
     std::uint32_t id {};
     std::string white;
     std::string black;
+    std::optional<std::int32_t> white_elo;
+    std::optional<std::int32_t> black_elo;
     std::string result;
     std::string event;
     std::string date;
@@ -112,6 +114,17 @@ struct game_list_query
 {
     std::optional<std::string> player;
     std::optional<std::string> result;
+    // ECO prefix: "C4" matches C40, C41, … (case-sensitive, PGN convention).
+    std::optional<std::string> eco_prefix;
+    // Date strings in YYYY-MM-DD format (ISO 8601); inclusive.
+    // Note: games store dates as YYYY.MM.DD (PGN convention) — callers must
+    // convert before filtering or queries will silently return wrong results.
+    std::optional<std::string> date_from;
+    std::optional<std::string> date_to;
+    // Elo filters: at least one player must satisfy each bound.
+    // Games with no recorded Elo are excluded when a bound is set.
+    std::optional<std::int32_t> min_elo;
+    std::optional<std::int32_t> max_elo;
     std::size_t limit {50};  // NOLINT(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     std::size_t offset {0};
 };

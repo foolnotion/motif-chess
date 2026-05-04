@@ -277,6 +277,11 @@ TEST_CASE("game_store: list_games filters by player substring and result", "[mot
     auto const entries = fix.store.list_games(motif::db::game_list_query {
         .player = "Carlsen",
         .result = "0-1",
+        .eco_prefix = std::nullopt,
+        .date_from = std::nullopt,
+        .date_to = std::nullopt,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
     });
     REQUIRE(entries.has_value());
     REQUIRE(entries->size() == 1);
@@ -303,6 +308,11 @@ TEST_CASE("game_store: list_games applies stable limit and offset", "[motif_db][
     auto const entries = fix.store.list_games(motif::db::game_list_query {
         .player = std::nullopt,
         .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .date_from = std::nullopt,
+        .date_to = std::nullopt,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
         .limit = 1,
         .offset = 1,
     });
@@ -324,6 +334,11 @@ TEST_CASE("game_store: list_games returns empty results", "[motif_db][game_store
     auto const unmatched_entries = filtered_fix.store.list_games(motif::db::game_list_query {
         .player = "Carlsen",
         .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .date_from = std::nullopt,
+        .date_to = std::nullopt,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
     });
     REQUIRE(unmatched_entries.has_value());
     CHECK(unmatched_entries->empty());
@@ -483,6 +498,205 @@ TEST_CASE("game_store: get after remove returns not_found", "[motif_db][game_sto
     auto const get_res = fix.store.get(*ins_res);
     REQUIRE_FALSE(get_res.has_value());
     CHECK(get_res.error() == motif::db::error_code::not_found);
+}
+
+// ── list_games: extended filters ─────────────────────────────────────────────
+
+namespace
+{
+
+constexpr std::int32_t elo_gm_high = 2882;
+constexpr std::int32_t elo_gm_low = 2800;
+constexpr std::int32_t elo_club_high = 1600;
+constexpr std::int32_t elo_club_low = 1350;
+constexpr std::int32_t elo_filter_strong = 2000;
+constexpr std::int32_t elo_filter_club = 1800;
+
+}  // namespace
+
+TEST_CASE("game_store: list_games filters by ECO prefix", "[motif_db][game_store]")
+{
+    db_fixture fix;
+
+    auto sicilian = make_game("White", "Black");
+    sicilian.eco = "B20";
+    auto ruy = make_game("White 2", "Black 2");
+    ruy.eco = "C65";
+    auto other_c = make_game("White 3", "Black 3");
+    other_c.eco = "C10";
+
+    REQUIRE(fix.store.insert(sicilian).has_value());
+    auto const ruy_id = fix.store.insert(ruy);
+    auto const c10_id = fix.store.insert(other_c);
+    REQUIRE(ruy_id.has_value());
+    REQUIRE(c10_id.has_value());
+
+    auto const narrow = fix.store.list_games(motif::db::game_list_query {
+        .player = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = "C6",
+        .date_from = std::nullopt,
+        .date_to = std::nullopt,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+    });
+    REQUIRE(narrow.has_value());
+    REQUIRE(narrow->size() == 1);
+    CHECK(narrow->front().id == *ruy_id);
+    CHECK(narrow->front().eco == "C65");
+
+    auto const broad = fix.store.list_games(motif::db::game_list_query {
+        .player = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = "C",
+        .date_from = std::nullopt,
+        .date_to = std::nullopt,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+    });
+    REQUIRE(broad.has_value());
+    CHECK(broad->size() == 2);
+}
+
+TEST_CASE("game_store: list_games filters by date range", "[motif_db][game_store]")
+{
+    db_fixture fix;
+
+    auto game_old = make_game("Alpha", "Beta");
+    game_old.date = "2020.06.01";
+    auto game_mid = make_game("Gamma", "Delta");
+    game_mid.date = "2022.03.15";
+    auto game_new = make_game("Epsilon", "Zeta");
+    game_new.date = "2024.11.30";
+
+    REQUIRE(fix.store.insert(game_old).has_value());
+    auto const mid_id = fix.store.insert(game_mid);
+    REQUIRE(mid_id.has_value());
+    REQUIRE(fix.store.insert(game_new).has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {
+        .player = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .date_from = "2021.01.01",
+        .date_to = "2023.12.31",
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+    });
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+    CHECK(entries->front().id == *mid_id);
+}
+
+TEST_CASE("game_store: list_games filters by min_elo", "[motif_db][game_store]")
+{
+    db_fixture fix;
+
+    auto strong = make_game("Carlsen", "Caruana");
+    strong.white.elo = elo_gm_high;
+    strong.black.elo = elo_gm_low;
+    auto weak = make_game("Alice", "Bob");
+    weak.white.elo = elo_club_high;
+    weak.black.elo = elo_club_low;
+    auto no_elo = make_game("Unknown", "Player");
+
+    auto const strong_id = fix.store.insert(strong);
+    REQUIRE(strong_id.has_value());
+    REQUIRE(fix.store.insert(weak).has_value());
+    REQUIRE(fix.store.insert(no_elo).has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {
+        .player = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .date_from = std::nullopt,
+        .date_to = std::nullopt,
+        .min_elo = elo_filter_strong,
+        .max_elo = std::nullopt,
+    });
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+    CHECK(entries->front().id == *strong_id);
+}
+
+TEST_CASE("game_store: list_games filters by max_elo", "[motif_db][game_store]")
+{
+    db_fixture fix;
+
+    auto strong = make_game("Carlsen", "Caruana");
+    strong.white.elo = elo_gm_high;
+    strong.black.elo = elo_gm_low;
+    auto club = make_game("Alice", "Bob");
+    club.white.elo = elo_club_high;
+    club.black.elo = elo_club_low;
+
+    REQUIRE(fix.store.insert(strong).has_value());
+    auto const club_id = fix.store.insert(club);
+    REQUIRE(club_id.has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {
+        .player = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .date_from = std::nullopt,
+        .date_to = std::nullopt,
+        .min_elo = std::nullopt,
+        .max_elo = elo_filter_club,
+    });
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+    CHECK(entries->front().id == *club_id);
+}
+
+TEST_CASE("game_store: list_games returns white_elo and black_elo in entry", "[motif_db][game_store]")
+{
+    db_fixture fix;
+
+    auto game = make_game("Carlsen", "Nepomniachtchi");
+    game.white.elo = elo_gm_high;
+    game.black.elo = elo_gm_low;
+
+    auto const gid = fix.store.insert(game);
+    REQUIRE(gid.has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {});
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+    CHECK(entries->front().white_elo == std::optional<std::int32_t> {elo_gm_high});
+    CHECK(entries->front().black_elo == std::optional<std::int32_t> {elo_gm_low});
+}
+
+TEST_CASE("game_store: list_games combined ECO and date filter", "[motif_db][game_store]")
+{
+    db_fixture fix;
+
+    auto game_match = make_game("Wh", "Bl");
+    game_match.eco = "D35";
+    game_match.date = "2023.05.10";
+    auto game_wrong_eco = make_game("Wh2", "Bl2");
+    game_wrong_eco.eco = "C65";
+    game_wrong_eco.date = "2023.05.10";
+    auto game_wrong_date = make_game("Wh3", "Bl3");
+    game_wrong_date.eco = "D40";
+    game_wrong_date.date = "2019.01.01";
+
+    auto const match_id = fix.store.insert(game_match);
+    REQUIRE(match_id.has_value());
+    REQUIRE(fix.store.insert(game_wrong_eco).has_value());
+    REQUIRE(fix.store.insert(game_wrong_date).has_value());
+
+    auto const entries = fix.store.list_games(motif::db::game_list_query {
+        .player = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = "D",
+        .date_from = "2022.01.01",
+        .date_to = std::nullopt,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+    });
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 1);
+    CHECK(entries->front().id == *match_id);
 }
 
 // ── AC #4: Edge cases

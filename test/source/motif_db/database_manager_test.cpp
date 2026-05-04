@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "motif/db/database_manager.hpp"
@@ -13,6 +16,7 @@
 #include <sqlite3.h>
 
 #include "motif/db/error.hpp"
+#include "motif/db/manifest.hpp"
 #include "motif/db/schema.hpp"
 #include "motif/db/types.hpp"
 
@@ -79,6 +83,42 @@ auto read_position_hashes(std::filesystem::path const& duckdb_path) -> std::vect
     }
 
     return hashes;
+}
+
+auto make_one_move_game(  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
+    std::string white,
+    std::string black) -> motif::db::game
+{
+    chesslib::move e2e4 {};
+    e2e4.source_square = chesslib::square::e2;
+    e2e4.target_square = chesslib::square::e4;
+    e2e4.double_pawn = 1;
+    return motif::db::game {
+        .white = {.name = std::move(white), .elo = {}, .title = {}, .country = {}},
+        .black = {.name = std::move(black), .elo = {}, .title = {}, .country = {}},
+        .event_details = {},
+        .date = {},
+        .result = "1-0",
+        .eco = {},
+        .moves = {chesslib::codec::encode(e2e4)},
+        .extra_tags = {},
+        .provenance = {},
+    };
+}
+
+auto count_position_rows(std::filesystem::path const& duckdb_path) -> std::int64_t
+{  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
+    auto handles = duckdb_handle_guard {};
+    if (duckdb_open(duckdb_path.c_str(), &handles.db) != DuckDBSuccess) {
+        return -1;
+    }
+    if (duckdb_connect(handles.db, &handles.con) != DuckDBSuccess) {
+        return -1;
+    }
+    if (duckdb_query(handles.con, "SELECT COUNT(*) FROM position", &handles.res) != DuckDBSuccess) {
+        return -1;
+    }
+    return duckdb_value_int64(&handles.res, 0, 0);
 }
 
 }  // namespace
@@ -475,4 +515,139 @@ TEST_CASE("database_manager::rebuild_position_store defaults to sorted-by-zobris
     auto hashes = read_position_hashes(tdir.path / "positions.duckdb");
     REQUIRE(hashes.size() == 4);
     CHECK(std::ranges::is_sorted(hashes));
+}
+
+// ── remove_game
+// ───────────────────────────────────────────────────────────────
+
+TEST_CASE("database_manager::remove_game deletes both SQLite row and DuckDB positions", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"remove_game"};
+
+    auto mgr = motif::db::database_manager::create(tdir.path, "remove-db");
+    REQUIRE(mgr.has_value());
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const gid = mgr->store().insert(make_one_move_game("White", "Black"));
+    REQUIRE(gid.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->rebuild_position_store().has_value());
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->positions().row_count().value_or(-1) > 0);
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->remove_game(*gid).has_value());
+
+    // Game gone from SQLite.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const get_res = mgr->store().get(*gid);
+    REQUIRE_FALSE(get_res.has_value());
+    CHECK(get_res.error() == motif::db::error_code::not_found);
+
+    // Position rows gone from DuckDB.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(mgr->positions().row_count().value_or(-1) == 0);
+}
+
+TEST_CASE("database_manager::remove_game returns not_found for absent id", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"remove_game_nf"};
+
+    auto mgr = motif::db::database_manager::create(tdir.path, "remove-nf-db");
+    REQUIRE(mgr.has_value());
+
+    constexpr std::uint32_t absent_id = 99999U;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const res = mgr->remove_game(absent_id);
+    REQUIRE_FALSE(res.has_value());
+    CHECK(res.error() == motif::db::error_code::not_found);
+}
+
+// ── manifest: game_count and dirty flag
+// ──────────────────────────────────────
+
+TEST_CASE("database_manager::close persists game_count in manifest", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"manifest_count"};
+
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "count-db");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->store().insert(make_one_move_game("A", "B")).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->store().insert(make_one_move_game("C", "D")).has_value());
+    }  // close() called here
+
+    auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(manifest_after.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(manifest_after->game_count == 2U);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_FALSE(manifest_after->position_index_dirty);
+}
+
+TEST_CASE("database_manager::open marks manifest dirty and close clears it", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"manifest_dirty"};
+
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "dirty-db");
+        REQUIRE(mgr.has_value());
+    }
+
+    {
+        auto mgr = motif::db::database_manager::open(tdir.path);
+        REQUIRE(mgr.has_value());
+        // Manifest on disk must be dirty while a session is open.
+        auto const mf_open = motif::db::read_manifest(tdir.path / "manifest.json");
+        REQUIRE(mf_open.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(mf_open->position_index_dirty);
+    }  // close() called here
+
+    // After clean close the dirty flag is cleared.
+    auto const mf_closed = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(mf_closed.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_FALSE(mf_closed->position_index_dirty);
+}
+
+TEST_CASE("database_manager::open rebuilds position store when dirty flag is set", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"manifest_rebuild_dirty"};
+    auto const duckdb_path = tdir.path / "positions.duckdb";
+
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "rebuild-dirty-db");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->store().insert(make_one_move_game("W", "B")).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->rebuild_position_store().has_value());
+    }
+
+    // Simulate a crash: manually force dirty=true into the manifest without
+    // touching the DuckDB file (simulates unclean shutdown).
+    {
+        auto manifest_dirty = motif::db::read_manifest(tdir.path / "manifest.json");
+        REQUIRE(manifest_dirty.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        manifest_dirty->position_index_dirty = true;
+        REQUIRE(motif::db::write_manifest(tdir.path / "manifest.json", *manifest_dirty).has_value());
+    }
+
+    auto const rows_before = count_position_rows(duckdb_path);
+    REQUIRE(rows_before > 0);
+
+    // Re-open: should detect dirty flag and rebuild (same rows expected since
+    // the game store is unchanged).
+    auto reopened = motif::db::database_manager::open(tdir.path);
+    REQUIRE(reopened.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const rows_after = reopened->positions().row_count();
+    REQUIRE(rows_after.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(*rows_after == rows_before);
 }
