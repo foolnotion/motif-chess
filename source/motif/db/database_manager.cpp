@@ -119,11 +119,11 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
         return tl::unexpected {error_code::io_failure};
     }
 
-    auto white_elo = narrow_elo(game.white.elo);
+    auto const white_elo = narrow_elo(game.white.elo);
+    auto const black_elo = narrow_elo(game.black.elo);
     if (!white_elo) {
         return tl::unexpected {white_elo.error()};
     }
-    auto black_elo = narrow_elo(game.black.elo);
     if (!black_elo) {
         return tl::unexpected {black_elo.error()};
     }
@@ -481,31 +481,25 @@ auto database_manager::patch_game_metadata(std::uint32_t const game_id, game_pat
     }
 
     // Validate and narrow elo values before touching any state.
-    auto new_white = std::optional<std::int16_t> {};
-    if (patch.white_elo) {
-        auto res = narrow_elo(patch.white_elo);
-        if (!res) {
-            return tl::unexpected {res.error()};
-        }
-        new_white = *res;
+    // narrow_elo handles nullopt inputs (returns nullopt without error).
+    auto const white_elo = narrow_elo(patch.white_elo);
+    if (!white_elo) {
+        return tl::unexpected {white_elo.error()};
     }
-    auto new_black = std::optional<std::int16_t> {};
-    if (patch.black_elo) {
-        auto res = narrow_elo(patch.black_elo);
-        if (!res) {
-            return tl::unexpected {res.error()};
-        }
-        new_black = *res;
+    auto const black_elo = narrow_elo(patch.black_elo);
+    if (!black_elo) {
+        return tl::unexpected {black_elo.error()};
     }
 
-    if (auto res = store_->patch_metadata(game_id, patch); !res) {
-        return res;
-    }
-
-    if (new_white || new_black) {
-        return positions_->update_elo_for_game(game_id, new_white, new_black);
-    }
-    return {};
+    return store_->patch_metadata(game_id, patch)
+        .and_then(
+            [&]() -> result<void>
+            {
+                if (!*white_elo && !*black_elo) {
+                    return {};
+                }
+                return positions_->update_elo_for_game(game_id, *white_elo, *black_elo);
+            });
 }
 
 auto database_manager::remove_game(std::uint32_t const game_id) -> result<void>
