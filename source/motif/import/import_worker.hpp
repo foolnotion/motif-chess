@@ -5,8 +5,12 @@
 
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 
-#include "motif/db/database_manager.hpp"
 #include "motif/import/error.hpp"
+
+namespace motif::db
+{
+class database_manager;
+}  // namespace motif::db
 
 namespace motif::import
 {
@@ -24,6 +28,7 @@ class import_worker
 
     // Convert pgn::game to stored game row + DuckDB position rows.
     // Errors:
+    //   empty_game  — game has no moves; no rows written
     //   duplicate   — identity key already in DB; no rows written
     //   parse_error — chesslib rejected a SAN move in the main line; no rows written
     //   io_failure  — a DB write failed
