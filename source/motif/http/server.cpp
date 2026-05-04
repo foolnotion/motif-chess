@@ -20,7 +20,6 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,6 +35,7 @@
 #include <fmt/format.h>
 #include <glaze/json/read.hpp>
 #include <glaze/json/write.hpp>
+#include <gtl/phmap.hpp>
 #include <httplib.h>
 #include <pgnlib/pgnlib.hpp>
 #include <tl/expected.hpp>
@@ -665,13 +665,13 @@ struct server::impl
     motif::engine::engine_manager engine_mgr;
     std::mutex database_mutex;
     std::mutex sessions_mutex;
-    std::unordered_map<std::string, std::shared_ptr<detail::import_session>> sessions;
+    gtl::flat_hash_map<std::string, std::shared_ptr<detail::import_session>> sessions;
     // Each entry pairs an import_id with its worker thread for lifecycle tracking.
     std::deque<std::pair<std::string, std::jthread>> import_workers;
     // Insertion-ordered list of completed import IDs, capped at max_completed_sessions.
     std::deque<std::string> completed_session_ids;
     std::mutex analyses_mutex;
-    std::unordered_map<std::string, std::shared_ptr<analysis_sse_session>> analyses;
+    gtl::flat_hash_map<std::string, std::shared_ptr<analysis_sse_session>> analyses;
     std::atomic<bool> fail_next_import_worker_start_for_test {false};
     std::atomic<bool> fail_next_import_worker_run_for_test {false};
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
@@ -1268,7 +1268,7 @@ void server::impl::setup_routes()
                   auto patch_result = [this, &game_id, &patch]() -> motif::db::result<void>
                   {
                       std::scoped_lock const lock {database_mutex};
-                      return database.store().patch_metadata(*game_id, patch);
+                      return database.patch_game_metadata(*game_id, patch);
                   }();
 
                   if (!patch_result) {
