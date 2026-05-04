@@ -13,7 +13,6 @@ add_library(motif_db STATIC
     manifest.cpp
     database_manager.cpp
     position_store.cpp
-    scratch_base.cpp
 )
 
 target_link_libraries(

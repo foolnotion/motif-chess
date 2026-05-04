@@ -1,7 +1,5 @@
-// NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
-#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -59,6 +57,9 @@ class database_manager
 
     // Drop and repopulate the DuckDB position table from all games in SQLite.
     auto rebuild_position_store(bool sort_by_zobrist = true) -> result<void>;
+
+    // Sort the position table by Zobrist hash, wrapped in a DuckDB transaction.
+    auto sort_positions() -> result<void>;
 
     // Release all connections and clear internal state.
     // Safe to call multiple times.

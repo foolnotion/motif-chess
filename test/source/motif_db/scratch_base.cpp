@@ -1,6 +1,6 @@
 #include <exception>
 
-#include "motif/db/scratch_base.hpp"
+#include "scratch_base.hpp"
 
 #include <duckdb.h>
 #include <sqlite3.h>

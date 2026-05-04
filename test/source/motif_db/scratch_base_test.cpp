@@ -1,4 +1,4 @@
-#include "motif/db/scratch_base.hpp"
+#include "scratch_base.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 

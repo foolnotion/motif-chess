@@ -1,4 +1,3 @@
-// NOLINTNEXTLINE(portability-avoid-pragma-once)
 #pragma once
 
 #include <cstddef>
@@ -26,18 +25,12 @@ struct event
     std::optional<std::string> date;
 };
 
-struct position
-{
-    std::uint64_t zobrist_hash {};
-    std::uint32_t game_id {};
-    std::uint16_t ply {};
-};
-
 struct position_row
 {
     std::uint64_t zobrist_hash {};
     std::uint32_t game_id {};
     std::uint16_t ply {};
+    std::uint16_t encoded_move {};  // move that reached this position; 0 for ply == 0
     std::int8_t result {};
     std::optional<std::int16_t> white_elo;
     std::optional<std::int16_t> black_elo;
@@ -52,20 +45,12 @@ struct position_match
     std::optional<std::int16_t> black_elo;
 };
 
-struct opening_move_stat
-{
-    std::uint32_t game_id {};
-    std::uint16_t ply {};
-    std::int8_t result {};
-    std::optional<std::int16_t> white_elo;
-    std::optional<std::int16_t> black_elo;
-};
-
 struct tree_position_row
 {
     std::uint32_t game_id {};
     std::uint16_t root_ply {};
     std::uint16_t depth {};
+    std::uint16_t encoded_move {};  // move that reached child_hash
     std::uint64_t child_hash {};
     std::int8_t result {};
     std::optional<std::int16_t> white_elo;
@@ -79,25 +64,23 @@ struct game_context
     std::vector<std::uint16_t> moves;
 };
 
-struct game_continuation_context
+// One row per distinct continuation from a given position, with counts and
+// averages pre-aggregated in DuckDB. eco_sample_{min,max} are two candidate
+// game_ids for ECO attribution (the game with the lowest and highest id
+// among all games playing this continuation).
+struct opening_stat_agg_row
 {
-    std::uint32_t game_id {};
-    std::uint16_t ply {};
-    std::uint16_t encoded_move {};
-    std::int8_t result {};
-    std::optional<std::int16_t> white_elo;
-    std::optional<std::int16_t> black_elo;
-    std::optional<std::string> eco;
-    std::optional<std::string> opening_name;
-};
-
-struct opening_context
-{
-    std::optional<std::int32_t> white_elo;
-    std::optional<std::int32_t> black_elo;
-    std::optional<std::string> eco;
-    std::optional<std::string> opening_name;
-    std::vector<std::uint16_t> moves;
+    std::uint16_t cont_encoded_move {};
+    std::uint64_t cont_hash {};
+    std::uint16_t root_ply {};  // MIN(p_root.ply) — for board reconstruction
+    std::uint32_t frequency {};
+    std::uint32_t white_wins {};
+    std::uint32_t draws {};
+    std::uint32_t black_wins {};
+    std::optional<double> avg_white_elo;
+    std::optional<double> avg_black_elo;
+    std::uint32_t eco_sample_min {};
+    std::uint32_t eco_sample_max {};
 };
 
 // source_type values: "manual" (user-added via API), "imported" (bulk import).

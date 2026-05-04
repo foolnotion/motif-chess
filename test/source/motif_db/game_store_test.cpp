@@ -167,8 +167,7 @@ TEST_CASE("game_store: get with event reconstructs event details", "[motif_db][g
     CHECK(got.eco == src.eco);
 
     REQUIRE(got.event_details.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) — guarded by REQUIRE
-    // above
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) — guarded by REQUIRE above
     auto const& got_event = got.event_details.value();
     CHECK(got_event.name == "World Championship");
     CHECK(got_event.site == "Dubai");
@@ -187,27 +186,6 @@ TEST_CASE("game_store: get with extra tags round-trips tag key-value pairs", "[m
     auto const get_res = fix.store.get(*ins_res);
     REQUIRE(get_res.has_value());
     CHECK(get_res->extra_tags == src.extra_tags);
-}
-
-TEST_CASE("game_store: get_opening_context returns moves elo eco and opening tag", "[motif_db][game_store]")
-{
-    db_fixture fix;
-    auto src = make_game();
-    src.white.elo = 2500;
-    src.black.elo = 2400;
-    src.eco = "C20";
-    src.extra_tags = {{"Opening", "King's Pawn Game"}, {"Source", "TWIC"}};
-
-    auto const ins_res = fix.store.insert(src);
-    REQUIRE(ins_res.has_value());
-
-    auto const context_res = fix.store.get_opening_context(*ins_res);
-    REQUIRE(context_res.has_value());
-    CHECK(context_res->white_elo == src.white.elo);
-    CHECK(context_res->black_elo == src.black.elo);
-    CHECK(context_res->eco == src.eco);
-    CHECK(context_res->opening_name == std::optional<std::string> {"King's Pawn Game"});
-    CHECK(context_res->moves == src.moves);
 }
 
 TEST_CASE("game_store: get_game_contexts returns all requested contexts", "[motif_db][game_store]")
@@ -237,48 +215,6 @@ TEST_CASE("game_store: get_game_contexts returns all requested contexts", "[moti
     CHECK(contexts->at(*second_id).eco == second.eco);
     CHECK(contexts->at(*second_id).opening_name == std::optional<std::string> {"Scandinavian Defense"});
     CHECK(contexts->at(*second_id).moves == second.moves);
-}
-
-TEST_CASE("game_store: get_continuation_contexts returns requested next moves only", "[motif_db][game_store]")
-{
-    constexpr std::int16_t test_white_elo {2500};
-    constexpr std::int16_t test_black_elo {2400};
-
-    db_fixture fix;
-    auto src = make_game();
-    src.eco = "C20";
-    src.extra_tags = {{"Opening", "King's Pawn Game"}};
-
-    auto const ins_res = fix.store.insert(src);
-    REQUIRE(ins_res.has_value());
-
-    auto contexts = fix.store.get_continuation_contexts({
-        motif::db::opening_move_stat {
-            .game_id = *ins_res,
-            .ply = 1,
-            .result = 1,
-            .white_elo = test_white_elo,
-            .black_elo = test_black_elo,
-        },
-        motif::db::opening_move_stat {
-            .game_id = *ins_res,
-            .ply = 3,
-            .result = 1,
-            .white_elo = test_white_elo,
-            .black_elo = test_black_elo,
-        },
-    });
-
-    REQUIRE(contexts.has_value());
-    REQUIRE(contexts->size() == 1);
-    CHECK(contexts->front().game_id == *ins_res);
-    CHECK(contexts->front().ply == 1);
-    CHECK(contexts->front().encoded_move == move_b);
-    CHECK(contexts->front().result == 1);
-    CHECK(contexts->front().white_elo == std::optional<std::int16_t> {test_white_elo});
-    CHECK(contexts->front().black_elo == std::optional<std::int16_t> {test_black_elo});
-    CHECK(contexts->front().eco == src.eco);
-    CHECK(contexts->front().opening_name == std::optional<std::string> {"King's Pawn Game"});
 }
 
 TEST_CASE("game_store: list_games returns summary fields in id order", "[motif_db][game_store]")
