@@ -624,6 +624,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     }
 
     delete_checkpoint(db_.dir());
+    db_.store().clear_insert_caches();
 
     auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::nanoseconds {current_time_ns() - start_time_ns_.load(std::memory_order_relaxed)});

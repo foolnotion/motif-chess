@@ -10,7 +10,6 @@
 #include <string>
 #include <string_view>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -291,6 +290,17 @@ auto bind_optional_int(  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
 game_store::game_store(sqlite3* conn) noexcept
     : db_ {conn}
 {
+}
+
+void game_store::clear_insert_caches() noexcept
+{
+    player_id_cache_.clear();
+    event_id_cache_.clear();
+    tag_id_cache_.clear();
+    // Release backing storage so the memory returns to the OS.
+    player_id_cache_.rehash(0);
+    event_id_cache_.rehash(0);
+    tag_id_cache_.rehash(0);
 }
 
 game_store::~game_store() noexcept
@@ -757,15 +767,15 @@ auto game_store::get(std::uint32_t const game_id) const -> result<game>
     return out;
 }
 
-auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<std::unordered_map<std::uint32_t, game_context>>
+auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<gtl::flat_hash_map<std::uint32_t, game_context>>
 {
     return const_cast<game_store const&>(*this).get_game_contexts(game_ids);
 }
 
 auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) const
-    -> result<std::unordered_map<std::uint32_t, game_context>>
+    -> result<gtl::flat_hash_map<std::uint32_t, game_context>>
 {
-    auto out = std::unordered_map<std::uint32_t, game_context> {};
+    auto out = gtl::flat_hash_map<std::uint32_t, game_context> {};
     if (game_ids.empty()) {
         return out;
     }
