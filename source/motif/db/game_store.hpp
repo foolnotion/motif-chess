@@ -51,7 +51,7 @@ class game_store
     auto get(std::uint32_t game_id) -> result<game>;
     auto get(std::uint32_t game_id) const -> result<game>;
     // Precondition: game_ids contains no duplicates (duplicate entries are
-    // silently dropped by the unordered_map; deduplicate before calling).
+    // silently dropped by the flat_hash_map; deduplicate before calling).
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<gtl::flat_hash_map<std::uint32_t, game_context>>;
     auto get_game_contexts(std::vector<std::uint32_t> const& game_ids) const -> result<gtl::flat_hash_map<std::uint32_t, game_context>>;
     auto list_games(game_list_query const& query) const -> result<std::vector<game_list_entry>>;

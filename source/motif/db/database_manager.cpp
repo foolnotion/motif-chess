@@ -502,7 +502,13 @@ auto database_manager::patch_game_metadata(std::uint32_t const game_id, game_pat
     }
 
     if (new_white || new_black) {
-        return positions_->update_elo_for_game(game_id, new_white, new_black);
+        if (auto res = positions_->update_elo_for_game(game_id, new_white, new_black); !res) {
+            // SQLite is already updated; DuckDB diverged.  Flag for rebuild so
+            // the next open() restores consistency even if this error is ignored.
+            manifest_.position_index_dirty = true;
+            (void)write_manifest(dir_ / "manifest.json", manifest_);
+            return res;
+        }
     }
     return {};
 }
