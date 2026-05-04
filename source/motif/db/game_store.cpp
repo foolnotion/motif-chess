@@ -15,10 +15,12 @@
 
 #include "motif/db/game_store.hpp"
 
+#include <gtl/phmap.hpp>
 #include <sqlite3.h>
 #include <tl/expected.hpp>
 
 #include "motif/db/error.hpp"
+#include "motif/db/sqlite_util.hpp"
 #include "motif/db/types.hpp"
 
 namespace motif::db
@@ -35,12 +37,7 @@ namespace motif::db
 namespace
 {
 
-struct stmt_deleter
-{
-    auto operator()(sqlite3_stmt* stmt) const noexcept -> void { sqlite3_finalize(stmt); }
-};
-
-using unique_stmt = std::unique_ptr<sqlite3_stmt, stmt_deleter>;
+using detail::unique_stmt;
 
 auto finalize_stmt(sqlite3_stmt*& stmt) noexcept -> void
 {

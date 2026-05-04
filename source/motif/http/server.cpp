@@ -1163,7 +1163,7 @@ void server::impl::setup_routes()
                  std::uint32_t game_id {};
                  {
                      std::scoped_lock const lock {database_mutex};
-                     motif::import::import_worker worker {database.store(), database.positions()};
+                     motif::import::import_worker worker {database};
                      auto worker_result = worker.process(pgn_game);
 
                      if (!worker_result) {

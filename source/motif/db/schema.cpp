@@ -9,6 +9,7 @@
 #include <tl/expected.hpp>
 
 #include "motif/db/error.hpp"
+#include "motif/db/sqlite_util.hpp"
 
 namespace motif::db::schema
 {
@@ -16,12 +17,7 @@ namespace motif::db::schema
 namespace
 {
 
-struct stmt_deleter
-{
-    auto operator()(sqlite3_stmt* stmt) const noexcept -> void { sqlite3_finalize(stmt); }
-};
-
-using unique_stmt = std::unique_ptr<sqlite3_stmt, stmt_deleter>;
+using motif::db::detail::unique_stmt;
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto exec(sqlite3* conn, char const* sql) -> result<void>
