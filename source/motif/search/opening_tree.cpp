@@ -8,7 +8,6 @@
 #include <optional>
 #include <ranges>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -17,6 +16,7 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
+#include <gtl/phmap.hpp>
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
@@ -225,14 +225,14 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
     }
 
     // Group rows by (game_id, root_ply) occurrence.
-    auto rows_by_occurrence = std::unordered_map<occurrence_key, std::vector<motif::db::tree_position_row>, occurrence_key_hash> {};
+    auto rows_by_occurrence = gtl::flat_hash_map<occurrence_key, std::vector<motif::db::tree_position_row>, occurrence_key_hash> {};
     for (auto const& row : *rows_res) {
         rows_by_occurrence[occurrence_key {.game_id = row.game_id, .root_ply = row.root_ply}].push_back(row);
     }
 
     // Aggregate occurrences using encoded_move from the position row directly —
     // no SQLite round-trip needed here.
-    auto node_aggregates = std::unordered_map<node_key, node_aggregate, node_key_hash> {};
+    auto node_aggregates = gtl::flat_hash_map<node_key, node_aggregate, node_key_hash> {};
 
     for (auto& [occurrence, occurrence_rows] : rows_by_occurrence) {
         std::ranges::sort(occurrence_rows,
@@ -339,7 +339,7 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
     // Forward BFS: build a map from zobrist_hash → board state by applying
     // encoded moves from the root outward.  This replaces per-node replay_position
     // calls in the build loop below.
-    auto board_at_hash = std::unordered_map<std::uint64_t, chesslib::board> {};
+    auto board_at_hash = gtl::flat_hash_map<std::uint64_t, chesslib::board> {};
     board_at_hash.emplace(root_hash, *root_board);
 
     for (auto const& nkey : all_keys) {
@@ -360,7 +360,7 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
     }
 
     // Build nodes bottom-up (max_depth → 1).
-    auto built_nodes = std::unordered_map<node_key, std::unique_ptr<node>, node_key_hash> {};
+    auto built_nodes = gtl::flat_hash_map<node_key, std::unique_ptr<node>, node_key_hash> {};
 
     for (auto const& nkey : all_keys | std::views::reverse) {
         auto const nag_it = node_aggregates.find(nkey);
