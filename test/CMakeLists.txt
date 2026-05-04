@@ -17,8 +17,6 @@ add_executable(motif_db_test
     source/motif_db/manifest_test.cpp
     source/motif_db/database_manager_test.cpp
     source/motif_db/position_store_test.cpp
-    source/motif_db/scratch_base.cpp
-    source/motif_db/scratch_base_test.cpp
 )
 target_link_libraries(motif_db_test PRIVATE motif_db Catch2::Catch2WithMain)
 target_compile_features(motif_db_test PRIVATE cxx_std_23)

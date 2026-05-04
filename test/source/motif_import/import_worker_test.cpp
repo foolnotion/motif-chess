@@ -281,7 +281,7 @@ TEST_CASE("import_worker: valid 5-move game stores metadata and position rows", 
     tmp_dir const tdir {"valid_game"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
-    motif::import::import_worker worker {mgr.store(), mgr.positions()};
+    motif::import::import_worker worker {mgr};
 
     auto moves = std::vector<pgn::move_node> {
         make_move(1, "e4"),
@@ -333,7 +333,7 @@ TEST_CASE("import_worker: second game with same player reuses player row", "[mot
     tmp_dir const tdir {"player_reuse"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
-    motif::import::import_worker worker {mgr.store(), mgr.positions()};
+    motif::import::import_worker worker {mgr};
 
     auto moves1 = std::vector<pgn::move_node> {make_move(1, "e4"), make_move(1, "e5")};
     auto game1 = make_game("Kasparov", "Karpov", pgn::result::white, moves1);
@@ -372,7 +372,7 @@ TEST_CASE("import_worker: duplicate game returns error_code::duplicate", "[motif
     tmp_dir const tdir {"duplicate"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
-    motif::import::import_worker worker {mgr.store(), mgr.positions()};
+    motif::import::import_worker worker {mgr};
 
     auto moves = std::vector<pgn::move_node> {make_move(1, "e4"), make_move(1, "e5")};
     auto game = make_game("Player A", "Player B", pgn::result::draw, moves);
@@ -397,7 +397,7 @@ TEST_CASE("import_worker: %clk annotation is silently ignored", "[motif-import]"
     tmp_dir const tdir {"clk_comment"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
-    motif::import::import_worker worker {mgr.store(), mgr.positions()};
+    motif::import::import_worker worker {mgr};
 
     pgn::game const game {
         .tags = {{"White", "Alice"}, {"Black", "Bob"}},
@@ -426,7 +426,7 @@ TEST_CASE("import_worker: illegal SAN returns parse_error, no row inserted", "[m
     tmp_dir const tdir {"san_fail"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
-    motif::import::import_worker worker {mgr.store(), mgr.positions()};
+    motif::import::import_worker worker {mgr};
 
     auto bad_moves = std::vector<pgn::move_node> {make_move(1, "XXXX_invalid")};
     auto bad_game = make_game("A", "B", pgn::result::unknown, bad_moves);
@@ -449,7 +449,7 @@ TEST_CASE("import_worker: game without Elo tags stores null elo", "[motif-import
     tmp_dir const tdir {"no_elo"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
-    motif::import::import_worker worker {mgr.store(), mgr.positions()};
+    motif::import::import_worker worker {mgr};
 
     auto moves = std::vector<pgn::move_node> {make_move(1, "d4")};
     auto game = make_game("NoElo White", "NoElo Black", pgn::result::unknown, moves);
@@ -482,7 +482,7 @@ TEST_CASE("import_worker: header-only game is rejected as empty_game", "[motif-i
     tmp_dir const tdir {"zero_moves"};
     auto mgr = motif::db::database_manager::create(tdir.path, "test").value();  // NOLINT(bugprone-unchecked-optional-access)
 
-    motif::import::import_worker worker {mgr.store(), mgr.positions()};
+    motif::import::import_worker worker {mgr};
 
     auto game = make_game("Header White", "Header Black", pgn::result::unknown, {});
 

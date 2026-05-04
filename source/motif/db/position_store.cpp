@@ -390,6 +390,36 @@ auto position_store::delete_by_game_id(std::uint32_t const game_id) -> result<vo
     return {};
 }
 
+auto position_store::update_elo_for_game(std::uint32_t const game_id,
+                                         std::optional<std::int16_t> const new_white_elo,
+                                         std::optional<std::int16_t> const new_black_elo) -> result<void>
+{
+    if (!new_white_elo && !new_black_elo) {
+        return {};
+    }
+
+    std::ostringstream sql;
+    sql << "UPDATE position SET ";
+    bool first = true;
+    if (new_white_elo) {
+        sql << "white_elo = " << static_cast<int>(*new_white_elo);
+        first = false;
+    }
+    if (new_black_elo) {
+        if (!first) {
+            sql << ", ";
+        }
+        sql << "black_elo = " << static_cast<int>(*new_black_elo);
+    }
+    sql << " WHERE game_id = CAST(" << game_id << " AS UINTEGER)";
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
 auto position_store::count_by_zobrist(std::uint64_t const zobrist_hash) const -> result<std::int64_t>
 {
     std::ostringstream sql;

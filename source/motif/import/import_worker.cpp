@@ -16,6 +16,7 @@
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <tl/expected.hpp>
 
+#include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
 #include "motif/db/position_store.hpp"
@@ -96,9 +97,8 @@ auto extract_game(pgn::game const& pgn_game) -> motif::db::game
 
 }  // namespace
 
-import_worker::import_worker(motif::db::game_store& store, motif::db::position_store& positions) noexcept
-    : store_ {store}
-    , positions_ {positions}
+import_worker::import_worker(motif::db::database_manager& database) noexcept
+    : db_ {database}
 {
 }
 
@@ -159,7 +159,7 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     db_game.moves = std::move(encoded_moves);
 
     // Insert into SQLite game store
-    auto insert_res = store_.insert(db_game);
+    auto insert_res = db_.store().insert(db_game);
     if (!insert_res) {
         if (insert_res.error() == motif::db::error_code::duplicate) {
             return tl::unexpected(error_code::duplicate);
@@ -173,7 +173,7 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     }
 
     if (!position_rows.empty()) {
-        auto batch_res = positions_.insert_batch(position_rows);
+        auto batch_res = db_.positions().insert_batch(position_rows);
         if (!batch_res) {
             return tl::unexpected(error_code::io_failure);
         }
