@@ -321,6 +321,21 @@ auto parse_size(std::string_view str) -> std::optional<std::size_t>
     return val;
 }
 
+auto parse_int32(std::string_view str) -> std::optional<std::int32_t>
+{
+    if (str.empty()) {
+        return std::nullopt;
+    }
+    std::int32_t val {};
+    auto const [ptr, ec] = std::from_chars(str.data(),
+                                           str.data() + str.size(),  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+                                           val);
+    if (ec != std::errc {} || ptr != str.data() + str.size()) {  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        return std::nullopt;
+    }
+    return val;
+}
+
 auto parse_game_id(std::string_view id_str) -> std::optional<std::uint32_t>
 {
     if (id_str.empty()) {
@@ -997,6 +1012,23 @@ void server::impl::setup_routes()
                     return;
                 }
 
+                std::optional<std::int32_t> min_elo;
+                std::optional<std::int32_t> max_elo;
+                if (req.has_param("min_elo")) {
+                    min_elo = parse_int32(req.get_param_value("min_elo"));
+                    if (!min_elo) {
+                        set_json_error(res, http_bad_request, "invalid elo filter");
+                        return;
+                    }
+                }
+                if (req.has_param("max_elo")) {
+                    max_elo = parse_int32(req.get_param_value("max_elo"));
+                    if (!max_elo) {
+                        set_json_error(res, http_bad_request, "invalid elo filter");
+                        return;
+                    }
+                }
+
                 auto to_filter = [](std::string value) -> std::optional<std::string>
                 { return value.empty() ? std::nullopt : std::optional<std::string> {std::move(value)}; };
                 auto query = motif::db::game_list_query {
@@ -1005,8 +1037,8 @@ void server::impl::setup_routes()
                     .eco_prefix = req.has_param("eco") ? to_filter(req.get_param_value("eco")) : std::nullopt,
                     .date_from = req.has_param("date_from") ? to_filter(req.get_param_value("date_from")) : std::nullopt,
                     .date_to = req.has_param("date_to") ? to_filter(req.get_param_value("date_to")) : std::nullopt,
-                    .min_elo = std::nullopt,
-                    .max_elo = std::nullopt,
+                    .min_elo = min_elo,
+                    .max_elo = max_elo,
                     .limit = limit,
                     .offset = offset,
                 };
