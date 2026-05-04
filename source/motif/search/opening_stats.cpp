@@ -127,6 +127,12 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
     output.continuations.reserve(rows.size());
 
     for (auto const& row : rows) {
+        // Skip continuations whose every sampled game has been deleted from the
+        // game store; the position rows are orphaned and should not appear.
+        if (!contexts.contains(row.eco_sample_min) && !contexts.contains(row.eco_sample_max)) {
+            continue;
+        }
+
         auto eco_res = resolve_eco(row, contexts);
         auto [eco, opening_name] =
             eco_res ? std::move(*eco_res) : std::make_pair(std::optional<std::string> {}, std::optional<std::string> {});
