@@ -25,6 +25,7 @@
 #include "motif/db/manifest.hpp"
 #include "motif/db/position_store.hpp"
 #include "motif/db/schema.hpp"
+#include "motif/db/sqlite_util.hpp"
 #include "motif/db/types.hpp"
 
 namespace motif::db
@@ -62,7 +63,7 @@ auto enable_foreign_keys(sqlite3* conn) -> result<void>
     if (sqlite3_prepare_v2(conn, "PRAGMA foreign_keys;", -1, &raw, nullptr) != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
     }
-    auto const guard = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {raw, sqlite3_finalize};
+    auto const guard = detail::unique_stmt {raw};
     if (sqlite3_step(guard.get()) != SQLITE_ROW) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -101,7 +102,7 @@ auto narrow_elo(std::optional<std::int32_t> const& elo) -> result<std::optional<
     if (!elo.has_value()) {
         return std::optional<std::int16_t> {};
     }
-    if (*elo < std::numeric_limits<std::int16_t>::min() || *elo > std::numeric_limits<std::int16_t>::max()) {
+    if (!std::in_range<std::int16_t>(*elo)) {
         return tl::unexpected {error_code::io_failure};
     }
     return std::optional<std::int16_t> {static_cast<std::int16_t>(*elo)};
@@ -610,7 +611,7 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
         rollback();
         return tl::unexpected {error_code::io_failure};
     }
-    auto const stmt_guard = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {raw, sqlite3_finalize};
+    auto const stmt_guard = detail::unique_stmt {raw};
 
     std::vector<std::uint32_t> game_ids;
     int step_result = sqlite3_step(stmt_guard.get());

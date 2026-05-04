@@ -39,14 +39,6 @@ namespace
 
 using detail::unique_stmt;
 
-auto finalize_stmt(sqlite3_stmt*& stmt) noexcept -> void
-{
-    if (stmt != nullptr) {
-        sqlite3_finalize(stmt);
-        stmt = nullptr;
-    }
-}
-
 auto reset_stmt(sqlite3_stmt* stmt) noexcept -> void
 {
     sqlite3_reset(stmt);
@@ -300,73 +292,17 @@ void game_store::clear_insert_caches() noexcept
     tag_id_cache_.rehash(0);
 }
 
-game_store::~game_store() noexcept
-{
-    finalize_stmt(select_player_stmt_);
-    finalize_stmt(insert_player_stmt_);
-    finalize_stmt(select_event_stmt_);
-    finalize_stmt(insert_event_stmt_);
-    finalize_stmt(insert_game_stmt_);
-    finalize_stmt(select_tag_stmt_);
-    finalize_stmt(insert_tag_stmt_);
-    finalize_stmt(insert_game_tag_stmt_);
-}
-
-game_store::game_store(game_store&& other) noexcept
-    : db_ {std::exchange(other.db_, nullptr)}
-    , player_id_cache_ {std::move(other.player_id_cache_)}
-    , event_id_cache_ {std::move(other.event_id_cache_)}
-    , tag_id_cache_ {std::move(other.tag_id_cache_)}
-    , select_player_stmt_ {std::exchange(other.select_player_stmt_, nullptr)}
-    , insert_player_stmt_ {std::exchange(other.insert_player_stmt_, nullptr)}
-    , select_event_stmt_ {std::exchange(other.select_event_stmt_, nullptr)}
-    , insert_event_stmt_ {std::exchange(other.insert_event_stmt_, nullptr)}
-    , insert_game_stmt_ {std::exchange(other.insert_game_stmt_, nullptr)}
-    , select_tag_stmt_ {std::exchange(other.select_tag_stmt_, nullptr)}
-    , insert_tag_stmt_ {std::exchange(other.insert_tag_stmt_, nullptr)}
-    , insert_game_tag_stmt_ {std::exchange(other.insert_game_tag_stmt_, nullptr)}
-{
-}
-
-auto game_store::operator=(game_store&& other) noexcept -> game_store&
-{
-    if (this != &other) {
-        finalize_stmt(select_player_stmt_);
-        finalize_stmt(insert_player_stmt_);
-        finalize_stmt(select_event_stmt_);
-        finalize_stmt(insert_event_stmt_);
-        finalize_stmt(insert_game_stmt_);
-        finalize_stmt(select_tag_stmt_);
-        finalize_stmt(insert_tag_stmt_);
-        finalize_stmt(insert_game_tag_stmt_);
-
-        db_ = std::exchange(other.db_, nullptr);
-        player_id_cache_ = std::move(other.player_id_cache_);
-        event_id_cache_ = std::move(other.event_id_cache_);
-        tag_id_cache_ = std::move(other.tag_id_cache_);
-        select_player_stmt_ = std::exchange(other.select_player_stmt_, nullptr);
-        insert_player_stmt_ = std::exchange(other.insert_player_stmt_, nullptr);
-        select_event_stmt_ = std::exchange(other.select_event_stmt_, nullptr);
-        insert_event_stmt_ = std::exchange(other.insert_event_stmt_, nullptr);
-        insert_game_stmt_ = std::exchange(other.insert_game_stmt_, nullptr);
-        select_tag_stmt_ = std::exchange(other.select_tag_stmt_, nullptr);
-        insert_tag_stmt_ = std::exchange(other.insert_tag_stmt_, nullptr);
-        insert_game_tag_stmt_ = std::exchange(other.insert_game_tag_stmt_, nullptr);
-    }
-    return *this;
-}
-
-auto game_store::prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql) -> result<sqlite3_stmt*>
+auto game_store::prepare_cached_stmt(detail::unique_stmt& stmt, char const* sql) -> result<sqlite3_stmt*>
 {
     if (stmt == nullptr) {
         sqlite3_stmt* raw = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &raw, nullptr) != SQLITE_OK) {
             return tl::unexpected {error_code::io_failure};
         }
-        stmt = raw;
+        stmt.reset(raw);
     }
-    reset_stmt(stmt);
-    return stmt;
+    reset_stmt(stmt.get());
+    return stmt.get();
 }
 
 auto game_store::begin_transaction() -> result<void>

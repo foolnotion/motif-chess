@@ -10,11 +10,11 @@
 #include <gtl/phmap.hpp>
 
 #include "motif/db/error.hpp"
+#include "motif/db/sqlite_util.hpp"
 #include "motif/db/types.hpp"
 
 // Forward declaration — callers own the connection; game_store is non-owning.
 struct sqlite3;
-struct sqlite3_stmt;
 
 namespace motif::db
 {
@@ -23,12 +23,12 @@ class game_store
 {
   public:
     explicit game_store(sqlite3* conn) noexcept;
-    ~game_store() noexcept;
+    ~game_store() = default;
 
     game_store(game_store const&) = delete;
     auto operator=(game_store const&) -> game_store& = delete;
-    game_store(game_store&& other) noexcept;
-    auto operator=(game_store&& other) noexcept -> game_store&;
+    game_store(game_store&& other) noexcept = default;
+    auto operator=(game_store&& other) noexcept -> game_store& = default;
 
     // Create the five tables and supporting indexes.
     // Must be called once per connection before any other method.
@@ -93,19 +93,19 @@ class game_store
     gtl::flat_hash_map<std::string, std::int64_t> event_id_cache_;
     gtl::flat_hash_map<std::string, std::int64_t> tag_id_cache_;
 
-    sqlite3_stmt* select_player_stmt_ {nullptr};
-    sqlite3_stmt* insert_player_stmt_ {nullptr};
-    sqlite3_stmt* select_event_stmt_ {nullptr};
-    sqlite3_stmt* insert_event_stmt_ {nullptr};
-    sqlite3_stmt* insert_game_stmt_ {nullptr};
-    sqlite3_stmt* select_tag_stmt_ {nullptr};
-    sqlite3_stmt* insert_tag_stmt_ {nullptr};
-    sqlite3_stmt* insert_game_tag_stmt_ {nullptr};
+    detail::unique_stmt select_player_stmt_;
+    detail::unique_stmt insert_player_stmt_;
+    detail::unique_stmt select_event_stmt_;
+    detail::unique_stmt insert_event_stmt_;
+    detail::unique_stmt insert_game_stmt_;
+    detail::unique_stmt select_tag_stmt_;
+    detail::unique_stmt insert_tag_stmt_;
+    detail::unique_stmt insert_game_tag_stmt_;
 
     auto find_or_insert_player(player const& plr) -> result<std::int64_t>;
     auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
     auto insert_game_tags(std::uint32_t game_id, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
-    auto prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql) -> result<sqlite3_stmt*>;
+    auto prepare_cached_stmt(detail::unique_stmt& stmt, char const* sql) -> result<sqlite3_stmt*>;
 
     auto update_text_field(std::uint32_t game_id, std::string_view column, std::string const& value) -> result<void>;
     auto patch_player(std::uint32_t game_id,
