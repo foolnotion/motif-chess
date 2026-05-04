@@ -16,6 +16,7 @@
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <tl/expected.hpp>
 
+#include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
 #include "motif/db/position_store.hpp"
