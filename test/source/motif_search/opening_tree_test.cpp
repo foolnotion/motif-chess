@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
-#include <iostream>
 #include <limits>
 #include <optional>
 #include <ratio>
@@ -18,6 +17,7 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
+#include <fmt/base.h>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
@@ -109,6 +109,7 @@ auto make_game(game_spec const& spec) -> motif::db::game
         .eco = spec.eco,
         .moves = encode_moves(spec.sans),
         .extra_tags = {},
+        .provenance = {},
     };
 
     if (spec.opening_name.has_value()) {
@@ -536,6 +537,134 @@ TEST_CASE("opening_tree::open result_hash matches expected zobrist hash", "[moti
     CHECK(nf3.result_hash == hash_after_sans({"e4", "e5", "Nf3"}));
 }
 
+TEST_CASE("opening_tree::open from starting position aggregates first moves correctly", "[motif-search][opening_tree]")
+{
+    tmp_dir const tdir {"starting_position"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "tree-db");
+    REQUIRE(manager.has_value());
+
+    // Three games from the initial position: two 1.e4 games (different outcomes),
+    // one 1.d4 game.
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"C40"},
+                                            .opening_name = std::string {"King's Knight Opening"}}),
+                                 make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                                            .result = "0-1",
+                                            .white_elo = white_elo_low,
+                                            .black_elo = black_elo_other,
+                                            .eco = std::string {"C25"},
+                                            .opening_name = std::string {"Vienna Game"}}),
+                                 make_game({.sans = {"d4", "d5", "c4"},
+                                            .result = "1/2-1/2",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::string {"D06"},
+                                            .opening_name = std::string {"Queen's Gambit"}}),
+                             });
+
+    auto const starting_hash = hash_after_sans({});
+    auto tree_res = motif::search::opening_tree::open(*manager, starting_hash, default_prefetch_depth);
+    REQUIRE(tree_res.has_value());
+
+    auto const& root = tree_res->root;
+    CHECK(root.zobrist_hash == starting_hash);
+    CHECK(root.is_expanded);
+
+    // Continuations are sorted by frequency desc, then SAN asc.
+    // e4: 2 games (1 white win + 1 black win); d4: 1 game (1 draw).
+    REQUIRE(root.continuations.size() == 2);
+
+    auto const& e4_cont = root.continuations[0];
+    CHECK(e4_cont.san == "e4");
+    CHECK(e4_cont.frequency == 2);
+    CHECK(e4_cont.white_wins == 1);
+    CHECK(e4_cont.black_wins == 1);
+    CHECK(e4_cont.draws == 0);
+    CHECK(e4_cont.result_hash == hash_after_sans({"e4"}));
+
+    auto const& d4_cont = root.continuations[1];
+    CHECK(d4_cont.san == "d4");
+    CHECK(d4_cont.frequency == 1);
+    CHECK(d4_cont.white_wins == 0);
+    CHECK(d4_cont.black_wins == 0);
+    CHECK(d4_cont.draws == 1);
+    CHECK(d4_cont.result_hash == hash_after_sans({"d4"}));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("opening_tree::open from starting position on real corpus", "[performance][motif-search][opening_tree]")
+{
+    if (is_sanitized_build) {
+        SKIP("performance checks are skipped in sanitize builds");
+    }
+
+#ifndef NDEBUG
+    SKIP("performance checks run only in release builds");
+#endif
+
+    auto const pgn_file = perf_pgn_path();
+    if (!std::filesystem::exists(pgn_file)) {
+        SKIP("PGN corpus not available");
+    }
+
+    tmp_dir const tdir {"starting_pos_real"};
+
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "opening-tree-startpos");
+    REQUIRE(manager.has_value());
+
+    auto init_log = motif::import::initialize_logging({.log_dir = tdir.path / "logs"});
+    REQUIRE(init_log.has_value());
+
+    motif::import::import_pipeline pipeline {*manager};
+    auto summary = pipeline.run(pgn_file, motif::import::import_config {});
+    REQUIRE(summary.has_value());
+    REQUIRE(summary->committed > 0);
+
+    auto const starting_hash = hash_after_sans({});
+
+    auto const start = std::chrono::steady_clock::now();
+    auto tree_res = motif::search::opening_tree::open(*manager, starting_hash, 1);
+    auto const elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+    REQUIRE(tree_res.has_value());
+
+    auto const& root = tree_res->root;
+    CHECK(root.zobrist_hash == starting_hash);
+    CHECK(root.is_expanded);
+
+    // Every committed game passes through the starting position at least once;
+    // games that revisit it via move repetition contribute more than once.
+    auto total_freq = std::size_t {0};
+    for (auto const& cont : root.continuations) {
+        total_freq += cont.frequency;
+    }
+    CHECK(total_freq >= summary->committed);
+
+    // Real corpora always have at least the common first moves (e4, d4, Nf3, c4, ...).
+    CHECK(root.continuations.size() >= 4);
+
+    // The most popular first move in tournament chess is always e4 or d4.
+    auto const& top = root.continuations[0];
+    CHECK((top.san == "e4" || top.san == "d4"));
+
+    fmt::print("\n=== opening_tree::open from starting position ===\n"
+               "  corpus:       {}\n"
+               "  committed:    {} games\n"
+               "  continuations:{}\n"
+               "  elapsed:      {} ms\n",
+               pgn_file.filename().string(), summary->committed,
+               root.continuations.size(), elapsed_ms);
+
+    auto const shutdown_result = motif::import::shutdown_logging();
+    REQUIRE(shutdown_result.has_value());
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("opening_tree::open performance on sorted position store", "[performance][motif-search][opening_tree]")
 {
@@ -593,10 +722,11 @@ TEST_CASE("opening_tree::open performance on sorted position store", "[performan
     auto const p99_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
     auto const p99_us = count > 0 ? latencies_us[p99_idx] : 0.0;
 
-    std::cout << "\n=== opening_tree::open performance ===\n"
-              << "  queries:      " << count << "\n"
-              << "  total:        " << total_ms << " ms\n"
-              << "  p99:          " << p99_us << " us\n";
+    fmt::print("\n=== opening_tree::open performance ===\n"
+               "  queries:      {}\n"
+               "  total:        {} ms\n"
+               "  p99:          {} us\n",
+               count, total_ms, p99_us);
 
     CHECK(p99_us < perf_p99_limit_us);
 

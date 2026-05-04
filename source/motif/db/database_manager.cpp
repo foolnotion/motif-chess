@@ -1,6 +1,6 @@
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -136,6 +136,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
         .zobrist_hash = board.hash(),
         .game_id = game_id,
         .ply = 0,
+        .encoded_move = 0,
         .result = result_code,
         .white_elo = *white_elo,
         .black_elo = *black_elo,
@@ -149,6 +150,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
             .zobrist_hash = board.hash(),
             .game_id = game_id,
             .ply = static_cast<std::uint16_t>(i + 1),
+            .encoded_move = game.moves[i],
             .result = result_code,
             .white_elo = *white_elo,
             .black_elo = *black_elo,
@@ -400,17 +402,13 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
 
 auto database_manager::store() noexcept -> game_store&
 {
-    if (!store_.has_value()) {
-        std::terminate();
-    }
+    assert(store_.has_value());
     return *store_;
 }
 
 auto database_manager::store() const noexcept -> game_store const&
 {
-    if (!store_.has_value()) {
-        std::terminate();
-    }
+    assert(store_.has_value());
     return *store_;
 }
 
@@ -426,18 +424,50 @@ auto database_manager::dir() const noexcept -> std::filesystem::path const&
 
 auto database_manager::positions() noexcept -> position_store&
 {
-    if (!positions_.has_value()) {
-        std::terminate();
-    }
+    assert(positions_.has_value());
     return *positions_;
 }
 
 auto database_manager::positions() const noexcept -> position_store const&
 {
-    if (!positions_.has_value()) {
-        std::terminate();
-    }
+    assert(positions_.has_value());
     return *positions_;
+}
+
+auto database_manager::sort_positions() -> result<void>
+{
+    if (duck_con_ == nullptr || !positions_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    duckdb_result tx_res {};
+    if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
+        duckdb_destroy_result(&tx_res);
+        return tl::unexpected {error_code::io_failure};
+    }
+    duckdb_destroy_result(&tx_res);
+
+    auto rollback = [this]() noexcept -> void
+    {
+        duckdb_result rollback_res {};
+        duckdb_query(duck_con_, "ROLLBACK", &rollback_res);
+        duckdb_destroy_result(&rollback_res);
+    };
+
+    if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
+        rollback();
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    duckdb_result commit_res {};
+    if (duckdb_query(duck_con_, "COMMIT", &commit_res) == DuckDBError) {
+        duckdb_destroy_result(&commit_res);
+        rollback();
+        return tl::unexpected {error_code::io_failure};
+    }
+    duckdb_destroy_result(&commit_res);
+
+    return {};
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -474,10 +504,15 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
         duckdb_destroy_result(&rollback_res);
     };
 
-    duckdb_result del_res {};
-    auto const del_ret = duckdb_query(duck_con_, "DELETE FROM position", &del_res);
-    duckdb_destroy_result(&del_res);
-    if (del_ret == DuckDBError) {
+    // Drop and recreate so that any schema changes (new columns) are applied.
+    duckdb_result drop_res {};
+    if (duckdb_query(duck_con_, "DROP TABLE IF EXISTS position", &drop_res) == DuckDBError) {
+        duckdb_destroy_result(&drop_res);
+        rollback();
+        return tl::unexpected {error_code::io_failure};
+    }
+    duckdb_destroy_result(&drop_res);
+    if (auto schema_res = positions_->initialize_schema(); !schema_res) {
         rollback();
         return tl::unexpected {error_code::io_failure};
     }
