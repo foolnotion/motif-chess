@@ -345,7 +345,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         if (sqlite_tx_open) {
             return true;
         }
-        auto begin_res = db_.store().begin_transaction();
+        auto begin_res = db_.writer().begin_transaction();
         if (!begin_res) {
             return false;
         }
@@ -358,7 +358,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         if (!sqlite_tx_open) {
             return;
         }
-        db_.store().rollback_transaction();
+        db_.writer().rollback_transaction();
         sqlite_tx_open = false;
     };
 
@@ -367,7 +367,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         if (!sqlite_tx_open) {
             return true;
         }
-        auto commit_res = db_.store().commit_transaction();
+        auto commit_res = db_.writer().commit_transaction();
         if (!commit_res) {
             return false;
         }
@@ -482,7 +482,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
         auto& prep = *slot.prepared;
 
-        auto ins = db_.store().insert(prep.game_row);
+        auto ins = db_.writer().insert(prep.game_row);
         if (!ins) {
             if (ins.error() == motif::db::error_code::duplicate) {
                 games_skipped_.fetch_add(1, std::memory_order_relaxed);
@@ -624,7 +624,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     }
 
     delete_checkpoint(db_.dir());
-    db_.store().clear_insert_caches();
+    db_.writer().clear_insert_caches();
 
     auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::nanoseconds {current_time_ns() - start_time_ns_.load(std::memory_order_relaxed)});

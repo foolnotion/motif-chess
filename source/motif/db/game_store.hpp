@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,6 +19,8 @@ struct sqlite3_stmt;
 
 namespace motif::db
 {
+
+class game_writer;
 
 class game_store
 {
@@ -97,10 +100,11 @@ class game_store
     sqlite3_stmt* insert_player_stmt_ {nullptr};
     sqlite3_stmt* select_event_stmt_ {nullptr};
     sqlite3_stmt* insert_event_stmt_ {nullptr};
-    sqlite3_stmt* insert_game_stmt_ {nullptr};
     sqlite3_stmt* select_tag_stmt_ {nullptr};
     sqlite3_stmt* insert_tag_stmt_ {nullptr};
     sqlite3_stmt* insert_game_tag_stmt_ {nullptr};
+
+    std::unique_ptr<game_writer> writer_;
 
     auto find_or_insert_player(player const& plr) -> result<std::int64_t>;
     auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
