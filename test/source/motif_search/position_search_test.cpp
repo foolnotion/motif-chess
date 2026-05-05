@@ -202,19 +202,19 @@ TEST_CASE("position_search::find returns matching position rows", "[motif-search
     auto const target_hash = hash_after_sans({"e4", "e5"});
 
     std::vector<motif::db::position_row> const rows {
-        {.zobrist_hash = motif::db::zobrist_hash {target_hash},
+        {.zobrist_hash = target_hash,
          .game_id = motif::db::game_id {11},
          .ply = 2,
          .result = 1,
          .white_elo = std::int16_t {2700},
          .black_elo = std::int16_t {2650}},
-        {.zobrist_hash = motif::db::zobrist_hash {target_hash},
+        {.zobrist_hash = target_hash,
          .game_id = motif::db::game_id {42},
          .ply = 2,
          .result = 0,
          .white_elo = std::int16_t {2500},
          .black_elo = std::nullopt},
-        {.zobrist_hash = motif::db::zobrist_hash {hash_after_sans({"d4"})},
+        {.zobrist_hash = hash_after_sans({"d4"}),
          .game_id = motif::db::game_id {99},
          .ply = 1,
          .result = -1,
@@ -254,7 +254,7 @@ TEST_CASE("position_search::find returns empty result for missing hash", "[motif
     REQUIRE(manager.has_value());
 
     std::vector<motif::db::position_row> const rows {
-        {.zobrist_hash = motif::db::zobrist_hash {hash_after_sans({"e4"})},
+        {.zobrist_hash = hash_after_sans({"e4"}),
          .game_id = motif::db::game_id {7},
          .ply = 1,
          .result = 1,
