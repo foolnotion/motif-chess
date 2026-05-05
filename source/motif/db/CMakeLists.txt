@@ -8,6 +8,7 @@ find_package(DuckDB REQUIRED)
 
 add_library(motif_db STATIC
     game_store.cpp
+    game_writer.cpp
     schema.cpp
     manifest.cpp
     database_manager.cpp

@@ -8,6 +8,7 @@
 
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
+#include "motif/db/game_writer.hpp"
 #include "motif/db/manifest.hpp"
 #include "motif/db/position_store.hpp"
 #include "motif/db/types.hpp"
@@ -46,6 +47,9 @@ class database_manager
     [[nodiscard]] auto store() noexcept -> game_store&;
     [[nodiscard]] auto store() const noexcept -> game_store const&;
 
+    // Access the SQLite bulk writer used by import and other batched writes.
+    [[nodiscard]] auto writer() noexcept -> game_writer&;
+
     // Access the DuckDB position store.
     [[nodiscard]] auto positions() noexcept -> position_store&;
     [[nodiscard]] auto positions() const noexcept -> position_store const&;
@@ -59,14 +63,14 @@ class database_manager
     // Patch game metadata in SQLite and sync the denormalised elo columns in the
     // DuckDB position table.  Only user-added games may be patched; returns
     // error_code::not_editable otherwise.
-    auto patch_game_metadata(game_id game_id, game_patch const& patch) -> result<void>;
+    auto patch_game_metadata(game_id game_key, game_patch const& patch) -> result<void>;
 
     // Delete a game from both the SQLite game store and the DuckDB position
     // index.  Position rows are removed first; if the subsequent SQLite delete
     // fails the positions can be restored via rebuild_position_store().
     // Note: the two deletions are not atomic across a crash boundary.
     // Returns error_code::not_found if the game does not exist.
-    auto remove_game(game_id game_id) -> result<void>;
+    auto remove_game(game_id game_key) -> result<void>;
 
     // Drop and repopulate the DuckDB position table from all games in SQLite.
     auto rebuild_position_store(bool sort_by_zobrist = true) -> result<void>;
@@ -83,6 +87,7 @@ class database_manager
 
     sqlite3* conn_ {nullptr};
     std::optional<game_store> store_;
+    std::optional<game_writer> writer_;
     db_manifest manifest_;
     std::filesystem::path dir_;
     duckdb_database duck_db_ {nullptr};
