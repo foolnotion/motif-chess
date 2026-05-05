@@ -135,7 +135,7 @@ struct engine_manager::impl
 namespace
 {
 
-auto validate_params(analysis_params const& params) -> tl::expected<void, error_code>
+auto validate_params(analysis_params const& params) -> result<void>
 {
     if (params.multipv < 1) {
         return tl::unexpected {error_code::invalid_analysis_params};
@@ -154,7 +154,7 @@ auto validate_params(analysis_params const& params) -> tl::expected<void, error_
 
 auto resolve_engine_config(gtl::flat_hash_map<std::string, engine_config> const& engines,
                            std::vector<std::string> const& engine_order,
-                           std::string const& engine_name) -> tl::expected<engine_config, error_code>
+                           std::string const& engine_name) -> result<engine_config>
 {
     if (engines.empty()) {
         return tl::unexpected {error_code::engine_not_configured};
@@ -169,7 +169,7 @@ auto resolve_engine_config(gtl::flat_hash_map<std::string, engine_config> const&
     return iter->second;
 }
 
-auto launch_engine(session& sess, engine_config const& cfg) -> tl::expected<void, error_code>
+auto launch_engine(session& sess, engine_config const& cfg) -> result<void>
 {
     if (!sess.engine.start(cfg.path)) {
         return tl::unexpected {error_code::engine_start_failed};
@@ -180,7 +180,7 @@ auto launch_engine(session& sess, engine_config const& cfg) -> tl::expected<void
     return {};
 }
 
-auto configure_position(session& sess, analysis_params const& params) -> tl::expected<void, error_code>
+auto configure_position(session& sess, analysis_params const& params) -> result<void>
 {
     if (params.multipv > 1) {
         if (!sess.engine.set_option("MultiPV", fmt::format("{}", params.multipv))) {
@@ -322,7 +322,7 @@ engine_manager::~engine_manager()
     // sessions_to_quit destructs here — engines have been quit, so ~engine() is safe.
 }
 
-auto engine_manager::configure_engine(engine_config cfg) -> tl::expected<void, error_code>
+auto engine_manager::configure_engine(engine_config cfg) -> result<void>
 {
     if (cfg.path.empty()) {
         return tl::unexpected {error_code::engine_not_configured};
@@ -346,7 +346,7 @@ auto engine_manager::list_engines() -> std::vector<engine_config>
     return result;
 }
 
-auto engine_manager::start_analysis(analysis_params const& params) -> tl::expected<std::string, error_code>
+auto engine_manager::start_analysis(analysis_params const& params) -> result<std::string>
 {
     if (auto params_result = validate_params(params); !params_result) {
         return tl::unexpected {params_result.error()};
@@ -395,7 +395,7 @@ auto engine_manager::start_analysis(analysis_params const& params) -> tl::expect
     return new_id;
 }
 
-auto engine_manager::stop_analysis(std::string const& analysis_id) -> tl::expected<void, error_code>
+auto engine_manager::stop_analysis(std::string const& analysis_id) -> result<void>
 {
     const std::scoped_lock lock {impl_->mutex};
     auto iter = impl_->sessions.find(analysis_id);
@@ -417,7 +417,7 @@ auto engine_manager::stop_analysis(std::string const& analysis_id) -> tl::expect
 auto engine_manager::subscribe(std::string const& analysis_id,
                                info_callback const& on_info,
                                complete_callback const& on_complete,
-                               error_callback const& on_error) -> tl::expected<subscription, error_code>
+                               error_callback const& on_error) -> result<subscription>
 {
     std::optional<complete_event> complete_to_replay;
     std::vector<info_event> info_to_replay;

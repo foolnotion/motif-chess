@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "motif/db/types.hpp"
 #include "motif/search/error.hpp"
 
 namespace motif::db
@@ -50,7 +51,7 @@ struct tree
 };
 
 [[nodiscard]] auto open(motif::db::database_manager const& database,
-                        std::uint64_t root_hash,
+                        motif::db::zobrist_hash root_hash,
                         std::size_t prefetch_depth = default_prefetch_depth) -> result<tree>;
 
 [[nodiscard]] auto expand(motif::db::database_manager const& database, node& n) -> result<void>;

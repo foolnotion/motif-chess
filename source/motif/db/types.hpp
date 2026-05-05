@@ -10,6 +10,10 @@
 namespace motif::db
 {
 
+// Named aliases for primitive domain IDs — document intent at API call sites.
+using game_id = std::uint32_t;
+using zobrist_hash = std::uint64_t;
+
 struct player
 {
     std::string name;

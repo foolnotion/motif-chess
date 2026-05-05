@@ -86,24 +86,24 @@ class engine_manager
 
     // Register or overwrite an engine configuration.
     // Returns engine_not_configured if path is empty.
-    auto configure_engine(engine_config cfg) -> tl::expected<void, error_code>;
+    auto configure_engine(engine_config cfg) -> result<void>;
 
     // Return all registered engine configurations.
     auto list_engines() -> std::vector<engine_config>;
 
     // Start an analysis session. Returns an opaque analysis_id on success.
-    auto start_analysis(analysis_params const& params) -> tl::expected<std::string, error_code>;
+    auto start_analysis(analysis_params const& params) -> result<std::string>;
 
     // Stop an active analysis session.
     // Returns analysis_already_terminal if the session is already done.
-    auto stop_analysis(std::string const& analysis_id) -> tl::expected<void, error_code>;
+    auto stop_analysis(std::string const& analysis_id) -> result<void>;
 
     // Register callbacks for SSE event forwarding.
     // Returns analysis_not_found if the analysis_id is unknown.
     auto subscribe(std::string const& analysis_id,
                    info_callback const& on_info,
                    complete_callback const& on_complete,
-                   error_callback const& on_error) -> tl::expected<subscription, error_code>;
+                   error_callback const& on_error) -> result<subscription>;
 
   private:
     struct impl;
