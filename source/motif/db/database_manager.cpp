@@ -12,14 +12,13 @@
 
 #include "motif/db/database_manager.hpp"
 
-#include <chesslib/board/board.hpp>
-#include <chesslib/board/move_codec.hpp>
 #include <duckdb.h>
 #include <gtl/meminfo.hpp>
 #include <spdlog/spdlog.h>
 #include <sqlite3.h>
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
 #include "motif/db/manifest.hpp"
@@ -127,7 +126,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
         return tl::unexpected {black_elo.error()};
     }
 
-    chesslib::board board;
+    auto board = motif::chess::board {};
     std::vector<position_row> batch;
     batch.reserve(game.moves.size() + 1);
 
@@ -143,9 +142,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
     });
 
     for (std::size_t i = 0; i < game.moves.size(); ++i) {
-        auto const decoded = chesslib::codec::decode(game.moves[i]);
-        chesslib::move_maker maker {board, decoded};
-        maker.make();
+        motif::chess::apply_encoded_move(board, game.moves[i]);
         batch.push_back(position_row {
             .zobrist_hash = board.hash(),
             .game_id = game_id,

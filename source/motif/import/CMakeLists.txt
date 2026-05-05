@@ -14,6 +14,6 @@ target_include_directories(
 
 target_link_libraries(motif_import PUBLIC
     spdlog::spdlog pgnlib::pgnlib tl::expected motif_db
-    Taskflow::Taskflow)
+    Taskflow::Taskflow motif_chess)
 
 target_compile_features(motif_import PUBLIC cxx_std_23)

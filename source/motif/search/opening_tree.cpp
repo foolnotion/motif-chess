@@ -13,12 +13,10 @@
 
 #include "motif/search/opening_tree.hpp"
 
-#include <chesslib/board/board.hpp>
-#include <chesslib/board/move_codec.hpp>
-#include <chesslib/util/san.hpp>
 #include <gtl/phmap.hpp>
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
 #include "motif/search/error.hpp"
@@ -123,23 +121,6 @@ void note_elo(tree_continuation_aggregate& aggregate,
     }
 }
 
-auto replay_position(motif::db::game_context const& context, std::uint16_t const ply) -> motif::search::result<chesslib::board>
-{
-    auto board = chesslib::board {};
-
-    for (std::size_t index = 0; index < ply; ++index) {
-        if (index >= context.moves.size()) {
-            return tl::unexpected {motif::search::error_code::io_failure};
-        }
-
-        auto const move = chesslib::codec::decode(context.moves[index]);
-        chesslib::move_maker maker {board, move};
-        maker.make();
-    }
-
-    return board;
-}
-
 struct node_aggregate
 {
     std::map<std::uint16_t, tree_continuation_aggregate> continuations;
@@ -149,12 +130,11 @@ struct node_aggregate
 };
 
 auto build_continuation(tree_continuation_aggregate const& aggregate,
-                        chesslib::board const& position,
+                        motif::chess::board const& position,
                         bool const is_expanded,
                         std::uint64_t const child_hash) -> motif::search::opening_tree::node_continuation
 {
-    auto const cont_move = chesslib::codec::decode(aggregate.encoded_move);
-    auto san = chesslib::san::to_string(position, cont_move);
+    auto san = motif::chess::san(position, aggregate.encoded_move);
 
     auto child_node = std::make_unique<motif::search::opening_tree::node>(motif::search::opening_tree::node {
         .zobrist_hash = child_hash,
@@ -316,7 +296,7 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
 
     // Get root board.  For root_ply == 0 (the common case — starting position)
     // no context fetch is needed.  For deeper roots, replay one sample game.
-    auto root_board = [&]() -> result<chesslib::board>
+    auto root_board = [&]() -> result<motif::chess::board>
     {
         auto const depth1_key = node_key {.depth = 1U, .parent_hash = root_hash};
         auto const nag_it = node_aggregates.find(depth1_key);
@@ -324,13 +304,17 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
             return tl::unexpected {error_code::io_failure};
         }
         if (nag_it->second.sample_root_ply == 0U) {
-            return chesslib::board {};
+            return motif::chess::board {};
         }
         auto const ctx_it = sample_contexts.find(nag_it->second.sample_game_id);
         if (ctx_it == sample_contexts.end()) {
             return tl::unexpected {error_code::io_failure};
         }
-        return replay_position(ctx_it->second, nag_it->second.sample_root_ply);
+        auto replayed = motif::chess::replay(ctx_it->second.moves, nag_it->second.sample_root_ply);
+        if (!replayed) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        return *replayed;
     }();
     if (!root_board) {
         return tl::unexpected {error_code::io_failure};
@@ -339,7 +323,7 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
     // Forward BFS: build a map from zobrist_hash → board state by applying
     // encoded moves from the root outward.  This replaces per-node replay_position
     // calls in the build loop below.
-    auto board_at_hash = gtl::flat_hash_map<std::uint64_t, chesslib::board> {};
+    auto board_at_hash = gtl::flat_hash_map<std::uint64_t, motif::chess::board> {};
     board_at_hash.emplace(root_hash, *root_board);
 
     for (auto const& nkey : all_keys) {
@@ -352,8 +336,7 @@ auto open(motif::db::database_manager const& database, std::uint64_t const root_
         for (auto const& [enc, agg] : nag.continuations) {
             if (!board_at_hash.contains(agg.result_hash)) {
                 auto child_board = parent_board;
-                chesslib::move_maker maker {child_board, chesslib::codec::decode(enc)};
-                maker.make();
+                motif::chess::apply_encoded_move(child_board, enc);
                 board_at_hash.emplace(agg.result_hash, child_board);
             }
         }
