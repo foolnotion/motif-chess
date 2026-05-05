@@ -1473,7 +1473,7 @@ void server::impl::setup_routes()
 
                  auto analysis_result = engine_mgr.start_analysis(params);
                  if (!analysis_result) {
-                     switch (analysis_result.error()) {
+                     switch (analysis_result.error().code) {
                          case motif::engine::error_code::engine_not_configured:
                              set_json_error(res, http_service_unavailable, "no engine configured");
                              return;
@@ -1581,7 +1581,7 @@ void server::impl::setup_routes()
                    auto const& analysis_id = req.path_params.at("analysis_id");
                    auto stop_result = engine_mgr.stop_analysis(analysis_id);
                    if (!stop_result) {
-                       switch (stop_result.error()) {
+                       switch (stop_result.error().code) {
                            case motif::engine::error_code::analysis_not_found:
                                set_json_error(res, http_not_found, "analysis not found");
                                return;

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "motif/db/types.hpp"
 #include "motif/search/error.hpp"
 
 namespace motif::db
@@ -37,6 +38,6 @@ struct stats
     std::vector<continuation> continuations;
 };
 
-[[nodiscard]] auto query(motif::db::database_manager const& database, std::uint64_t zobrist_hash) -> result<stats>;
+[[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash zobrist_hash) -> result<stats>;
 
 }  // namespace motif::search::opening_stats
