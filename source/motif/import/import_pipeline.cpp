@@ -122,7 +122,7 @@ struct pipeline_slot
     std::size_t game_start_offset {};
     std::size_t next_game_offset {};
     std::optional<prepared_game> prepared;
-    std::optional<motif::import::error_code> error;
+    std::optional<motif::import::error> error;
     slot_state state {slot_state::empty};
 };
 
@@ -315,7 +315,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     bool eof_reached = false;
     bool stopped = false;
     std::size_t checkpoint_offset = start_offset;
-    std::optional<error_code> fatal_error;
+    std::optional<error> fatal_error;
 
     bool const build_inline_positions = config.rebuild_positions_after_import && pre_committed == 0;
     std::vector<motif::db::position_row> inline_positions;
@@ -492,7 +492,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             } else {
                 games_errored_.fetch_add(1, std::memory_order_relaxed);
                 rollback_sqlite_batch();
-                fatal_error = error_code::io_failure;
+                fatal_error = error {error_code::io_failure};
                 eof_reached = true;
                 pflow.stop();
                 if (log) {
@@ -522,7 +522,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         if (batch_pending >= config.batch_size) {
             if (!commit_sqlite_batch()) {
                 rollback_sqlite_batch();
-                fatal_error = error_code::io_failure;
+                fatal_error = error {error_code::io_failure};
                 eof_reached = true;
                 pflow.stop();
                 if (log) {
@@ -534,7 +534,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             }
 
             if (build_inline_positions && !flush_inline_positions()) {
-                fatal_error = error_code::io_failure;
+                fatal_error = error {error_code::io_failure};
                 eof_reached = true;
                 pflow.stop();
                 slot.prepared.reset();
@@ -553,7 +553,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
                 return;
             }
             if (!begin_sqlite_batch()) {
-                fatal_error = error_code::io_failure;
+                fatal_error = error {error_code::io_failure};
                 eof_reached = true;
                 pflow.stop();
                 if (log) {
