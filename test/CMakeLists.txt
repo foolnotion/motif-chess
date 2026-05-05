@@ -70,6 +70,13 @@ target_compile_definitions(
 )
 catch_discover_tests(motif_http_test)
 
+add_executable(motif_chess_test
+    source/motif_chess/chess_test.cpp
+)
+target_link_libraries(motif_chess_test PRIVATE motif_chess Catch2::Catch2WithMain)
+target_compile_features(motif_chess_test PRIVATE cxx_std_23)
+catch_discover_tests(motif_chess_test)
+
 # ---- End-of-file commands ----
 
 add_folders(Test)

@@ -42,6 +42,7 @@ class board
     std::unique_ptr<impl> impl_;
 
     explicit board(std::unique_ptr<impl> impl) noexcept;
+    void ensure_impl();
 
     friend auto parse_fen(std::string_view fen) -> result<board>;
     friend auto write_fen(board const& position) -> std::string;

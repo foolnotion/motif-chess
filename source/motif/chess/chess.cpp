@@ -16,12 +16,15 @@
 #include <chesslib/util/fen.hpp>
 #include <chesslib/util/san.hpp>
 #include <chesslib/util/uci.hpp>
+#include <tl/expected.hpp>
 
 namespace motif::chess
 {
 
 namespace
 {
+
+constexpr auto uci_promotion_length = std::size_t {5};
 
 auto squares_from_uci(std::string const& uci) -> std::pair<std::string, std::string>
 {
@@ -34,7 +37,7 @@ auto squares_from_uci(std::string const& uci) -> std::pair<std::string, std::str
 
 auto promotion_from_uci(std::string const& uci) -> std::optional<std::string>
 {
-    if (uci.size() < 5U) {
+    if (uci.size() < uci_promotion_length) {
         return std::nullopt;
     }
 
@@ -46,14 +49,14 @@ auto describe_move(chesslib::board const& position, chesslib::move const move) -
     auto const encoded_move = chesslib::codec::encode(move);
     auto const uci = chesslib::uci::to_string(move);
     auto const san_move = chesslib::san::to_string(position, move);
-    auto const [from, to] = squares_from_uci(uci);
+    auto [from_square, to_square] = squares_from_uci(uci);
 
     return move_info {
         .encoded_move = encoded_move,
         .uci = uci,
         .san = san_move,
-        .from = std::move(from),
-        .to = std::move(to),
+        .from = std::move(from_square),
+        .to = std::move(to_square),
         .promotion = promotion_from_uci(uci),
     };
 }
@@ -75,17 +78,29 @@ board::board(std::unique_ptr<impl> impl) noexcept
 {
 }
 
+void board::ensure_impl()
+{
+    if (impl_ == nullptr) {
+        impl_ = std::make_unique<impl>();
+    }
+}
+
 board::~board() = default;
 
 board::board(board const& other)
-    : impl_ {std::make_unique<impl>(*other.impl_)}
+    : impl_ {other.impl_ != nullptr ? std::make_unique<impl>(*other.impl_) : std::make_unique<impl>()}
 {
 }
 
 auto board::operator=(board const& other) -> board&
 {
     if (this != &other) {
-        *impl_ = *other.impl_;
+        ensure_impl();
+        if (other.impl_ != nullptr) {
+            *impl_ = *other.impl_;
+        } else {
+            *impl_ = impl {};
+        }
     }
     return *this;
 }
@@ -96,7 +111,7 @@ auto board::operator=(board&& other) noexcept -> board& = default;
 
 auto board::hash() const noexcept -> std::uint64_t
 {
-    return impl_->native.hash();
+    return impl_ != nullptr ? impl_->native.hash() : chesslib::board {}.hash();
 }
 
 auto parse_fen(std::string_view const fen) -> result<board>
