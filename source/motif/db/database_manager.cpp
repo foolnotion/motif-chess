@@ -210,6 +210,7 @@ database_manager::~database_manager()
 database_manager::database_manager(database_manager&& other) noexcept
     : conn_ {std::exchange(other.conn_, nullptr)}
     , store_ {std::move(other.store_)}
+    , writer_ {std::move(other.writer_)}
     , manifest_ {std::move(other.manifest_)}
     , dir_ {std::move(other.dir_)}
     , duck_db_ {std::exchange(other.duck_db_, nullptr)}
@@ -217,6 +218,7 @@ database_manager::database_manager(database_manager&& other) noexcept
     , positions_ {other.positions_}
 {
     other.store_.reset();
+    other.writer_.reset();
     other.positions_.reset();
 }
 
@@ -226,12 +228,14 @@ auto database_manager::operator=(database_manager&& other) noexcept -> database_
         close();
         conn_ = std::exchange(other.conn_, nullptr);
         store_ = std::move(other.store_);
+        writer_ = std::move(other.writer_);
         manifest_ = std::move(other.manifest_);
         dir_ = std::move(other.dir_);
         duck_db_ = std::exchange(other.duck_db_, nullptr);
         duck_con_ = std::exchange(other.duck_con_, nullptr);
         positions_ = other.positions_;
         other.store_.reset();
+        other.writer_.reset();
         other.positions_.reset();
     }
     return *this;
@@ -250,6 +254,7 @@ void database_manager::close() noexcept
     }
 
     positions_.reset();
+    writer_.reset();
     if (duck_con_ != nullptr) {
         duckdb_disconnect(&duck_con_);
         duck_con_ = nullptr;
@@ -312,6 +317,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     database_manager mgr;
     mgr.conn_ = conn;
     mgr.store_.emplace(conn);
+    mgr.writer_.emplace(conn);
     mgr.manifest_ = std::move(new_manifest);
     mgr.dir_ = dir;
 
@@ -397,6 +403,7 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
     database_manager mgr;
     mgr.conn_ = conn;
     mgr.store_.emplace(conn);
+    mgr.writer_.emplace(conn);
     mgr.manifest_ = std::move(*mf_res);
     mgr.dir_ = dir;
 
@@ -451,6 +458,12 @@ auto database_manager::store() const noexcept -> game_store const&
     return *store_;
 }
 
+auto database_manager::writer() noexcept -> game_writer&
+{
+    assert(writer_.has_value());
+    return *writer_;
+}
+
 auto database_manager::manifest() const noexcept -> db_manifest const&
 {
     return manifest_;
@@ -473,7 +486,7 @@ auto database_manager::positions() const noexcept -> position_store const&
     return *positions_;
 }
 
-auto database_manager::patch_game_metadata(std::uint32_t const game_id, game_patch const& patch) -> result<void>
+auto database_manager::patch_game_metadata(game_id const game_key, game_patch const& patch) -> result<void>
 {
     if (!positions_ || !store_) {
         return tl::unexpected {error_code::io_failure};
@@ -497,17 +510,17 @@ auto database_manager::patch_game_metadata(std::uint32_t const game_id, game_pat
         new_black = *res;
     }
 
-    if (auto res = store_->patch_metadata(game_id, patch); !res) {
+    if (auto res = store_->patch_metadata(game_key, patch); !res) {
         return res;
     }
 
     if (new_white || new_black) {
-        return positions_->update_elo_for_game(game_id, new_white, new_black);
+        return positions_->update_elo_for_game(game_key, new_white, new_black);
     }
     return {};
 }
 
-auto database_manager::remove_game(std::uint32_t const game_id) -> result<void>
+auto database_manager::remove_game(game_id const game_key) -> result<void>
 {
     if (!positions_ || !store_) {
         return tl::unexpected {error_code::io_failure};
@@ -515,10 +528,10 @@ auto database_manager::remove_game(std::uint32_t const game_id) -> result<void>
     // Position rows are removed first: they can always be restored by
     // rebuild_position_store(), whereas a game deleted from SQLite cannot.
     // The two operations are not atomic across a crash boundary.
-    if (auto res = positions_->delete_by_game_id(game_id); !res) {
+    if (auto res = positions_->delete_by_game_id(game_key); !res) {
         return res;
     }
-    return store_->remove(game_id);
+    return store_->remove(game_key);
 }
 
 auto database_manager::sort_positions() -> result<void>

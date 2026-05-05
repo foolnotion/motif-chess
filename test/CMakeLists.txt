@@ -13,6 +13,7 @@ include(Catch)
 
 add_executable(motif_db_test
     source/motif_db/game_store_test.cpp
+    source/motif_db/game_writer_test.cpp
     source/motif_db/schema_test.cpp
     source/motif_db/manifest_test.cpp
     source/motif_db/database_manager_test.cpp

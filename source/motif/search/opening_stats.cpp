@@ -79,9 +79,9 @@ auto resolve_eco(motif::db::opening_stat_agg_row const& row, context_map const& 
 namespace motif::search::opening_stats
 {
 
-auto query(motif::db::database_manager const& database, std::uint64_t const zobrist_hash) -> result<stats>
+auto query(motif::db::database_manager const& database, std::uint64_t const hash) -> result<stats>
 {
-    auto total_count_res = database.positions().count_distinct_games_by_zobrist(zobrist_hash);
+    auto total_count_res = database.positions().count_distinct_games_by_zobrist(hash);
     if (!total_count_res) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -89,7 +89,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
         return stats {};
     }
 
-    auto rows_res = database.positions().query_opening_stats(zobrist_hash);
+    auto rows_res = database.positions().query_opening_stats(hash);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -115,7 +115,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const zobr
 
     auto position = chesslib::board {};
     if (!rows.empty() && rows.front().root_ply > 0U) {
-        auto board_res = find_root_board(rows, zobrist_hash, contexts);
+        auto board_res = find_root_board(rows, hash, contexts);
         if (!board_res) {
             return stats {};
         }

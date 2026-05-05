@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -17,6 +18,38 @@
 
 namespace motif::db
 {
+
+struct game_writer::impl
+{
+    explicit impl(sqlite3* conn) noexcept
+        : db_ {conn}
+    {
+    }
+
+    sqlite3* db_;
+    gtl::flat_hash_map<std::string, std::int64_t> player_id_cache_;
+    gtl::flat_hash_map<std::string, std::int64_t> event_id_cache_;
+    gtl::flat_hash_map<std::string, std::int64_t> tag_id_cache_;
+
+    detail::unique_stmt select_player_stmt_;
+    detail::unique_stmt insert_player_stmt_;
+    detail::unique_stmt select_event_stmt_;
+    detail::unique_stmt insert_event_stmt_;
+    detail::unique_stmt insert_game_stmt_;
+    detail::unique_stmt select_tag_stmt_;
+    detail::unique_stmt insert_tag_stmt_;
+    detail::unique_stmt insert_game_tag_stmt_;
+
+    auto find_or_insert_player(player const& plr) -> result<std::int64_t>;
+    auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
+    auto insert_game_tags(game_id gid, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
+    auto prepare_cached_stmt(detail::unique_stmt& stmt, char const* sql) -> result<sqlite3_stmt*>;
+    auto insert(game const& src_game) -> result<game_id>;
+    auto begin_transaction() -> result<void>;
+    auto commit_transaction() -> result<void>;
+    auto rollback_transaction() noexcept -> void;
+    void clear_insert_caches() noexcept;
+};
 
 // ── Implementation details
 // ─────────────────────────────────────────────────────
@@ -63,46 +96,42 @@ constexpr int review_status = 10;
 // ───────────────────────────────────────────────────────────────
 
 game_writer::game_writer(sqlite3* conn) noexcept
-    : db_ {conn}
+    : impl_ {std::make_unique<impl>(conn)}
 {
 }
 
-game_writer::game_writer(game_writer&& other) noexcept
-    : db_ {std::exchange(other.db_, nullptr)}
-    , player_id_cache_ {std::move(other.player_id_cache_)}
-    , event_id_cache_ {std::move(other.event_id_cache_)}
-    , tag_id_cache_ {std::move(other.tag_id_cache_)}
-    , select_player_stmt_ {std::move(other.select_player_stmt_)}
-    , insert_player_stmt_ {std::move(other.insert_player_stmt_)}
-    , select_event_stmt_ {std::move(other.select_event_stmt_)}
-    , insert_event_stmt_ {std::move(other.insert_event_stmt_)}
-    , insert_game_stmt_ {std::move(other.insert_game_stmt_)}
-    , select_tag_stmt_ {std::move(other.select_tag_stmt_)}
-    , insert_tag_stmt_ {std::move(other.insert_tag_stmt_)}
-    , insert_game_tag_stmt_ {std::move(other.insert_game_tag_stmt_)}
-{
-}
+game_writer::~game_writer() = default;
 
-auto game_writer::operator=(game_writer&& other) noexcept -> game_writer&
-{
-    if (this != &other) {
-        db_ = std::exchange(other.db_, nullptr);
-        player_id_cache_ = std::move(other.player_id_cache_);
-        event_id_cache_ = std::move(other.event_id_cache_);
-        tag_id_cache_ = std::move(other.tag_id_cache_);
-        select_player_stmt_ = std::move(other.select_player_stmt_);
-        insert_player_stmt_ = std::move(other.insert_player_stmt_);
-        select_event_stmt_ = std::move(other.select_event_stmt_);
-        insert_event_stmt_ = std::move(other.insert_event_stmt_);
-        insert_game_stmt_ = std::move(other.insert_game_stmt_);
-        select_tag_stmt_ = std::move(other.select_tag_stmt_);
-        insert_tag_stmt_ = std::move(other.insert_tag_stmt_);
-        insert_game_tag_stmt_ = std::move(other.insert_game_tag_stmt_);
-    }
-    return *this;
-}
+game_writer::game_writer(game_writer&& other) noexcept = default;
+
+auto game_writer::operator=(game_writer&& other) noexcept -> game_writer& = default;
 
 void game_writer::clear_insert_caches() noexcept
+{
+    impl_->clear_insert_caches();
+}
+
+auto game_writer::begin_transaction() -> result<void>
+{
+    return impl_->begin_transaction();
+}
+
+auto game_writer::commit_transaction() -> result<void>
+{
+    return impl_->commit_transaction();
+}
+
+auto game_writer::rollback_transaction() noexcept -> void
+{
+    impl_->rollback_transaction();
+}
+
+auto game_writer::insert(game const& src_game) -> result<game_id>
+{
+    return impl_->insert(src_game);
+}
+
+void game_writer::impl::clear_insert_caches() noexcept
 {
     player_id_cache_.clear();
     event_id_cache_.clear();
@@ -112,7 +141,7 @@ void game_writer::clear_insert_caches() noexcept
     tag_id_cache_.rehash(0);
 }
 
-auto game_writer::prepare_cached_stmt(detail::unique_stmt& stmt, char const* sql) -> result<sqlite3_stmt*>
+auto game_writer::impl::prepare_cached_stmt(detail::unique_stmt& stmt, char const* sql) -> result<sqlite3_stmt*>
 {
     if (!stmt) {
         sqlite3_stmt* raw = nullptr;
@@ -125,7 +154,7 @@ auto game_writer::prepare_cached_stmt(detail::unique_stmt& stmt, char const* sql
     return stmt.get();
 }
 
-auto game_writer::begin_transaction() -> result<void>
+auto game_writer::impl::begin_transaction() -> result<void>
 {
     if (sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
@@ -133,7 +162,7 @@ auto game_writer::begin_transaction() -> result<void>
     return {};
 }
 
-auto game_writer::commit_transaction() -> result<void>
+auto game_writer::impl::commit_transaction() -> result<void>
 {
     if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
@@ -141,12 +170,12 @@ auto game_writer::commit_transaction() -> result<void>
     return {};
 }
 
-auto game_writer::rollback_transaction() noexcept -> void
+auto game_writer::impl::rollback_transaction() noexcept -> void
 {
     sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
 }
 
-auto game_writer::find_or_insert_player(player const& plr) -> result<std::int64_t>
+auto game_writer::impl::find_or_insert_player(player const& plr) -> result<std::int64_t>
 {
     if (auto const cached = player_id_cache_.find(plr.name); cached != player_id_cache_.end()) {
         return cached->second;
@@ -182,7 +211,7 @@ auto game_writer::find_or_insert_player(player const& plr) -> result<std::int64_
     return player_id;
 }
 
-auto game_writer::find_or_insert_event(event const& evt) -> result<std::int64_t>
+auto game_writer::impl::find_or_insert_event(event const& evt) -> result<std::int64_t>
 {
     if (auto const cached = event_id_cache_.find(evt.name); cached != event_id_cache_.end()) {
         return cached->second;
@@ -217,7 +246,7 @@ auto game_writer::find_or_insert_event(event const& evt) -> result<std::int64_t>
     return event_id;
 }
 
-auto game_writer::insert_game_tags(game_id gid, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>
+auto game_writer::impl::insert_game_tags(game_id gid, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>
 {
     for (auto const& [tag_name, tag_value] : extra_tags) {
         std::int64_t tag_id = 0;
@@ -262,7 +291,7 @@ auto game_writer::insert_game_tags(game_id gid, std::vector<std::pair<std::strin
     return {};
 }
 
-auto game_writer::insert(game const& src_game) -> result<game_id>
+auto game_writer::impl::insert(game const& src_game) -> result<game_id>
 {
     txn_guard txn {db_};
     if (!txn.began()) {

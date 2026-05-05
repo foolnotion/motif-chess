@@ -1,18 +1,12 @@
 #pragma once
 
-#include <cstdint>
+#include <memory>
 #include <string>
-#include <utility>
-#include <vector>
-
-#include <gtl/phmap.hpp>
 
 #include "motif/db/error.hpp"
-#include "motif/db/sqlite_util.hpp"
 #include "motif/db/types.hpp"
 
 struct sqlite3;
-struct sqlite3_stmt;
 
 namespace motif::db
 {
@@ -24,7 +18,7 @@ class game_writer
 {
   public:
     explicit game_writer(sqlite3* conn) noexcept;
-    ~game_writer() = default;
+    ~game_writer();
 
     game_writer(game_writer const&) = delete;
     auto operator=(game_writer const&) -> game_writer& = delete;
@@ -47,24 +41,8 @@ class game_writer
     void clear_insert_caches() noexcept;
 
   private:
-    sqlite3* db_;
-    gtl::flat_hash_map<std::string, std::int64_t> player_id_cache_;
-    gtl::flat_hash_map<std::string, std::int64_t> event_id_cache_;
-    gtl::flat_hash_map<std::string, std::int64_t> tag_id_cache_;
-
-    detail::unique_stmt select_player_stmt_;
-    detail::unique_stmt insert_player_stmt_;
-    detail::unique_stmt select_event_stmt_;
-    detail::unique_stmt insert_event_stmt_;
-    detail::unique_stmt insert_game_stmt_;
-    detail::unique_stmt select_tag_stmt_;
-    detail::unique_stmt insert_tag_stmt_;
-    detail::unique_stmt insert_game_tag_stmt_;
-
-    auto find_or_insert_player(player const& plr) -> result<std::int64_t>;
-    auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
-    auto insert_game_tags(game_id gid, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
-    auto prepare_cached_stmt(detail::unique_stmt& stmt, char const* sql) -> result<sqlite3_stmt*>;
+    struct impl;
+    std::unique_ptr<impl> impl_;
 };
 
 }  // namespace motif::db
