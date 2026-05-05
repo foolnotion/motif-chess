@@ -178,8 +178,8 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
     if (build_positions) {
         position_rows.reserve(pgn_game.moves.size() + 1);
         position_rows.push_back(motif::db::position_row {
-            .zobrist_hash = board.hash(),
-            .game_id = 0,
+            .zobrist_hash = motif::db::zobrist_hash {board.hash()},
+            .game_id = motif::db::game_id {},
             .ply = 0,
             .encoded_move = 0,
             .result = result_int,
@@ -198,8 +198,8 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
 
         if (build_positions) {
             position_rows.push_back(motif::db::position_row {
-                .zobrist_hash = board.hash(),
-                .game_id = 0,
+                .zobrist_hash = motif::db::zobrist_hash {board.hash()},
+                .game_id = motif::db::game_id {},
                 .ply = static_cast<std::uint16_t>(encoded_moves.size()),
                 .encoded_move = enc,
                 .result = result_int,
@@ -510,7 +510,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             inline_positions.insert(inline_positions.end(), prep.position_rows.begin(), prep.position_rows.end());
         }
 
-        last_game_id = static_cast<std::int64_t>(game_id);
+        last_game_id = static_cast<std::int64_t>(game_id.value);
         committed++;
         batch_pending++;
         games_committed_.fetch_add(1, std::memory_order_relaxed);

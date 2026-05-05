@@ -19,7 +19,7 @@ namespace motif::search::opening_stats
 struct continuation
 {
     std::string san;
-    std::uint64_t result_hash {};
+    motif::db::zobrist_hash result_hash {};
     std::uint32_t frequency {};
     std::uint32_t white_wins {};
     std::uint32_t draws {};
@@ -38,6 +38,6 @@ struct stats
     std::vector<continuation> continuations;
 };
 
-[[nodiscard]] auto query(motif::db::database_manager const& database, std::uint64_t hash) -> result<stats>;
+[[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash) -> result<stats>;
 
 }  // namespace motif::search::opening_stats

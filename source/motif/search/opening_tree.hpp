@@ -25,7 +25,7 @@ struct node;
 struct node_continuation
 {
     std::string san;
-    std::uint64_t result_hash {};
+    motif::db::zobrist_hash result_hash {};
     std::uint32_t frequency {};
     std::uint32_t white_wins {};
     std::uint32_t draws {};
@@ -39,7 +39,7 @@ struct node_continuation
 
 struct node
 {
-    std::uint64_t zobrist_hash {};
+    motif::db::zobrist_hash zobrist_hash {};
     std::vector<node_continuation> continuations;
     bool is_expanded {false};
 };
@@ -51,7 +51,7 @@ struct tree
 };
 
 [[nodiscard]] auto open(motif::db::database_manager const& database,
-                        std::uint64_t root_hash,
+                        motif::db::zobrist_hash root_hash,
                         std::size_t prefetch_depth = default_prefetch_depth) -> result<tree>;
 
 [[nodiscard]] auto expand(motif::db::database_manager const& database, node& n) -> result<void>;

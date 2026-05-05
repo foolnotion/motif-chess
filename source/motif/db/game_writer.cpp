@@ -280,7 +280,7 @@ auto game_writer::impl::insert_game_tags(game_id gid, std::vector<std::pair<std:
         if (!game_tag_ins) {
             return tl::unexpected {game_tag_ins.error()};
         }
-        sqlite3_bind_int64(*game_tag_ins, 1, static_cast<std::int64_t>(gid));
+        sqlite3_bind_int64(*game_tag_ins, 1, static_cast<std::int64_t>(gid.value));
         sqlite3_bind_int64(*game_tag_ins, 2, tag_id);
         sqlite3_bind_text(*game_tag_ins, 3, tag_value.c_str(), static_cast<int>(tag_value.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(*game_tag_ins) != SQLITE_DONE) {
@@ -364,7 +364,7 @@ auto game_writer::impl::insert(game const& src_game) -> result<game_id>
         return tl::unexpected {error_code::io_failure};
     }
 
-    auto const new_game_id = static_cast<game_id>(sqlite3_last_insert_rowid(db_));
+    auto const new_game_id = game_id {static_cast<std::uint32_t>(sqlite3_last_insert_rowid(db_))};
 
     auto tags_rc = insert_game_tags(new_game_id, src_game.extra_tags);
     if (!tags_rc) {

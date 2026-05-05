@@ -330,7 +330,7 @@ auto parse_int32(std::string_view str) -> std::optional<std::int32_t>
     return val;
 }
 
-auto parse_game_id(std::string_view id_str) -> std::optional<std::uint32_t>
+auto parse_game_id(std::string_view id_str) -> std::optional<motif::db::game_id>
 {
     if (id_str.empty()) {
         return std::nullopt;
@@ -347,10 +347,10 @@ auto parse_game_id(std::string_view id_str) -> std::optional<std::uint32_t>
     if (value == 0 || value > std::numeric_limits<std::uint32_t>::max()) {
         return std::nullopt;
     }
-    return static_cast<std::uint32_t>(value);
+    return motif::db::game_id {static_cast<std::uint32_t>(value)};
 }
 
-auto to_game_response(std::uint32_t const game_id, motif::db::game const& source) -> detail::game_response
+auto to_game_response(motif::db::game_id const game_id, motif::db::game const& source) -> detail::game_response
 {
     auto tags = std::vector<detail::game_tag_response> {};
     tags.reserve(source.extra_tags.size());
@@ -358,7 +358,7 @@ auto to_game_response(std::uint32_t const game_id, motif::db::game const& source
         tags.push_back({.key = key, .value = value});
     }
     return detail::game_response {
-        .id = game_id,
+        .id = static_cast<std::uint32_t>(game_id),
         .white = source.white,
         .black = source.black,
         .event = source.event_details,
@@ -376,7 +376,7 @@ auto to_game_response(std::uint32_t const game_id, motif::db::game const& source
 {
     return detail::opening_continuation_response {
         .san = source.san,
-        .result_hash = fmt::format("{}", source.result_hash),
+        .result_hash = fmt::format("{}", static_cast<std::uint64_t>(source.result_hash)),
         .frequency = source.frequency,
         .white_wins = source.white_wins,
         .draws = source.draws,
@@ -454,7 +454,7 @@ auto is_valid_uci_syntax(std::string const& uci_str) -> bool
 // Moves are decoded from their 16-bit encoding and replayed from the starting
 // position to produce SAN. Any move that fails to decode produces "?" for that
 // half-move; the loop continues so the caller always gets a complete string.
-auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> std::string
+auto game_to_pgn(motif::db::game_id const game_id, motif::db::game const& game) -> std::string
 {
     auto out = std::string {};
 
@@ -482,7 +482,7 @@ auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> st
     if (game.eco) {
         append_tag("ECO", *game.eco);
     }
-    append_tag("MotifGameId", fmt::format("{}", game_id));
+    append_tag("MotifGameId", fmt::format("{}", game_id.value));
     for (auto const& [key, value] : game.extra_tags) {
         append_tag(key, value);
     }
@@ -911,11 +911,11 @@ void server::impl::setup_routes()
                     return;
                 }
 
-                auto matches =
-                    [this, hash_val, limit, offset]() -> decltype(motif::search::position_search::find(database, hash_val, limit, offset))
+                auto matches = [this, hash_val, limit, offset]() -> decltype(motif::search::position_search::find(
+                                                                     database, motif::db::zobrist_hash {hash_val}, limit, offset))
                 {
                     std::scoped_lock const lock {database_mutex};
-                    return motif::search::position_search::find(database, hash_val, limit, offset);
+                    return motif::search::position_search::find(database, motif::db::zobrist_hash {hash_val}, limit, offset);
                 }();
                 if (!matches) {
                     set_json_error(res, http_internal_error, "search failed");
@@ -946,10 +946,11 @@ void server::impl::setup_routes()
                     // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
                 }
 
-                auto query_result = [this, hash_val]() -> decltype(motif::search::opening_stats::query(database, hash_val))
+                auto query_result =
+                    [this, hash_val]() -> decltype(motif::search::opening_stats::query(database, motif::db::zobrist_hash {hash_val}))
                 {
                     std::scoped_lock const lock {database_mutex};
-                    return motif::search::opening_stats::query(database, hash_val);
+                    return motif::search::opening_stats::query(database, motif::db::zobrist_hash {hash_val});
                 }();
                 if (!query_result) {
                     set_json_error(res, http_internal_error, "stats query failed");
@@ -1146,7 +1147,7 @@ void server::impl::setup_routes()
 
                  auto const& pgn_game = games.front();
 
-                 std::uint32_t game_id {};
+                 auto game_id = motif::db::game_id {};
                  {
                      std::scoped_lock const lock {database_mutex};
                      motif::import::import_worker worker {database};
@@ -1185,7 +1186,7 @@ void server::impl::setup_routes()
                  std::string body {};
                  [[maybe_unused]] auto const err = glz::write_json(
                      detail::create_game_response {
-                         .id = game_id,
+                         .id = game_id.value,
                          .source_type = "manual",
                          .source_label = req_body.source_label,
                          .review_status = review_status,
