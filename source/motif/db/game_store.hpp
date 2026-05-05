@@ -51,8 +51,8 @@ class game_store
     auto rollback_transaction() noexcept -> void;
 
     // Retrieve a game by id.  Returns error_code::not_found if absent.
-    auto get(game_id game_id) -> result<game>;
-    auto get(game_id game_id) const -> result<game>;
+    auto get(game_id game_key) -> result<game>;
+    auto get(game_id game_key) const -> result<game>;
     // Precondition: game_ids contains no duplicates (duplicate entries are
     // silently dropped by the unordered_map; deduplicate before calling).
     auto get_game_contexts(std::vector<game_id> const& game_ids) -> result<gtl::flat_hash_map<game_id, game_context>>;
@@ -63,27 +63,27 @@ class game_store
     // Delete the game row and all associated game_tag rows.
     // Player and event rows are preserved.
     // Returns error_code::not_found if the id does not exist.
-    auto remove(game_id game_id) -> result<void>;
+    auto remove(game_id game_key) -> result<void>;
 
     // Retrieve only the provenance for a game (cheaper than full get()).
     // Returns error_code::not_found if the id does not exist.
-    auto get_provenance(game_id game_id) const -> result<game_provenance>;
+    auto get_provenance(game_id game_key) const -> result<game_provenance>;
 
     // Update editable metadata fields on a manually-added game.
     // Returns error_code::not_found if the id does not exist.
     // Returns error_code::not_editable if source_type != "manual".
     // Returns error_code::duplicate if the patch would create an identity conflict.
-    auto patch_metadata(game_id game_id, game_patch const& patch) -> result<void>;
+    auto patch_metadata(game_id game_key, game_patch const& patch) -> result<void>;
 
     // Delete a manual game by id; rejects imported/reference games.
     // Returns error_code::not_found if the id does not exist.
     // Returns error_code::not_editable if source_type != "manual".
-    auto remove_user_game(game_id game_id) -> result<void>;
+    auto remove_user_game(game_id game_key) -> result<void>;
 
     // Mark a just-inserted game as manually-added (source_type = 'manual').
     // Used after import_worker::process() to flip the default 'imported' provenance.
     // Returns error_code::not_found if the id does not exist.
-    auto set_manual_provenance(game_id game_id, std::optional<std::string> const& source_label, std::string const& review_status)
+    auto set_manual_provenance(game_id game_key, std::optional<std::string> const& source_label, std::string const& review_status)
         -> result<void>;
 
     // Release player, event, and tag id caches.  Call after a bulk import to
@@ -108,16 +108,16 @@ class game_store
 
     auto find_or_insert_player(player const& plr) -> result<std::int64_t>;
     auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
-    auto insert_game_tags(game_id game_id, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
+    auto insert_game_tags(game_id game_key, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
     auto prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql) -> result<sqlite3_stmt*>;
 
-    auto update_text_field(game_id game_id, std::string_view column, std::string const& value) -> result<void>;
-    auto patch_player(game_id game_id,
+    auto update_text_field(game_id game_key, std::string_view column, std::string const& value) -> result<void>;
+    auto patch_player(game_id game_key,
                       std::string_view id_col,
                       player const& current,
                       std::optional<std::string> const& name_patch,
                       std::optional<std::int32_t> const& elo_patch) -> result<void>;
-    auto patch_event(game_id game_id,
+    auto patch_event(game_id game_key,
                      game const& current,
                      std::optional<std::string> const& event_patch,
                      std::optional<std::string> const& site_patch) -> result<void>;
