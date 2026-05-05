@@ -17,7 +17,7 @@ namespace motif::search::position_search
 using match_list = std::vector<motif::db::position_match>;
 
 [[nodiscard]] auto find(motif::db::database_manager const& database,
-                        motif::db::zobrist_hash zobrist_hash,
+                        motif::db::zobrist_hash hash,
                         std::size_t limit = 0,
                         std::size_t offset = 0) -> result<match_list>;
 

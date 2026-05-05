@@ -186,11 +186,11 @@ auto position_store::row_count() const -> result<std::int64_t>
     return duckdb_value_int64(&guard.res, 0, 0);
 }
 
-auto position_store::query_by_zobrist(std::uint64_t const zobrist_hash, std::size_t const limit, std::size_t const offset) const
+auto position_store::query_by_zobrist(std::uint64_t const hash, std::size_t const limit, std::size_t const offset) const
     -> result<std::vector<position_match>>
 {
     std::ostringstream sql;
-    sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position " "WHERE zobrist_hash = CAST(" << zobrist_hash
+    sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position " "WHERE zobrist_hash = CAST(" << hash
         << " AS UBIGINT) ORDER BY game_id, ply";
     if (limit > 0) {
         sql << " LIMIT " << limit;
@@ -269,7 +269,7 @@ auto position_store::query_tree_slice(std::uint64_t const root_hash, std::uint16
     return rows;
 }
 
-auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const -> result<std::vector<opening_stat_agg_row>>
+auto position_store::query_opening_stats(std::uint64_t const hash) const -> result<std::vector<opening_stat_agg_row>>
 {
     std::ostringstream sql;
     // deduped: one row per (game, move, child) that visited the root position.
@@ -289,7 +289,7 @@ auto position_store::query_opening_stats(std::uint64_t const zobrist_hash) const
            "JOIN position p_cont "
            "ON  p_cont.game_id = p_root.game_id "
            "AND p_cont.ply = p_root.ply + 1 "
-        << "WHERE p_root.zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT) "
+        << "WHERE p_root.zobrist_hash = CAST(" << hash << " AS UBIGINT) "
         << "GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash, "
            "p_root.result, p_root.white_elo, p_root.black_elo"
            "), "
@@ -378,10 +378,10 @@ auto position_store::sample_zobrist_hashes(std::size_t const limit, std::uint64_
     return hashes;
 }
 
-auto position_store::delete_by_game_id(std::uint32_t const game_id) -> result<void>
+auto position_store::delete_by_game_id(std::uint32_t const game_key) -> result<void>
 {
     std::ostringstream sql;
-    sql << "DELETE FROM position WHERE game_id = CAST(" << game_id << " AS UINTEGER)";
+    sql << "DELETE FROM position WHERE game_id = CAST(" << game_key << " AS UINTEGER)";
 
     result_guard guard {};
     if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
@@ -390,7 +390,7 @@ auto position_store::delete_by_game_id(std::uint32_t const game_id) -> result<vo
     return {};
 }
 
-auto position_store::update_elo_for_game(std::uint32_t const game_id,
+auto position_store::update_elo_for_game(std::uint32_t const game_key,
                                          std::optional<std::int16_t> const new_white_elo,
                                          std::optional<std::int16_t> const new_black_elo) -> result<void>
 {
@@ -411,7 +411,7 @@ auto position_store::update_elo_for_game(std::uint32_t const game_id,
         }
         sql << "black_elo = " << static_cast<int>(*new_black_elo);
     }
-    sql << " WHERE game_id = CAST(" << game_id << " AS UINTEGER)";
+    sql << " WHERE game_id = CAST(" << game_key << " AS UINTEGER)";
 
     result_guard guard {};
     if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
@@ -420,10 +420,10 @@ auto position_store::update_elo_for_game(std::uint32_t const game_id,
     return {};
 }
 
-auto position_store::count_by_zobrist(std::uint64_t const zobrist_hash) const -> result<std::int64_t>
+auto position_store::count_by_zobrist(std::uint64_t const hash) const -> result<std::int64_t>
 {
     std::ostringstream sql;
-    sql << "SELECT COUNT(*) FROM position WHERE zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT)";
+    sql << "SELECT COUNT(*) FROM position WHERE zobrist_hash = CAST(" << hash << " AS UBIGINT)";
 
     result_guard guard {};
     if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
@@ -432,10 +432,10 @@ auto position_store::count_by_zobrist(std::uint64_t const zobrist_hash) const ->
     return duckdb_value_int64(&guard.res, 0, 0);
 }
 
-auto position_store::count_distinct_games_by_zobrist(std::uint64_t const zobrist_hash) const -> result<std::int64_t>
+auto position_store::count_distinct_games_by_zobrist(std::uint64_t const hash) const -> result<std::int64_t>
 {
     std::ostringstream sql;
-    sql << "SELECT COUNT(DISTINCT game_id) FROM position WHERE zobrist_hash = CAST(" << zobrist_hash << " AS UBIGINT)";
+    sql << "SELECT COUNT(DISTINCT game_id) FROM position WHERE zobrist_hash = CAST(" << hash << " AS UBIGINT)";
 
     result_guard guard {};
     if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {

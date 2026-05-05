@@ -159,7 +159,7 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     db_game.moves = std::move(encoded_moves);
 
     // Insert into SQLite game store
-    auto insert_res = db_.store().insert(db_game);
+    auto insert_res = db_.writer().insert(db_game);
     if (!insert_res) {
         if (insert_res.error() == motif::db::error_code::duplicate) {
             return tl::unexpected(error_code::duplicate);
