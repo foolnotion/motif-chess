@@ -177,7 +177,8 @@ namespace motif::search::opening_tree
 {
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto open(motif::db::database_manager const& database, std::uint64_t const root_hash, std::size_t const prefetch_depth) -> result<tree>
+auto open(motif::db::database_manager const& database, motif::db::zobrist_hash const root_hash, std::size_t const prefetch_depth)
+    -> result<tree>
 {
     if (prefetch_depth == 0U) {
         return tree {

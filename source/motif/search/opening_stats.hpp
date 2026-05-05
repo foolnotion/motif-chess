@@ -38,6 +38,6 @@ struct stats
     std::vector<continuation> continuations;
 };
 
-[[nodiscard]] auto query(motif::db::database_manager const& database, std::uint64_t hash) -> result<stats>;
+[[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash) -> result<stats>;
 
 }  // namespace motif::search::opening_stats

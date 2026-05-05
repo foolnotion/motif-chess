@@ -146,6 +146,7 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
             .zobrist_hash = board.hash(),
             .game_id = 0,
             .ply = static_cast<std::uint16_t>(encoded_moves.size()),
+            .encoded_move = *move_res,
             .result = result_int,
             .white_elo = white_elo,
             .black_elo = black_elo,
