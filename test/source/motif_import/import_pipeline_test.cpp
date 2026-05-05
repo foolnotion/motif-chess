@@ -1133,8 +1133,9 @@ struct query_latency_result
     std::size_t total_rows_returned {};
 };
 
-auto measure_query_latencies(motif::db::database_manager& mgr, std::vector<std::uint64_t> const& hashes, std::string_view variant_name)
-    -> query_latency_result
+auto measure_query_latencies(motif::db::database_manager& mgr,
+                             std::vector<motif::db::zobrist_hash> const& hashes,
+                             std::string_view variant_name) -> query_latency_result
 {
     auto& positions = mgr.positions();
     std::vector<double> latencies_us;
@@ -1221,7 +1222,7 @@ TEST_CASE("query_latency: unsorted vs sorted by zobrist", "[performance][query-l
 
     constexpr std::size_t num_warmup = 5;
     for (std::size_t i = 0; i < num_warmup; ++i) {
-        auto dummy = positions.query_by_zobrist(0);
+        auto dummy = positions.query_by_zobrist(motif::db::zobrist_hash {0});
         (void)dummy;
     }
 

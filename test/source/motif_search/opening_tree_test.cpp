@@ -50,7 +50,7 @@ struct tmp_dir
     auto operator=(tmp_dir&&) -> tmp_dir& = delete;
 };
 
-auto hash_after_sans(std::initializer_list<char const*> sans) -> std::uint64_t
+auto hash_after_sans(std::initializer_list<char const*> sans) -> motif::db::zobrist_hash
 {
     auto board = chesslib::board {};
     for (char const* const san : sans) {
@@ -59,7 +59,7 @@ auto hash_after_sans(std::initializer_list<char const*> sans) -> std::uint64_t
         chesslib::move_maker maker {board, *move};
         maker.make();
     }
-    return board.hash();
+    return motif::db::zobrist_hash {board.hash()};
 }
 
 auto encode_moves(std::initializer_list<char const*> sans) -> std::vector<std::uint16_t>

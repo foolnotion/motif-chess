@@ -19,10 +19,10 @@
 namespace
 {
 
-using context_map = gtl::flat_hash_map<std::uint32_t, motif::db::game_context>;
+using context_map = gtl::flat_hash_map<motif::db::game_id, motif::db::game_context>;
 
 auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows,
-                     std::uint64_t const zobrist_hash,
+                     motif::db::zobrist_hash const zobrist_hash,
                      context_map const& contexts) -> motif::search::result<motif::chess::board>
 {
     auto const root_ply = rows.front().root_ply;
@@ -33,7 +33,7 @@ auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows,
                 continue;
             }
             auto replayed = motif::chess::replay(ctx_it->second.moves, root_ply);
-            if (replayed && replayed->hash() == zobrist_hash) {
+            if (replayed && motif::db::zobrist_hash {replayed->hash()} == zobrist_hash) {
                 return *replayed;
             }
         }
@@ -59,7 +59,7 @@ auto resolve_eco(motif::db::opening_stat_agg_row const& row, context_map const& 
 namespace motif::search::opening_stats
 {
 
-auto query(motif::db::database_manager const& database, std::uint64_t const hash) -> result<stats>
+auto query(motif::db::database_manager const& database, motif::db::zobrist_hash const hash) -> result<stats>
 {
     auto total_count_res = database.positions().count_distinct_games_by_zobrist(hash);
     if (!total_count_res) {
@@ -75,7 +75,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const hash
     }
     auto const& rows = *rows_res;
 
-    auto candidate_ids = std::vector<std::uint32_t> {};
+    auto candidate_ids = std::vector<motif::db::game_id> {};
     candidate_ids.reserve(rows.size() * 2);
     for (auto const& row : rows) {
         candidate_ids.push_back(row.eco_sample_min);

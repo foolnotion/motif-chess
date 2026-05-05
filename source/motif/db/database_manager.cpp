@@ -107,7 +107,7 @@ auto narrow_elo(std::optional<std::int32_t> const& elo) -> result<std::optional<
 }
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t result_code) -> result<std::vector<position_row>>
+auto build_position_rows(game const& game, motif::db::game_id const game_id, std::int8_t result_code) -> result<std::vector<position_row>>
 {
     if (game.moves.empty()) {
         return std::vector<position_row> {};
@@ -132,7 +132,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
 
     // Starting position row (ply = 0) so root-hash queries find data
     batch.push_back(position_row {
-        .zobrist_hash = board.hash(),
+        .zobrist_hash = motif::db::zobrist_hash {board.hash()},
         .game_id = game_id,
         .ply = 0,
         .encoded_move = 0,
@@ -144,7 +144,7 @@ auto build_position_rows(game const& game, std::uint32_t game_id, std::int8_t re
     for (std::size_t i = 0; i < game.moves.size(); ++i) {
         motif::chess::apply_encoded_move(board, game.moves[i]);
         batch.push_back(position_row {
-            .zobrist_hash = board.hash(),
+            .zobrist_hash = motif::db::zobrist_hash {board.hash()},
             .game_id = game_id,
             .ply = static_cast<std::uint16_t>(i + 1),
             .encoded_move = game.moves[i],
@@ -622,10 +622,10 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
     }
     auto const stmt_guard = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {raw, sqlite3_finalize};
 
-    std::vector<std::uint32_t> game_ids;
+    std::vector<game_id> game_ids;
     int step_result = sqlite3_step(stmt_guard.get());
     while (step_result == SQLITE_ROW) {
-        game_ids.push_back(static_cast<std::uint32_t>(sqlite3_column_int(stmt_guard.get(), 0)));
+        game_ids.push_back(game_id {static_cast<std::uint32_t>(sqlite3_column_int(stmt_guard.get(), 0))});
         step_result = sqlite3_step(stmt_guard.get());
     }
     if (step_result != SQLITE_DONE) {

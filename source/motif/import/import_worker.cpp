@@ -127,8 +127,8 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
 
     // Starting position row (ply = 0) so root-hash queries find data
     position_rows.push_back(motif::db::position_row {
-        .zobrist_hash = board.hash(),
-        .game_id = 0,
+        .zobrist_hash = motif::db::zobrist_hash {board.hash()},
+        .game_id = motif::db::game_id {},
         .ply = 0,
         .result = result_int,
         .white_elo = white_elo,
@@ -143,8 +143,8 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
         encoded_moves.push_back(*move_res);
 
         position_rows.push_back(motif::db::position_row {
-            .zobrist_hash = board.hash(),
-            .game_id = 0,
+            .zobrist_hash = motif::db::zobrist_hash {board.hash()},
+            .game_id = motif::db::game_id {},
             .ply = static_cast<std::uint16_t>(encoded_moves.size()),
             .result = result_int,
             .white_elo = white_elo,

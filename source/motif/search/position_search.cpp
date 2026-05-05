@@ -1,5 +1,4 @@
 #include <cstddef>
-#include <cstdint>
 
 #include "motif/search/position_search.hpp"
 
@@ -11,8 +10,10 @@
 namespace motif::search::position_search
 {
 
-auto find(motif::db::database_manager const& database, std::uint64_t const hash, std::size_t const limit, std::size_t const offset)
-    -> result<match_list>
+auto find(motif::db::database_manager const& database,
+          motif::db::zobrist_hash const hash,
+          std::size_t const limit,
+          std::size_t const offset) -> result<match_list>
 {
     auto query = database.positions().query_by_zobrist(hash, limit, offset);
     if (!query) {

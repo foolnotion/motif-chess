@@ -5,6 +5,7 @@
 
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 
+#include "motif/db/types.hpp"
 #include "motif/import/error.hpp"
 
 namespace motif::db
@@ -17,7 +18,7 @@ namespace motif::import
 
 struct process_result
 {
-    std::uint32_t game_id {};
+    motif::db::game_id game_id {};
     std::size_t positions_inserted {};
 };
 
