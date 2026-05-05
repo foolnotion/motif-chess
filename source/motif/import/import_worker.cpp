@@ -10,12 +10,10 @@
 
 #include "motif/import/import_worker.hpp"
 
-#include <chesslib/board/board.hpp>  // NOLINT(misc-include-cleaner)
-#include <chesslib/board/move_codec.hpp>
-#include <chesslib/util/san.hpp>
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
@@ -105,11 +103,11 @@ import_worker::import_worker(motif::db::database_manager& database) noexcept
 auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
 {
     if (pgn_game.moves.empty()) {
-        return tl::unexpected(error_code::empty_game);
+        return tl::unexpected {error_code::empty_game};
     }
 
     if (pgn_game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
-        return tl::unexpected(error_code::io_failure);
+        return tl::unexpected {error_code::io_failure};
     }
 
     auto db_game = extract_game(pgn_game);
@@ -121,7 +119,7 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
 
     // Process all moves before any DB write — any SAN failure aborts entire
     // game
-    auto board = chesslib::board {};
+    auto board = motif::chess::board {};
     std::vector<std::uint16_t> encoded_moves;
     std::vector<motif::db::position_row> position_rows;
     encoded_moves.reserve(pgn_game.moves.size());
@@ -138,13 +136,11 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     });
 
     for (auto const& node : pgn_game.moves) {
-        auto move_res = chesslib::san::from_string(board, node.san);
+        auto move_res = motif::chess::apply_san(board, node.san);
         if (!move_res) {
-            return tl::unexpected(error_code::parse_error);
+            return tl::unexpected {error_code::parse_error};
         }
-        encoded_moves.push_back(chesslib::codec::encode(*move_res));
-        chesslib::move_maker mmaker {board, *move_res};
-        mmaker.make();
+        encoded_moves.push_back(*move_res);
 
         position_rows.push_back(motif::db::position_row {
             .zobrist_hash = board.hash(),
@@ -162,9 +158,9 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     auto insert_res = db_.writer().insert(db_game);
     if (!insert_res) {
         if (insert_res.error() == motif::db::error_code::duplicate) {
-            return tl::unexpected(error_code::duplicate);
+            return tl::unexpected {error_code::duplicate};
         }
-        return tl::unexpected(error_code::io_failure);
+        return tl::unexpected {error_code::io_failure};
     }
     auto const game_id = *insert_res;
 
@@ -175,7 +171,7 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     if (!position_rows.empty()) {
         auto batch_res = db_.positions().insert_batch(position_rows);
         if (!batch_res) {
-            return tl::unexpected(error_code::io_failure);
+            return tl::unexpected {error_code::io_failure};
         }
     }
 

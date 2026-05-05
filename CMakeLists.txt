@@ -32,6 +32,7 @@ find_package(fmt REQUIRED)
 # ---- Modules ----
 
 add_subdirectory(source/motif/db)
+add_subdirectory(source/motif/chess)
 add_subdirectory(source/motif/import)
 add_subdirectory(source/motif/search)
 add_subdirectory(source/motif/engine)
