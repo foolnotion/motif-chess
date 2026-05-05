@@ -119,27 +119,42 @@ That specific issue has since been addressed by introducing a `motif::chess`
 facade module so production `chesslib` usage is centralized behind one entry
 point.
 
-For the local/remote split, the Qt client needs board operations (legal moves, FEN, SAN, move validation) without any DB or network dependency. Today that means depending on chesslib directly — but chesslib is an upstream library owned by Bogdan with its own API surface.
+For the local/remote split, the Qt client needs board operations (legal moves,
+FEN, SAN, move validation) without any DB or network dependency. That is now
+the role of the shipped `motif::chess` facade instead of exposing chesslib
+directly to the rest of the codebase.
 
-**What to do**: Create a `motif::chess` facade module that depends on chesslib but exposes only what motif needs:
+**What exists now**: `motif::chess` already centralizes the entry points motif
+needs and keeps production chesslib usage behind one boundary:
 
 ```cpp
 namespace motif::chess {
     // Value types — no chesslib headers leak
     class board { /* pImpl over chesslib::board */ };
-    struct move { uint16_t encoded; /* ... */ };
+    struct move_info {
+        uint16_t encoded_move;
+        std::string uci;
+        std::string san;
+        std::string from;
+        std::string to;
+        std::optional<std::string> promotion;
+    };
 
-    auto from_fen(std::string_view fen) -> result<board>;
-    auto to_fen(board const&) -> std::string;
-    auto legal_moves(board const&) -> std::vector<move>;
-    auto make_move(board&, move) -> result<void>;
-    auto to_san(board const&, move) -> std::string;
-    auto encode_moves(pgn::game const&) -> std::vector<uint16_t>;
-    auto replay_to_ply(std::span<uint16_t const>, uint16_t ply) -> result<board>;
+    auto parse_fen(std::string_view fen) -> result<board>;
+    auto write_fen(board const&) -> std::string;
+    auto replay(std::span<uint16_t const>, uint16_t ply) -> result<board>;
+    auto san(board const&, uint16_t encoded_move) -> std::string;
+    auto apply_san(board&, std::string_view san_move) -> result<uint16_t>;
+    auto legal_moves(board const&) -> std::vector<move_info>;
+    auto apply_uci(board&, std::string_view uci_move) -> result<move_info>;
+    auto apply_encoded_move(board&, uint16_t encoded_move) -> void;
 }
 ```
 
 This module has **no dependency on `motif_db`** and can be used by both the Qt client and the backend without pulling in SQLite/DuckDB. It also creates the seam needed to swap chesslib later if needed.
+
+**What to do next**: Keep extending repository and client code in terms of this
+facade rather than adding new direct chesslib dependencies.
 
 ---
 
@@ -295,16 +310,15 @@ Prioritized for the local-desktop + remote-backend deployment model. Items that 
 | # | Item | Impact | Effort | When |
 |---|------|--------|--------|------|
 | 1 | Repository abstraction | Critical | High | **Foundation — do first** |
-| 2 | `motif::chess` facade | High | Medium | **Before Qt client work** |
-| 3 | Error types with context | High | Medium | **With repository work** |
-| 4 | Domain type invariants + DTO layer | High | Medium | **With repository work** |
-| 5 | RAII-wrap all cached statements | Medium | Low | **Quick win, anytime** |
-| 6 | Parameterized DuckDB queries | Medium | Medium | **Safety win, anytime** |
-| 7 | Strong typedefs for domain IDs | Medium | Low | **With repository interfaces** |
-| 8 | Split `game_store` (reader/writer) | Medium | Medium | **Before repository work** |
-| 9 | `opening_stats` decomposition | Low | Medium | When performance matters |
-| 10 | Consistency model documentation | Low | Low | Write it down |
-| 11 | Thread safety model | Medium | High | With Qt client work |
+| 2 | Error types with context | High | Medium | **With repository work** |
+| 3 | Domain type invariants + DTO layer | High | Medium | **With repository work** |
+| 4 | RAII-wrap all cached statements | Medium | Low | **Quick win, anytime** |
+| 5 | Parameterized DuckDB queries | Medium | Medium | **Safety win, anytime** |
+| 6 | Strong typedefs for domain IDs | Medium | Low | **With repository interfaces** |
+| 7 | Split `game_store` (reader/writer) | Medium | Medium | **Before repository work** |
+| 8 | `opening_stats` decomposition | Low | Medium | When performance matters |
+| 9 | Consistency model documentation | Low | Low | Write it down |
+| 10 | Thread safety model | Medium | High | With Qt client work |
 
 ### Recommended Sequence
 
@@ -312,8 +326,8 @@ Prioritized for the local-desktop + remote-backend deployment model. Items that 
 1. RAII-wrap cached statements (#5) — quick win, reduces risk
 2. Error types with context (#3) — needed by both local and remote paths
 3. Strong typedefs (#7) — cheap, clarifies all interfaces
-4. `motif::chess` facade (#2) — decouples chess logic from DB/network
-5. Split `game_store` (#8) — separates read/write paths
+4. Split `game_store` (#8) — separates read/write paths
+5. Keep new board/FEN/SAN work behind `motif::chess` rather than adding fresh chesslib call sites
 
 **Phase 2 — Repository Layer**:
 6. Define repository interfaces (#1) — the stable contract
