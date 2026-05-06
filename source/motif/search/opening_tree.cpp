@@ -338,7 +338,7 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
             if (!board_at_hash.contains(agg.result_hash)) {
                 auto child_board = parent_board;
                 motif::chess::apply_encoded_move(child_board, enc);
-                board_at_hash.emplace(agg.result_hash, child_board);
+                board_at_hash.emplace(agg.result_hash, std::move(child_board));
             }
         }
     }

@@ -129,6 +129,9 @@ auto parse_fen(std::string_view const fen) -> result<board>
 
 auto write_fen(board const& position) -> std::string
 {
+    if (position.impl_ == nullptr) {
+        return chesslib::fen::write(chesslib::board {});
+    }
     return chesslib::fen::write(position.impl_->native);
 }
 
@@ -148,11 +151,15 @@ auto replay(std::span<std::uint16_t const> const moves, std::uint16_t const ply)
 
 auto san(board const& position, std::uint16_t const encoded_move) -> std::string
 {
+    if (position.impl_ == nullptr) {
+        return {};
+    }
     return chesslib::san::to_string(position.impl_->native, chesslib::codec::decode(encoded_move));
 }
 
 auto apply_san(board& position, std::string_view const san_move) -> result<std::uint16_t>
 {
+    position.ensure_impl();
     auto move = chesslib::san::from_string(position.impl_->native, san_move);
     if (!move) {
         return tl::unexpected {error_code::invalid_move};
@@ -165,6 +172,9 @@ auto apply_san(board& position, std::string_view const san_move) -> result<std::
 
 auto legal_moves(board const& position) -> std::vector<move_info>
 {
+    if (position.impl_ == nullptr) {
+        return {};
+    }
     auto const moves = chesslib::legal_moves(position.impl_->native);
     auto result_moves = std::vector<move_info> {};
     result_moves.reserve(moves.size());
@@ -177,6 +187,7 @@ auto legal_moves(board const& position) -> std::vector<move_info>
 
 auto apply_uci(board& position, std::string_view const uci_move) -> result<move_info>
 {
+    position.ensure_impl();
     auto move = chesslib::uci::from_string(position.impl_->native, uci_move);
     if (!move) {
         return tl::unexpected {error_code::invalid_move};
@@ -189,6 +200,7 @@ auto apply_uci(board& position, std::string_view const uci_move) -> result<move_
 
 auto apply_encoded_move(board& position, std::uint16_t const encoded_move) -> void
 {
+    position.ensure_impl();
     chesslib::move_maker {position.impl_->native, chesslib::codec::decode(encoded_move)}.make();
 }
 
