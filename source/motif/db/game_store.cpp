@@ -349,7 +349,7 @@ auto game_store::create_schema() -> result<void>
     return exec(db_, sql);
 }
 
-auto game_store::insert(game const& src_game) -> result<std::uint32_t>
+auto game_store::insert(game const& src_game) -> result<game_id>
 {
     return writer_->insert(src_game);
 }
@@ -438,7 +438,8 @@ auto game_store::find_or_insert_event(event const& evt) -> result<std::int64_t>
     return event_id;
 }
 
-auto game_store::insert_game_tags(std::uint32_t game_id, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>
+auto game_store::insert_game_tags(game_id const game_key, std::vector<std::pair<std::string, std::string>> const& extra_tags)
+    -> result<void>
 {
     for (auto const& [tag_name, tag_value] : extra_tags) {
         std::int64_t tag_id = 0;
@@ -472,7 +473,7 @@ auto game_store::insert_game_tags(std::uint32_t game_id, std::vector<std::pair<s
         if (!game_tag_ins) {
             return tl::unexpected {game_tag_ins.error()};
         }
-        sqlite3_bind_int64(*game_tag_ins, 1, static_cast<std::int64_t>(game_id));
+        sqlite3_bind_int64(*game_tag_ins, 1, static_cast<std::int64_t>(game_key.value));
         sqlite3_bind_int64(*game_tag_ins, 2, tag_id);
         sqlite3_bind_text(*game_tag_ins, 3, tag_value.c_str(), static_cast<int>(tag_value.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(*game_tag_ins) != SQLITE_DONE) {
@@ -483,12 +484,12 @@ auto game_store::insert_game_tags(std::uint32_t game_id, std::vector<std::pair<s
     return {};
 }
 
-auto game_store::get(std::uint32_t const game_id) -> result<game>
+auto game_store::get(game_id const game_key) -> result<game>
 {
-    return const_cast<game_store const&>(*this).get(game_id);
+    return const_cast<game_store const&>(*this).get(game_key);
 }
 
-auto game_store::get(std::uint32_t const game_id) const -> result<game>
+auto game_store::get(game_id const game_key) const -> result<game>
 {
     // language=sql
     static constexpr char const* sql = R"sql(
@@ -509,7 +510,7 @@ auto game_store::get(std::uint32_t const game_id) const -> result<game>
     if (!stmt) {
         return tl::unexpected {stmt.error()};
     }
-    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_key.value));
 
     int const step_rc = sqlite3_step(stmt->get());
     if (step_rc == SQLITE_DONE) {
@@ -572,7 +573,7 @@ auto game_store::get(std::uint32_t const game_id) const -> result<game>
     if (!tags_stmt) {
         return tl::unexpected {tags_stmt.error()};
     }
-    sqlite3_bind_int64(tags_stmt->get(), 1, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(tags_stmt->get(), 1, static_cast<std::int64_t>(game_key.value));
     int tag_rc = SQLITE_ROW;
     while ((tag_rc = sqlite3_step(tags_stmt->get())) == SQLITE_ROW) {
         out.extra_tags.emplace_back(std::string {column_text(tags_stmt->get(), 0)}, std::string {column_text(tags_stmt->get(), 1)});
@@ -584,15 +585,14 @@ auto game_store::get(std::uint32_t const game_id) const -> result<game>
     return out;
 }
 
-auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) -> result<gtl::flat_hash_map<std::uint32_t, game_context>>
+auto game_store::get_game_contexts(std::vector<game_id> const& game_ids) -> result<gtl::flat_hash_map<game_id, game_context>>
 {
     return const_cast<game_store const&>(*this).get_game_contexts(game_ids);
 }
 
-auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) const
-    -> result<gtl::flat_hash_map<std::uint32_t, game_context>>
+auto game_store::get_game_contexts(std::vector<game_id> const& game_ids) const -> result<gtl::flat_hash_map<game_id, game_context>>
 {
-    auto out = gtl::flat_hash_map<std::uint32_t, game_context> {};
+    auto out = gtl::flat_hash_map<game_id, game_context> {};
     if (game_ids.empty()) {
         return out;
     }
@@ -639,12 +639,12 @@ auto game_store::get_game_contexts(std::vector<std::uint32_t> const& game_ids) c
         }
 
         for (std::size_t index = 0; index < batch_count; ++index) {
-            sqlite3_bind_int64(stmt->get(), static_cast<int>(index + 1U), static_cast<std::int64_t>(game_ids[batch_start + index]));
+            sqlite3_bind_int64(stmt->get(), static_cast<int>(index + 1U), static_cast<std::int64_t>(game_ids[batch_start + index].value));
         }
 
         int step_rc = SQLITE_ROW;
         while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
-            auto const game_id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), 0));
+            auto const game_id = motif::db::game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), 0))};
             auto context = game_context {};
             context.eco = column_optional_text(stmt->get(), 1);
             context.opening_name = column_optional_text(stmt->get(), 2);
@@ -746,7 +746,7 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
         auto const* src_type_raw = column_text(stmt->get(), list_col::source_type);
         auto const* rev_status_raw = column_text(stmt->get(), list_col::review_status);
         entries.push_back(game_list_entry {
-            .id = static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), list_col::game_id)),
+            .id = motif::db::game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), list_col::game_id))},
             .white = column_text(stmt->get(), list_col::white),
             .black = column_text(stmt->get(), list_col::black),
             .white_elo = column_optional_int32(stmt->get(), list_col::white_elo),
@@ -783,14 +783,14 @@ auto game_store::count_games() const -> result<std::int64_t>
     return sqlite3_column_int64(stmt->get(), 0);
 }
 
-auto game_store::remove(std::uint32_t game_id) -> result<void>
+auto game_store::remove(game_id const game_key) -> result<void>
 {
     // ON DELETE CASCADE in game_tag handles tag row cleanup automatically.
     auto stmt = prepare(db_, "DELETE FROM game WHERE id = ?");
     if (!stmt) {
         return tl::unexpected {stmt.error()};
     }
-    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_key.value));
 
     if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};
@@ -801,7 +801,7 @@ auto game_store::remove(std::uint32_t game_id) -> result<void>
     return {};
 }
 
-auto game_store::get_provenance(std::uint32_t const game_id) const -> result<game_provenance>
+auto game_store::get_provenance(game_id const game_key) const -> result<game_provenance>
 {
     // language=sql
     static constexpr char const* sql = R"sql(
@@ -814,7 +814,7 @@ auto game_store::get_provenance(std::uint32_t const game_id) const -> result<gam
     if (!stmt) {
         return tl::unexpected {stmt.error()};
     }
-    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_key.value));
 
     int const step_rc = sqlite3_step(stmt->get());
     if (step_rc == SQLITE_DONE) {
@@ -837,7 +837,7 @@ auto game_store::get_provenance(std::uint32_t const game_id) const -> result<gam
     return prov;
 }
 
-auto game_store::update_text_field(std::uint32_t game_id, std::string_view column, std::string const& value) -> result<void>
+auto game_store::update_text_field(game_id const game_key, std::string_view column, std::string const& value) -> result<void>
 {
     auto const sql = "UPDATE game SET " + std::string(column) + " = ? WHERE id = ?";
     auto upd = prepare(db_, sql.c_str());
@@ -845,7 +845,7 @@ auto game_store::update_text_field(std::uint32_t game_id, std::string_view colum
         return tl::unexpected {upd.error()};
     }
     sqlite3_bind_text(upd->get(), 1, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
-    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
     if (sqlite3_step(upd->get()) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -854,7 +854,7 @@ auto game_store::update_text_field(std::uint32_t game_id, std::string_view colum
 
 // Update player rows via find-or-insert/repoint semantics to avoid
 // mutating shared player rows used by other games.
-auto game_store::patch_player(std::uint32_t game_id,
+auto game_store::patch_player(game_id const game_key,
                               std::string_view id_col,
                               player const& current,
                               std::optional<std::string> const& name_patch,
@@ -877,7 +877,7 @@ auto game_store::patch_player(std::uint32_t game_id,
         return tl::unexpected {upd.error()};
     }
     sqlite3_bind_int64(upd->get(), 1, *id_res);
-    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
     if (sqlite3_step(upd->get()) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -885,7 +885,7 @@ auto game_store::patch_player(std::uint32_t game_id,
 }
 
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
-auto game_store::patch_event(std::uint32_t game_id,
+auto game_store::patch_event(game_id const game_key,
                              game const& current,
                              std::optional<std::string> const& event_patch,
                              std::optional<std::string> const& site_patch) -> result<void>
@@ -907,7 +907,7 @@ auto game_store::patch_event(std::uint32_t game_id,
         return tl::unexpected {upd.error()};
     }
     sqlite3_bind_int64(upd->get(), 1, *id_res);
-    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
     if (sqlite3_step(upd->get()) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -917,9 +917,9 @@ auto game_store::patch_event(std::uint32_t game_id,
 // NOLINTEND(bugprone-easily-swappable-parameters)
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& patch) -> result<void>
+auto game_store::patch_metadata(game_id const game_key, game_patch const& patch) -> result<void>
 {
-    auto prov_res = get_provenance(game_id);
+    auto prov_res = get_provenance(game_key);
     if (!prov_res) {
         return tl::unexpected {prov_res.error()};
     }
@@ -933,22 +933,22 @@ auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& p
     }
 
     if (patch.white_name || patch.white_elo || patch.black_name || patch.black_elo || patch.event || patch.site) {
-        auto cur = get(game_id);
+        auto cur = get(game_key);
         if (!cur) {
             return tl::unexpected {cur.error()};
         }
         if (patch.white_name || patch.white_elo) {
-            if (auto res = patch_player(game_id, "white_id", cur->white, patch.white_name, patch.white_elo); !res) {
+            if (auto res = patch_player(game_key, "white_id", cur->white, patch.white_name, patch.white_elo); !res) {
                 return res;
             }
         }
         if (patch.black_name || patch.black_elo) {
-            if (auto res = patch_player(game_id, "black_id", cur->black, patch.black_name, patch.black_elo); !res) {
+            if (auto res = patch_player(game_key, "black_id", cur->black, patch.black_name, patch.black_elo); !res) {
                 return res;
             }
         }
         if (patch.event || patch.site) {
-            if (auto res = patch_event(game_id, *cur, patch.event, patch.site); !res) {
+            if (auto res = patch_event(game_key, *cur, patch.event, patch.site); !res) {
                 return res;
             }
         }
@@ -964,7 +964,7 @@ auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& p
     }};
     for (auto const& [col, field] : scalar_fields) {
         if (auto const& val = patch.*field; val) {
-            if (auto res = update_text_field(game_id, col, *val); !res) {
+            if (auto res = update_text_field(game_key, col, *val); !res) {
                 return res;
             }
         }
@@ -976,12 +976,12 @@ auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& p
         if (!del) {
             return tl::unexpected {del.error()};
         }
-        sqlite3_bind_int64(del->get(), 1, static_cast<std::int64_t>(game_id));
+        sqlite3_bind_int64(del->get(), 1, static_cast<std::int64_t>(game_key.value));
         if (sqlite3_step(del->get()) != SQLITE_DONE) {
             return tl::unexpected {error_code::io_failure};
         }
         if (!patch.notes->empty()) {
-            if (auto res = insert_game_tags(game_id, {{"_notes", *patch.notes}}); !res) {
+            if (auto res = insert_game_tags(game_key, {{"_notes", *patch.notes}}); !res) {
                 return res;
             }
         }
@@ -993,19 +993,19 @@ auto game_store::patch_metadata(std::uint32_t const game_id, game_patch const& p
     return {};
 }
 
-auto game_store::remove_user_game(std::uint32_t const game_id) -> result<void>
+auto game_store::remove_user_game(game_id const game_key) -> result<void>
 {
-    auto prov_res = get_provenance(game_id);
+    auto prov_res = get_provenance(game_key);
     if (!prov_res) {
         return tl::unexpected {prov_res.error()};
     }
     if (prov_res->source_type != "manual") {
         return tl::unexpected {error_code::not_editable};
     }
-    return remove(game_id);
+    return remove(game_key);
 }
 
-auto game_store::set_manual_provenance(std::uint32_t const game_id,
+auto game_store::set_manual_provenance(game_id const game_key,
                                        std::optional<std::string> const& source_label,
                                        std::string const& review_status) -> result<void>
 {
@@ -1023,7 +1023,7 @@ auto game_store::set_manual_provenance(std::uint32_t const game_id,
 
     bind_optional_text(stmt->get(), 1, source_label);
     sqlite3_bind_text(stmt->get(), 2, review_status.c_str(), static_cast<int>(review_status.size()), SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt->get(), 3, static_cast<std::int64_t>(game_id));
+    sqlite3_bind_int64(stmt->get(), 3, static_cast<std::int64_t>(game_key.value));
 
     if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};

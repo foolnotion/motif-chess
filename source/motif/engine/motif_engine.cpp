@@ -11,10 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include <chesslib/board/board.hpp>
-#include <chesslib/util/fen.hpp>
-#include <chesslib/util/san.hpp>
-#include <chesslib/util/uci.hpp>
 #include <fmt/base.h>
 #include <fmt/format.h>
 #include <gtl/phmap.hpp>
@@ -22,6 +18,7 @@
 #include <ucilib/engine.hpp>
 #include <ucilib/types.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/engine/engine_manager.hpp"
 #include "motif/engine/error.hpp"
 
@@ -76,19 +73,18 @@ auto map_info(uci::info const& info, std::string const& start_fen) -> info_event
 
 auto pv_to_san(std::string_view start_fen, std::vector<std::string> const& pv_uci) -> std::vector<std::string>
 {
-    auto board_result = chesslib::fen::read(start_fen);
+    auto board_result = motif::chess::parse_fen(start_fen);
     if (!board_result) {
         return {};
     }
-    auto board = *board_result;
+    auto board = std::move(*board_result);
     std::vector<std::string> san_list;
     for (auto const& uci_str : pv_uci) {
-        auto move_result = chesslib::uci::from_string(board, uci_str);
+        auto move_result = motif::chess::apply_uci(board, uci_str);
         if (!move_result) {
             break;
         }
-        san_list.push_back(chesslib::san::to_string(board, *move_result));
-        chesslib::move_maker {board, *move_result}.make();
+        san_list.push_back(move_result->san);
     }
     return san_list;
 }

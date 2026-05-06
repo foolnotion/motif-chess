@@ -16,15 +16,13 @@
 
 #include "motif/import/import_pipeline.hpp"
 
-#include <chesslib/board/board.hpp>  // NOLINT(misc-include-cleaner)
-#include <chesslib/board/move_codec.hpp>
-#include <chesslib/util/san.hpp>
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <spdlog/spdlog.h>
 #include <taskflow/algorithm/pipeline.hpp>  // NOLINT(misc-include-cleaner)
 #include <taskflow/taskflow.hpp>  // NOLINT(misc-include-cleaner)
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
@@ -171,7 +169,7 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
         return tl::unexpected {error_code::parse_error};
     }
 
-    auto board = chesslib::board {};
+    auto board = motif::chess::board {};
     std::vector<std::uint16_t> encoded_moves;
     encoded_moves.reserve(pgn_game.moves.size());
 
@@ -180,8 +178,8 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
     if (build_positions) {
         position_rows.reserve(pgn_game.moves.size() + 1);
         position_rows.push_back(motif::db::position_row {
-            .zobrist_hash = board.hash(),
-            .game_id = 0,
+            .zobrist_hash = motif::db::zobrist_hash {board.hash()},
+            .game_id = motif::db::game_id {},
             .ply = 0,
             .encoded_move = 0,
             .result = result_int,
@@ -191,19 +189,17 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
     }
 
     for (auto const& node : pgn_game.moves) {
-        auto move_result = chesslib::san::from_string(board, node.san);
+        auto move_result = motif::chess::apply_san(board, node.san);
         if (!move_result) {
             return tl::unexpected {error_code::parse_error};
         }
-        auto const enc = chesslib::codec::encode(*move_result);
+        auto const enc = *move_result;
         encoded_moves.push_back(enc);
-        chesslib::move_maker mmaker {board, *move_result};
-        mmaker.make();
 
         if (build_positions) {
             position_rows.push_back(motif::db::position_row {
-                .zobrist_hash = board.hash(),
-                .game_id = 0,
+                .zobrist_hash = motif::db::zobrist_hash {board.hash()},
+                .game_id = motif::db::game_id {},
                 .ply = static_cast<std::uint16_t>(encoded_moves.size()),
                 .encoded_move = enc,
                 .result = result_int,
@@ -514,7 +510,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             inline_positions.insert(inline_positions.end(), prep.position_rows.begin(), prep.position_rows.end());
         }
 
-        last_game_id = static_cast<std::int64_t>(game_id);
+        last_game_id = static_cast<std::int64_t>(game_id.value);
         committed++;
         batch_pending++;
         games_committed_.fetch_add(1, std::memory_order_relaxed);
