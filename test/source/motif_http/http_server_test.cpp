@@ -286,8 +286,8 @@ auto seed_positions(motif::db::database_manager& dbmgr, std::uint64_t hash, std:
     rows.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         rows.push_back(motif::db::position_row {
-            .zobrist_hash = hash,
-            .game_id = static_cast<std::uint32_t>(i + 1),
+            .zobrist_hash = motif::db::zobrist_hash {hash},
+            .game_id = motif::db::game_id {static_cast<std::uint32_t>(i + 1)},
             .ply = seed_ply,
             .result = std::int8_t {1},
             .white_elo = seed_white_elo,
@@ -369,7 +369,7 @@ auto insert_http_game(motif::db::database_manager& dbmgr, http_game_seed seed) -
     };
     auto inserted = dbmgr.store().insert(game);
     REQUIRE(inserted.has_value());
-    return *inserted;
+    return inserted->value;
 }
 
 auto insert_detailed_http_game(motif::db::database_manager& dbmgr) -> std::pair<std::uint32_t, std::vector<std::uint16_t>>
@@ -407,7 +407,7 @@ auto insert_detailed_http_game(motif::db::database_manager& dbmgr) -> std::pair<
     };
     auto inserted = dbmgr.store().insert(game);
     REQUIRE(inserted.has_value());
-    return {*inserted, std::move(moves)};
+    return {inserted->value, std::move(moves)};
 }
 
 auto perf_pgn_path() -> std::filesystem::path
@@ -559,7 +559,7 @@ void run_http_position_search_perf_test()
     latencies_us.reserve(sample_hashes->size());
 
     for (auto const hash : *sample_hashes) {
-        auto const path = fmt::format("/api/positions/{}", hash);
+        auto const path = fmt::format("/api/positions/{}", hash.value);
         auto const start = std::chrono::steady_clock::now();
         auto const res = cli.Get(path);
         auto const stop = std::chrono::steady_clock::now();
@@ -653,7 +653,7 @@ void run_http_opening_stats_perf_test()
     latencies_us.reserve(sample_hashes->size());
 
     for (auto const hash : *sample_hashes) {
-        auto const path = fmt::format("/api/openings/{}/stats", hash);
+        auto const path = fmt::format("/api/openings/{}/stats", hash.value);
         auto const start = std::chrono::steady_clock::now();
         auto const res = cli.Get(path);
         auto const stop = std::chrono::steady_clock::now();
@@ -1833,7 +1833,7 @@ TEST_CASE("server: GET /api/games/{id}/positions empty game returns empty arrays
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get(fmt::format("/api/games/{}/positions", *inserted));
+    auto const res = cli.Get(fmt::format("/api/games/{}/positions", inserted->value));
 
     srv.stop();
     server_thread.join();

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -10,9 +11,23 @@
 namespace motif::db
 {
 
-// Named aliases for primitive domain IDs — document intent at API call sites.
-using game_id = std::uint32_t;
-using zobrist_hash = std::uint64_t;
+struct game_id
+{
+    std::uint32_t value {};
+
+    constexpr explicit operator std::uint32_t() const noexcept { return value; }
+
+    constexpr auto operator<=>(game_id const&) const noexcept = default;
+};
+
+struct zobrist_hash
+{
+    std::uint64_t value {};
+
+    constexpr explicit operator std::uint64_t() const noexcept { return value; }
+
+    constexpr auto operator<=>(zobrist_hash const&) const noexcept = default;
+};
 
 struct player
 {
@@ -31,8 +46,8 @@ struct event
 
 struct position_row
 {
-    std::uint64_t zobrist_hash {};
-    std::uint32_t game_id {};
+    motif::db::zobrist_hash zobrist_hash {};
+    motif::db::game_id game_id {};
     std::uint16_t ply {};
     std::uint16_t encoded_move {};  // move that reached this position; 0 for ply == 0
     std::int8_t result {};
@@ -42,7 +57,7 @@ struct position_row
 
 struct position_match
 {
-    std::uint32_t game_id {};
+    motif::db::game_id game_id {};
     std::uint16_t ply {};
     std::int8_t result {};
     std::optional<std::int16_t> white_elo;
@@ -51,11 +66,11 @@ struct position_match
 
 struct tree_position_row
 {
-    std::uint32_t game_id {};
+    motif::db::game_id game_id {};
     std::uint16_t root_ply {};
     std::uint16_t depth {};
     std::uint16_t encoded_move {};  // move that reached child_hash
-    std::uint64_t child_hash {};
+    motif::db::zobrist_hash child_hash {};
     std::int8_t result {};
     std::optional<std::int16_t> white_elo;
     std::optional<std::int16_t> black_elo;
@@ -75,7 +90,7 @@ struct game_context
 struct opening_stat_agg_row
 {
     std::uint16_t cont_encoded_move {};
-    std::uint64_t cont_hash {};
+    motif::db::zobrist_hash cont_hash {};
     std::uint16_t root_ply {};  // MIN(p_root.ply) — for board reconstruction
     std::uint32_t frequency {};
     std::uint32_t white_wins {};
@@ -83,8 +98,8 @@ struct opening_stat_agg_row
     std::uint32_t black_wins {};
     std::optional<double> avg_white_elo;
     std::optional<double> avg_black_elo;
-    std::uint32_t eco_sample_min {};
-    std::uint32_t eco_sample_max {};
+    motif::db::game_id eco_sample_min {};
+    motif::db::game_id eco_sample_max {};
 };
 
 // source_type values: "manual" (user-added via API), "imported" (bulk import).
@@ -100,7 +115,7 @@ struct game_provenance
 
 struct game_list_entry
 {
-    std::uint32_t id {};
+    motif::db::game_id id {};
     std::string white;
     std::string black;
     std::optional<std::int32_t> white_elo;
@@ -166,3 +181,15 @@ struct game_patch
 };
 
 }  // namespace motif::db
+
+template<>
+struct std::hash<motif::db::game_id>
+{
+    auto operator()(motif::db::game_id const game_key) const noexcept -> std::size_t { return std::hash<std::uint32_t> {}(game_key.value); }
+};
+
+template<>
+struct std::hash<motif::db::zobrist_hash>
+{
+    auto operator()(motif::db::zobrist_hash const hash) const noexcept -> std::size_t { return std::hash<std::uint64_t> {}(hash.value); }
+};

@@ -1,4 +1,3 @@
-find_package(chesslib CONFIG REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)
 find_package(glaze REQUIRED)
@@ -17,7 +16,7 @@ add_library(motif_db STATIC
 
 target_link_libraries(
     motif_db PUBLIC
-        chesslib::chesslib
+        motif_chess
         fmt::fmt
         glaze::glaze
         tl::expected

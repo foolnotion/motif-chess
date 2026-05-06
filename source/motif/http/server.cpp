@@ -25,13 +25,6 @@
 
 #include "motif/http/server.hpp"
 
-#include <chesslib/board/board.hpp>
-#include <chesslib/board/move_codec.hpp>
-#include <chesslib/board/move_generator.hpp>
-#include <chesslib/core/types.hpp>
-#include <chesslib/util/fen.hpp>
-#include <chesslib/util/san.hpp>
-#include <chesslib/util/uci.hpp>
 #include <fmt/format.h>
 #include <glaze/json/read.hpp>
 #include <glaze/json/write.hpp>
@@ -40,6 +33,7 @@
 #include <pgnlib/pgnlib.hpp>
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/types.hpp"
@@ -51,6 +45,13 @@
 #include "motif/import/import_worker.hpp"
 #include "motif/search/opening_stats.hpp"
 #include "motif/search/position_search.hpp"
+
+template<>
+struct glz::meta<motif::db::game_id>
+{
+    using T = motif::db::game_id;  // NOLINT(readability-identifier-naming) — glaze convention
+    static constexpr auto value = &T::value;
+};
 
 // These structs must live in a named namespace — glaze reflection cannot
 // resolve types in anonymous namespaces (no external linkage).
@@ -336,7 +337,7 @@ auto parse_int32(std::string_view str) -> std::optional<std::int32_t>
     return val;
 }
 
-auto parse_game_id(std::string_view id_str) -> std::optional<std::uint32_t>
+auto parse_game_id(std::string_view id_str) -> std::optional<motif::db::game_id>
 {
     if (id_str.empty()) {
         return std::nullopt;
@@ -353,10 +354,10 @@ auto parse_game_id(std::string_view id_str) -> std::optional<std::uint32_t>
     if (value == 0 || value > std::numeric_limits<std::uint32_t>::max()) {
         return std::nullopt;
     }
-    return static_cast<std::uint32_t>(value);
+    return motif::db::game_id {static_cast<std::uint32_t>(value)};
 }
 
-auto to_game_response(std::uint32_t const game_id, motif::db::game const& source) -> detail::game_response
+auto to_game_response(motif::db::game_id const game_id, motif::db::game const& source) -> detail::game_response
 {
     auto tags = std::vector<detail::game_tag_response> {};
     tags.reserve(source.extra_tags.size());
@@ -364,7 +365,7 @@ auto to_game_response(std::uint32_t const game_id, motif::db::game const& source
         tags.push_back({.key = key, .value = value});
     }
     return detail::game_response {
-        .id = game_id,
+        .id = static_cast<std::uint32_t>(game_id),
         .white = source.white,
         .black = source.black,
         .event = source.event_details,
@@ -382,7 +383,7 @@ auto to_game_response(std::uint32_t const game_id, motif::db::game const& source
 {
     return detail::opening_continuation_response {
         .san = source.san,
-        .result_hash = fmt::format("{}", source.result_hash),
+        .result_hash = fmt::format("{}", static_cast<std::uint64_t>(source.result_hash)),
         .frequency = source.frequency,
         .white_wins = source.white_wins,
         .draws = source.draws,
@@ -418,27 +419,6 @@ auto generate_import_id() -> std::string
     return fmt::format("{:016x}{:016x}", high, low);
 }
 
-// Extract "from" and "to" square names from a UCI string (e.g. "e2e4" → "e2", "e4").
-// Returns nullopt if the UCI string is too short to be valid.
-auto uci_squares(std::string const& uci_str) -> std::optional<std::pair<std::string, std::string>>
-{
-    if (uci_str.size() < 4) {
-        return std::nullopt;
-    }
-    return std::pair<std::string, std::string> {uci_str.substr(0, 2), uci_str.substr(2, 2)};
-}
-
-// Extract promotion character from UCI string if present (5th char: q/r/b/n).
-auto uci_promotion(std::string const& uci_str) -> std::optional<std::string>
-{
-    constexpr std::size_t uci_promotion_length {5};
-    constexpr std::size_t uci_promotion_index {4};
-    if (uci_str.size() >= uci_promotion_length) {
-        return std::string {uci_str[uci_promotion_index]};
-    }
-    return std::nullopt;
-}
-
 auto is_valid_uci_syntax(std::string const& uci_str) -> bool
 {
     constexpr std::size_t uci_move_length {4};
@@ -460,7 +440,7 @@ auto is_valid_uci_syntax(std::string const& uci_str) -> bool
 // Moves are decoded from their 16-bit encoding and replayed from the starting
 // position to produce SAN. Any move that fails to decode produces "?" for that
 // half-move; the loop continues so the caller always gets a complete string.
-auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> std::string
+auto game_to_pgn(motif::db::game_id const game_id, motif::db::game const& game) -> std::string
 {
     auto out = std::string {};
 
@@ -488,14 +468,14 @@ auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> st
     if (game.eco) {
         append_tag("ECO", *game.eco);
     }
-    append_tag("MotifGameId", fmt::format("{}", game_id));
+    append_tag("MotifGameId", fmt::format("{}", game_id.value));
     for (auto const& [key, value] : game.extra_tags) {
         append_tag(key, value);
     }
 
     out += '\n';
 
-    auto board = chesslib::board {};
+    auto board = motif::chess::board {};
     auto move_number = std::uint32_t {1};
     bool white_to_move {true};
     bool first_token {true};
@@ -510,12 +490,11 @@ auto game_to_pgn(std::uint32_t const game_id, motif::db::game const& game) -> st
     };
 
     for (auto const encoded : game.moves) {
-        auto const mov = chesslib::codec::decode(encoded);
         if (white_to_move) {
             append_token(fmt::format("{}.", move_number));
         }
-        append_token(chesslib::san::to_string(board, mov));
-        chesslib::move_maker {board, mov}.make();
+        append_token(motif::chess::san(board, encoded));
+        motif::chess::apply_encoded_move(board, encoded);
         if (white_to_move) {
             white_to_move = false;
         } else {
@@ -548,14 +527,13 @@ auto game_to_positions(motif::db::game const& game) -> detail::game_positions_re
     sans.reserve(game.moves.size());
     hashes.reserve(game.moves.size());
 
-    auto board = chesslib::board {};
+    auto board = motif::chess::board {};
     auto const starting_hash = fmt::format("{}", board.hash());
 
     for (auto const encoded : game.moves) {
-        auto const mov = chesslib::codec::decode(encoded);
-        sans.push_back(chesslib::san::to_string(board, mov));
-        chesslib::move_maker {board, mov}.make();
-        fens.push_back(chesslib::fen::write(board));
+        sans.push_back(motif::chess::san(board, encoded));
+        motif::chess::apply_encoded_move(board, encoded);
+        fens.push_back(motif::chess::write_fen(board));
         hashes.push_back(fmt::format("{}", board.hash()));
     }
 
@@ -567,19 +545,14 @@ auto game_to_positions(motif::db::game const& game) -> detail::game_positions_re
     };
 }
 
-auto to_legal_move_response(chesslib::board const& board, chesslib::move const mov) -> detail::legal_move_response
+auto to_legal_move_response(motif::chess::move_info const& move) -> detail::legal_move_response
 {
-    auto const uci_str = chesslib::uci::to_string(mov);
-    auto const san_str = chesslib::san::to_string(board, mov);
-    auto const squares = uci_squares(uci_str);
-    auto const from_sq = squares ? squares->first : std::string {};
-    auto const to_sq = squares ? squares->second : std::string {};
     return detail::legal_move_response {
-        .uci = uci_str,
-        .san = san_str,
-        .from = from_sq,
-        .to = to_sq,
-        .promotion = uci_promotion(uci_str),
+        .uci = move.uci,
+        .san = move.san,
+        .from = move.from,
+        .to = move.to,
+        .promotion = move.promotion,
     };
 }
 
@@ -774,24 +747,24 @@ void server::impl::setup_routes()
                     return;
                 }
 
-                auto board_result = chesslib::fen::read(fen_param);
+                auto board_result = motif::chess::parse_fen(fen_param);
                 if (!board_result) {
                     set_json_error(res, http_bad_request, "invalid fen");
                     return;
                 }
 
                 auto const& board = *board_result;
-                auto const moves = chesslib::legal_moves(board);
+                auto const moves = motif::chess::legal_moves(board);
                 auto move_responses = std::vector<detail::legal_move_response> {};
                 move_responses.reserve(moves.size());
                 for (auto const& mov : moves) {
-                    move_responses.push_back(to_legal_move_response(board, mov));
+                    move_responses.push_back(to_legal_move_response(mov));
                 }
 
                 std::string body {};
                 [[maybe_unused]] auto const err = glz::write_json(
                     detail::legal_moves_response {
-                        .fen = chesslib::fen::write(board),
+                        .fen = motif::chess::write_fen(board),
                         .legal_moves = std::move(move_responses),
                     },
                     body);
@@ -821,23 +794,22 @@ void server::impl::setup_routes()
                      return;
                  }
 
-                 auto board_result = chesslib::fen::read(req_body.fen);
+                 auto board_result = motif::chess::parse_fen(req_body.fen);
                  if (!board_result) {
                      set_json_error(res, http_bad_request, "invalid fen");
                      return;
                  }
 
-                 auto& board = *board_result;
-                 auto move_result = chesslib::uci::from_string(board, req_body.uci);
+                 auto board = std::move(*board_result);
+                 auto move_result = motif::chess::apply_uci(board, req_body.uci);
                  if (!move_result) {
                      set_json_error(res, http_bad_request, "illegal move");
                      return;
                  }
 
-                 auto const accepted_uci = chesslib::uci::to_string(*move_result);
-                 auto const accepted_san = chesslib::san::to_string(board, *move_result);
-                 chesslib::move_maker {board, *move_result}.make();
-                 auto const result_fen = chesslib::fen::write(board);
+                 auto const accepted_uci = move_result->uci;
+                 auto const accepted_san = move_result->san;
+                 auto const result_fen = motif::chess::write_fen(board);
 
                  std::string body {};
                  [[maybe_unused]] auto const err = glz::write_json(
@@ -859,7 +831,7 @@ void server::impl::setup_routes()
                     set_json_error(res, http_bad_request, "invalid fen");
                     return;
                 }
-                auto board_result = chesslib::fen::read(fen_param);
+                auto board_result = motif::chess::parse_fen(fen_param);
                 if (!board_result) {
                     set_json_error(res, http_bad_request, "invalid fen");
                     return;
@@ -925,11 +897,11 @@ void server::impl::setup_routes()
                     return;
                 }
 
-                auto matches =
-                    [this, hash_val, limit, offset]() -> decltype(motif::search::position_search::find(database, hash_val, limit, offset))
+                auto matches = [this, hash_val, limit, offset]() -> decltype(motif::search::position_search::find(
+                                                                     database, motif::db::zobrist_hash {hash_val}, limit, offset))
                 {
                     std::scoped_lock const lock {database_mutex};
-                    return motif::search::position_search::find(database, hash_val, limit, offset);
+                    return motif::search::position_search::find(database, motif::db::zobrist_hash {hash_val}, limit, offset);
                 }();
                 if (!matches) {
                     set_json_error(res, http_internal_error, "search failed");
@@ -960,10 +932,11 @@ void server::impl::setup_routes()
                     // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
                 }
 
-                auto query_result = [this, hash_val]() -> decltype(motif::search::opening_stats::query(database, hash_val))
+                auto query_result =
+                    [this, hash_val]() -> decltype(motif::search::opening_stats::query(database, motif::db::zobrist_hash {hash_val}))
                 {
                     std::scoped_lock const lock {database_mutex};
-                    return motif::search::opening_stats::query(database, hash_val);
+                    return motif::search::opening_stats::query(database, motif::db::zobrist_hash {hash_val});
                 }();
                 if (!query_result) {
                     set_json_error(res, http_internal_error, "stats query failed");
@@ -1160,7 +1133,7 @@ void server::impl::setup_routes()
 
                  auto const& pgn_game = games.front();
 
-                 std::uint32_t game_id {};
+                 auto game_id = motif::db::game_id {};
                  {
                      std::scoped_lock const lock {database_mutex};
                      motif::import::import_worker worker {database};
@@ -1199,7 +1172,7 @@ void server::impl::setup_routes()
                  std::string body {};
                  [[maybe_unused]] auto const err = glz::write_json(
                      detail::create_game_response {
-                         .id = game_id,
+                         .id = game_id.value,
                          .source_type = "manual",
                          .source_label = req_body.source_label,
                          .review_status = review_status,
@@ -1429,7 +1402,7 @@ void server::impl::setup_routes()
                      return;
                  }
 
-                 if (!chesslib::fen::read(req_body.fen)) {
+                 if (!motif::chess::parse_fen(req_body.fen)) {
                      set_json_error(res, http_bad_request, "invalid fen");
                      return;
                  }

@@ -21,6 +21,7 @@ target_link_libraries(motif_http
         motif_search
         motif_import
         motif_engine
+        motif_chess
 )
 
 target_compile_features(motif_http PUBLIC cxx_std_23)

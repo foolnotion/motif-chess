@@ -28,7 +28,7 @@ constexpr std::uint16_t move_d = 0x0001U;
 constexpr std::uint16_t move_e = 0x0002U;
 
 // Sentinel: a row id guaranteed not to exist in any fresh in-memory database.
-constexpr std::uint32_t absent_id = 99999U;
+constexpr auto absent_id = motif::db::game_id {99999U};
 
 // ── Fixture
 // ───────────────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ TEST_CASE("game_store: insert returns a valid id", "[motif_db][game_store]")
     db_fixture fix;
     auto const res = fix.store.insert(make_game());
     REQUIRE(res.has_value());
-    CHECK(*res > 0U);
+    CHECK(res->value > 0U);
 }
 
 TEST_CASE("game_store: get reconstructs original metadata and moves", "[motif_db][game_store]")

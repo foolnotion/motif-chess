@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -9,12 +8,10 @@
 
 #include "motif/search/opening_stats.hpp"
 
-#include <chesslib/board/board.hpp>
-#include <chesslib/board/move_codec.hpp>
-#include <chesslib/util/san.hpp>
 #include <gtl/phmap.hpp>
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
 #include "motif/search/error.hpp"
@@ -22,28 +19,11 @@
 namespace
 {
 
-auto replay_position(std::span<std::uint16_t const> moves, std::uint16_t const ply) -> motif::search::result<chesslib::board>
-{
-    auto board = chesslib::board {};
-
-    for (std::size_t index = 0; index < ply; ++index) {
-        if (index >= moves.size()) {
-            return tl::unexpected {motif::search::error_code::io_failure};
-        }
-
-        auto const move = chesslib::codec::decode(moves[index]);
-        chesslib::move_maker maker {board, move};
-        maker.make();
-    }
-
-    return board;
-}
-
-using context_map = gtl::flat_hash_map<std::uint32_t, motif::db::game_context>;
+using context_map = gtl::flat_hash_map<motif::db::game_id, motif::db::game_context>;
 
 auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows,
-                     std::uint64_t const zobrist_hash,
-                     context_map const& contexts) -> motif::search::result<chesslib::board>
+                     motif::db::zobrist_hash const zobrist_hash,
+                     context_map const& contexts) -> motif::search::result<motif::chess::board>
 {
     auto const root_ply = rows.front().root_ply;
     for (auto const& row : rows) {
@@ -52,8 +32,8 @@ auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows,
             if (ctx_it == contexts.end()) {
                 continue;
             }
-            auto replayed = replay_position(ctx_it->second.moves, root_ply);
-            if (replayed && replayed->hash() == zobrist_hash) {
+            auto replayed = motif::chess::replay(ctx_it->second.moves, root_ply);
+            if (replayed && motif::db::zobrist_hash {replayed->hash()} == zobrist_hash) {
                 return *replayed;
             }
         }
@@ -79,7 +59,7 @@ auto resolve_eco(motif::db::opening_stat_agg_row const& row, context_map const& 
 namespace motif::search::opening_stats
 {
 
-auto query(motif::db::database_manager const& database, std::uint64_t const hash) -> result<stats>
+auto query(motif::db::database_manager const& database, motif::db::zobrist_hash const hash) -> result<stats>
 {
     auto total_count_res = database.positions().count_distinct_games_by_zobrist(hash);
     if (!total_count_res) {
@@ -95,7 +75,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const hash
     }
     auto const& rows = *rows_res;
 
-    auto candidate_ids = std::vector<std::uint32_t> {};
+    auto candidate_ids = std::vector<motif::db::game_id> {};
     candidate_ids.reserve(rows.size() * 2);
     for (auto const& row : rows) {
         candidate_ids.push_back(row.eco_sample_min);
@@ -113,7 +93,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const hash
     }
     auto const& contexts = *contexts_res;
 
-    auto position = chesslib::board {};
+    auto position = motif::chess::board {};
     if (!rows.empty() && rows.front().root_ply > 0U) {
         auto board_res = find_root_board(rows, hash, contexts);
         if (!board_res) {
@@ -137,8 +117,7 @@ auto query(motif::db::database_manager const& database, std::uint64_t const hash
         auto [eco, opening_name] =
             eco_res ? std::move(*eco_res) : std::make_pair(std::optional<std::string> {}, std::optional<std::string> {});
 
-        auto const cont_move = chesslib::codec::decode(row.cont_encoded_move);
-        auto const san = chesslib::san::to_string(position, cont_move);
+        auto const san = motif::chess::san(position, row.cont_encoded_move);
 
         output.continuations.push_back(continuation {
             .san = san,
