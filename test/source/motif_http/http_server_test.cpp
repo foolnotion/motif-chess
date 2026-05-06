@@ -100,8 +100,23 @@ struct game_response
 struct game_list_entry_response
 {
     std::uint32_t id {};
+    std::string white;
+    std::string black;
+    std::optional<std::int32_t> white_elo;
+    std::optional<std::int32_t> black_elo;
+    std::string result;
+    std::string event;
+    std::string date;
+    std::string eco;
     std::string source_type;
+    std::optional<std::string> source_label;
     std::string review_status;
+};
+
+struct game_list_response
+{
+    std::vector<game_list_entry_response> games;
+    std::int64_t total_count {};
 };
 
 }  // namespace motif_http_test
@@ -332,11 +347,14 @@ struct http_game_seed
 {
     std::string white;
     std::string black;
+    std::optional<std::int32_t> white_elo {};
+    std::optional<std::int32_t> black_elo {};
     std::string result;
     std::string event;
     std::string date;
     std::string eco;
     std::uint16_t move_seed {};
+    std::optional<std::vector<std::uint16_t>> moves {};
 };
 
 auto make_http_player(std::string name) -> motif::db::player
@@ -352,8 +370,20 @@ auto make_http_player(std::string name) -> motif::db::player
 auto insert_http_game(motif::db::database_manager& dbmgr, http_game_seed seed) -> std::uint32_t
 {
     auto game = motif::db::game {
-        .white = make_http_player(std::move(seed.white)),
-        .black = make_http_player(std::move(seed.black)),
+        .white =
+            motif::db::player {
+                .name = std::move(seed.white),
+                .elo = seed.white_elo,
+                .title = std::nullopt,
+                .country = std::nullopt,
+            },
+        .black =
+            motif::db::player {
+                .name = std::move(seed.black),
+                .elo = seed.black_elo,
+                .title = std::nullopt,
+                .country = std::nullopt,
+            },
         .event_details =
             motif::db::event {
                 .name = std::move(seed.event),
@@ -363,13 +393,21 @@ auto insert_http_game(motif::db::database_manager& dbmgr, http_game_seed seed) -
         .date = std::move(seed.date),
         .result = std::move(seed.result),
         .eco = std::move(seed.eco),
-        .moves = {seed.move_seed},
+        .moves = seed.moves.value_or(std::vector<std::uint16_t> {seed.move_seed}),
         .extra_tags = {},
         .provenance = {},
     };
     auto inserted = dbmgr.store().insert(game);
     REQUIRE(inserted.has_value());
     return inserted->value;
+}
+
+auto parse_game_list_response(std::string const& body) -> motif_http_test::game_list_response
+{
+    auto parsed = motif_http_test::game_list_response {};
+    auto const err = glz::read_json(parsed, body);
+    REQUIRE_FALSE(err);
+    return parsed;
 }
 
 auto insert_detailed_http_game(motif::db::database_manager& dbmgr) -> std::pair<std::uint32_t, std::vector<std::uint16_t>>
@@ -1375,7 +1413,7 @@ TEST_CASE("server: opening stats endpoint meets latency target", "[performance][
     run_http_opening_stats_perf_test();
 }
 
-TEST_CASE("server: game list empty DB returns 200 with empty array", "[motif-http]")
+TEST_CASE("server: game list empty DB returns 200 with empty result", "[motif-http]")
 {
     auto const tdir = tmp_dir {"games_empty"};
     auto db_res = motif::db::database_manager::create(tdir.path, "games-empty-db");
@@ -1394,7 +1432,9 @@ TEST_CASE("server: game list empty DB returns 200 with empty array", "[motif-htt
 
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
-    CHECK(res->body == "[]");
+    auto const parsed = parse_game_list_response(res->body);
+    CHECK(parsed.games.empty());
+    CHECK(parsed.total_count == 0);
 }
 
 // NOLINTBEGIN(readability-function-cognitive-complexity)
@@ -1428,7 +1468,7 @@ TEST_CASE("server: game list populated DB returns required fields", "[motif-http
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
     auto const& body = res->body;
-    CHECK(body.front() == '[');
+    CHECK(body.contains(R"("total_count":1)"));
     CHECK(body.contains(fmt::format(R"("id":{})", game_id)));
     CHECK(body.contains(R"("white":"Magnus Carlsen")"));
     CHECK(body.contains(R"("black":"Ian Nepomniachtchi")"));
@@ -1488,9 +1528,143 @@ TEST_CASE("server: game list filters by player and result", "[motif-http]")
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
     CHECK(count_game_list_ids(res->body) == 1);
+    CHECK(res->body.contains(R"("total_count":1)"));
     CHECK(res->body.contains(fmt::format(R"("id":{})", expected_id)));
     CHECK(res->body.contains(R"("white":"Levon Aronian")"));
     CHECK(res->body.contains(R"("black":"Magnus Carlsen")"));
+}
+
+TEST_CASE("server: game list filters by color and returns elos with total_count", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"games_color_filter"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "games-color-filter-db");
+    REQUIRE(db_res.has_value());
+
+    insert_http_game(*db_res,
+                     http_game_seed {
+                         .white = "Magnus Carlsen",
+                         .black = "Ian Nepomniachtchi",
+                         .white_elo = 2830,
+                         .black_elo = 2795,
+                         .result = "1-0",
+                         .event = "WCC",
+                         .date = "2021.12.03",
+                         .eco = "C88",
+                         .move_seed = 1,
+                     });
+    auto const expected_id = insert_http_game(*db_res,
+                                              http_game_seed {
+                                                  .white = "Levon Aronian",
+                                                  .black = "Magnus Carlsen",
+                                                  .white_elo = 2780,
+                                                  .black_elo = 2830,
+                                                  .result = "0-1",
+                                                  .event = "Candidates",
+                                                  .date = "2024.04.05",
+                                                  .eco = "A04",
+                                                  .move_seed = 2,
+                                              });
+
+    constexpr std::uint16_t test_port {18131};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get("/api/games?player=Carlsen&color=black");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 200);
+    CHECK(count_game_list_ids(res->body) == 1);
+    CHECK(res->body.contains(R"("total_count":1)"));
+    CHECK(res->body.contains(fmt::format(R"("id":{})", expected_id)));
+    CHECK(res->body.contains(R"("white_elo":2780)"));
+    CHECK(res->body.contains(R"("black_elo":2830)"));
+}
+
+TEST_CASE("server: game list filters by position hash", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"games_position_filter"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "games-position-filter-db");
+    REQUIRE(db_res.has_value());
+
+    auto const e4_moves = encode_moves_for_game({"e4", "e5"});
+    auto const d4_moves = encode_moves_for_game({"d4", "d5"});
+    auto const expected_id = insert_http_game(*db_res,
+                                              http_game_seed {
+                                                  .white = "White A",
+                                                  .black = "Black A",
+                                                  .result = "1-0",
+                                                  .event = "Event A",
+                                                  .date = "2024.01.01",
+                                                  .eco = "B90",
+                                                  .move_seed = 0,
+                                                  .moves = e4_moves,
+                                              });
+    insert_http_game(*db_res,
+                     http_game_seed {
+                         .white = "White B",
+                         .black = "Black B",
+                         .result = "0-1",
+                         .event = "Event B",
+                         .date = "2024.01.02",
+                         .eco = "D30",
+                         .move_seed = 0,
+                         .moves = d4_moves,
+                     });
+    REQUIRE(db_res->rebuild_position_store().has_value());
+
+    auto board = chesslib::board {};
+    auto e4_move = chesslib::san::from_string(board, "e4");
+    REQUIRE(e4_move.has_value());
+    chesslib::move_maker {board, *e4_move}.make();
+    auto const hash = board.hash();
+
+    constexpr std::uint16_t test_port {18132};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const res = cli.Get(fmt::format("/api/games?position_hash={}", hash));
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(res != nullptr);
+    CHECK(res->status == 200);
+    CHECK(count_game_list_ids(res->body) == 1);
+    CHECK(res->body.contains(R"("total_count":1)"));
+    CHECK(res->body.contains(fmt::format(R"("id":{})", expected_id)));
+}
+
+TEST_CASE("server: game list invalid color and position filters return 400", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"games_bad_filters"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "games-bad-filters-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18133};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const bad_color = cli.Get("/api/games?color=sideways");
+    auto const bad_hash = cli.Get("/api/games?position_hash=abc");
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(bad_color != nullptr);
+    REQUIRE(bad_hash != nullptr);
+    CHECK(bad_color->status == 400);
+    CHECK(bad_hash->status == 400);
+    CHECK(bad_color->body == R"({"error":"invalid color filter"})");
+    CHECK(bad_hash->body == R"({"error":"invalid position hash"})");
 }
 
 TEST_CASE("server: game list applies limit and offset", "[motif-http]")
@@ -1519,12 +1693,13 @@ TEST_CASE("server: game list applies limit and offset", "[motif-http]")
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
     CHECK(count_game_list_ids(res->body) == 1);
+    CHECK(res->body.contains(R"("total_count":3)"));
     CHECK(res->body.contains(fmt::format(R"("id":{})", expected_id)));
 }
 
 TEST_CASE("server: game list clamps oversized limit", "[motif-http]")
 {
-    constexpr std::size_t inserted_games {201};
+    constexpr std::size_t inserted_games {501};
 
     auto const tdir = tmp_dir {"games_limit_clamp"};
     auto db_res = motif::db::database_manager::create(tdir.path, "games-limit-clamp-db");
@@ -1556,7 +1731,8 @@ TEST_CASE("server: game list clamps oversized limit", "[motif-http]")
 
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
-    CHECK(count_game_list_ids(res->body) == 200);
+    CHECK(count_game_list_ids(res->body) == 500);
+    CHECK(res->body.contains(fmt::format(R"("total_count":{})", inserted_games)));
 }
 
 TEST_CASE("server: game list invalid pagination returns 400", "[motif-http]")
@@ -1589,7 +1765,7 @@ TEST_CASE("server: game list invalid pagination returns 400", "[motif-http]")
     CHECK(empty_limit->body == R"({"error":"invalid pagination parameters"})");
 }
 
-TEST_CASE("server: game list limit=0 returns empty array", "[motif-http]")
+TEST_CASE("server: game list limit=0 returns empty page", "[motif-http]")
 {
     auto const tdir = tmp_dir {"games_limit_zero"};
     auto db_res = motif::db::database_manager::create(tdir.path, "games-limit-zero-db");
@@ -1610,7 +1786,9 @@ TEST_CASE("server: game list limit=0 returns empty array", "[motif-http]")
 
     REQUIRE(res != nullptr);
     CHECK(res->status == 200);
-    CHECK(res->body == "[]");
+    auto const parsed = parse_game_list_response(res->body);
+    CHECK(parsed.games.empty());
+    CHECK(parsed.total_count == 1);
 }
 
 TEST_CASE("server: single game returns complete payload", "[motif-http]")

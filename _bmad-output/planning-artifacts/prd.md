@@ -2,7 +2,9 @@
 stepsCompleted: ['step-01-init', 'step-02-discovery', 'step-02b-vision',
   'step-02c-executive-summary', 'step-03-success', 'step-04-journeys',
   'step-05-domain', 'step-06-innovation', 'step-07-project-type',
-  'step-08-scoping', 'step-09-functional', 'step-10-nonfunctional', 'step-11-polish']
+  'step-08-scoping', 'step-09-functional', 'step-10-nonfunctional', 'step-11-polish',
+  'step-01b-continue', 'step-12-complete']
+completedAt: '2026-05-06'
 classification:
   projectType: desktop_app
   domain: chess_tooling

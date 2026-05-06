@@ -1,7 +1,7 @@
 ---
 stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories', 'step-04-final-validation']
 status: 'complete'
-completedAt: '2026-04-14'
+completedAt: '2026-05-06'
 inputDocuments:
   - '_bmad-output/planning-artifacts/prd.md'
   - '_bmad-output/planning-artifacts/architecture.md'
@@ -1247,3 +1247,216 @@ So that I receive concrete preparation recommendations tailored to my current ab
 **Given** the player's corpus grows with new games
 **When** the user re-runs repertoire generation
 **Then** the proposal is updated to reflect the new data (FR44)
+
+---
+
+## Epic 3b: Search Filters & Filtered Opening Explorer
+
+Users can filter the game list and the opening explorer by player, color, Elo range, result, ECO prefix, and position (Zobrist hash), enabling opponent preparation from a filtered game list and opening study from a position-centric filtered view with Elo-weighted statistics and a continuous Elo distribution per continuation.
+
+**FRs covered:** FR01–FR09 (game search & list), FR11–FR16 (filtered opening explorer), FR17–FR20 (sync toggle — stateless API contract; Qt manages client state), FR21–FR23 (HTTP, deferrable)
+**NFRs covered:** NFR01–NFR08, NFR09–NFR12
+**Dependencies:** Epic 3 complete (`position_search`, `opening_stats`, `opening_tree` stable and tested)
+**Note on FR10:** Board navigation on game select is a Qt concern — covered by Epic 7 Story 7.3, not here.
+**Note on Story 3b.5:** HTTP adapter is deferrable; may move to `motif-chess-web`. Core Qt workflows use `motif_search` and `motif_db` directly.
+
+### Story 3b.1: Search Filter Model & Filtered Game List
+
+As a user,
+I want to filter the game list by player name, color, Elo range, result, ECO prefix, and/or position (Zobrist hash),
+So that I can find relevant games for opponent preparation and opening study without browsing the entire database.
+
+**Acceptance Criteria:**
+
+**Given** the `motif_db` module
+**When** the search filter model story is complete
+**Then** `source/motif/db/types.hpp` defines `motif::db::search_filter` with optional fields: `player_name` (string), `player_color` (enum: white | black | either), `min_elo` (int), `max_elo` (int), `result` (string), `eco_prefix` (string), `position` (zobrist_hash), `offset` (int, default 0), `limit` (int, default 100, max 500)
+**And** a `game_list_result` struct is defined with `std::vector<game_list_entry> games` and `std::int64_t total_count`
+
+**Given** `game_store` with a `search_filter` where `player_name` is set
+**When** `game_store::find_games(search_filter)` is called
+**Then** only games where the matching player name is a case-insensitive partial match against white or black player are returned
+**And** when `player_color` is set to `white`, only games where the matching player is the white player are returned; `black` restricts to black; `either` matches either side
+
+**Given** a `search_filter` with `min_elo` and/or `max_elo` set
+**When** `game_store::find_games` is called
+**Then** only games where both white and black Elo are within the range (both endpoints inclusive) are returned
+**And** games without Elo data are excluded when an Elo filter is active
+
+**Given** a `search_filter` with `result` set to "1-0", "0-1", or "1/2-1/2"
+**When** `game_store::find_games` is called
+**Then** only games with the matching result are returned
+
+**Given** a `search_filter` with `eco_prefix` set to "B9"
+**When** `game_store::find_games` is called
+**Then** games with ECO codes B90–B99 are returned; prefix "B" matches all B-code games
+
+**Given** a `search_filter` with `position` set to a Zobrist hash
+**When** `game_store::find_games` is called
+**Then** the query first retrieves matching game IDs from DuckDB `position` table, then applies remaining metadata filters in SQLite via an IN clause or temp table join
+**And** no cross-store join occurs on the hot path — DuckDB returns game IDs; SQLite resolves metadata
+
+**Given** multiple fields set in `search_filter`
+**When** `game_store::find_games` is called
+**Then** all active filters are ANDed; a game must satisfy all conditions to appear in results
+
+**Given** an empty `search_filter` (all fields nullopt)
+**When** `game_store::find_games` is called
+**Then** all games are returned paginated; this is not treated as an error
+
+**Given** any filter combination on a 4M-game corpus
+**When** `game_store::find_games` is called
+**Then** the query completes in under 100ms (NFR01)
+**And** player name search in SQLite completes in under 50ms before DuckDB intersection (NFR05)
+
+**Given** any test scenario
+**Then** filtered results exactly match manually counted results from the test dataset (NFR06)
+**And** all tests use real in-memory SQLite and DuckDB instances — no mocks
+**And** all tests pass under `cmake --preset=dev-sanitize` with zero ASan/UBSan violations (NFR12)
+
+### Story 3b.2: Filtered Opening Stats & ELO-Weighted Ranking
+
+As a user,
+I want opening statistics at any position to reflect only games matching my current filter, with continuations ranked by an Elo-weighted score,
+So that I can see how strong players handle each position and identify which moves are objectively best rather than just most popular.
+
+**Acceptance Criteria:**
+
+**Given** `opening_stats::query` with an optional `search_filter` parameter
+**When** the filter is set
+**Then** all statistics (frequency, white_wins, draws, black_wins, average_white_elo, average_black_elo) are computed over the filtered game set only
+**And** the `opening_stat_cont` (or equivalent continuation struct) gains a `double elo_weighted_score` field
+
+**Given** an empty or absent `search_filter`
+**When** `opening_stats::query` is called
+**Then** behavior is identical to the pre-3b implementation — no regression (FR12, NFR08)
+
+**Given** the ELO-weighted score
+**When** it is computed for a continuation
+**Then** the formula is: score = Σ(result_value(g) × avg_elo(g)) / Σ avg_elo(g), where result_value is +1 (side to move wins), 0 (draw), −1 (side to move loses), and avg_elo(g) = (white_elo + black_elo) / 2 for games where both are available; games with missing Elo data are excluded from the weighted score computation but included in frequency counts
+**And** the score is returned as a field for the caller to use as a sort key — the API does not sort; sort order is the caller's responsibility (FR13, FR14)
+
+**Given** two continuations with equal ELO-weighted score
+**When** the caller sorts by score
+**Then** ties are broken by frequency (descending), then SAN alphabetically (NFR07)
+
+**Given** a position with a known game set
+**When** `opening_stats::query` is called with a filter
+**Then** the returned stats exactly match manually computed values from the filtered game set (NFR06)
+
+**Given** any filter combination on a 4M-game corpus
+**When** `opening_stats::query` is called
+**Then** the query completes in under 200ms (NFR02)
+
+**Given** any test scenario
+**Then** all new public functions have at least one Catch2 v3 test (NFR09)
+**And** tests use real in-memory DuckDB — no mocks (NFR10)
+**And** all tests pass under `cmake --preset=dev-sanitize` (NFR12)
+**And** zero new clang-tidy or cppcheck warnings (NFR11)
+
+### Story 3b.3: Continuous ELO Distribution per Continuation
+
+As a user,
+I want to see win/draw/loss rates as a continuous distribution over Elo for each continuation,
+So that I can tell whether a move is objectively sound or only underperforms because it is difficult to play correctly below a certain Elo threshold.
+
+**Acceptance Criteria:**
+
+**Given** `position_store` (in `motif_db`)
+**When** the ELO distribution story is complete
+**Then** a new method `position_store::query_elo_distribution(zobrist_hash, search_filter, bucket_width)` exists, returning a map from continuation encoded_move to a vector of `elo_distribution_bucket { int elo_bucket_floor; uint32_t white_wins; uint32_t draws; uint32_t black_wins; uint32_t game_count; }`
+
+**Given** a position with games spanning Elo 1400–2800 and bucket_width = 25
+**When** `query_elo_distribution` is called
+**Then** buckets are returned at 25-Elo intervals covering the full range of matching games
+**And** empty buckets (no games in that interval) are included as zeros so the frontend has a contiguous range without gaps (FR15)
+**And** the floor boundary for each bucket is `floor(avg_elo / bucket_width) * bucket_width`
+
+**Given** the distribution query
+**When** it executes
+**Then** a single DuckDB query handles all continuations at the position — not one query per continuation (NFR04)
+
+**Given** bucket totals for a continuation
+**When** summed across all buckets
+**Then** total game_count equals the frequency from Story 3b.2 filtered stats for the same filter (correctness invariant)
+
+**Given** any filter combination on a 4M-game corpus
+**When** `query_elo_distribution` is called
+**Then** it completes within the 200ms budget shared with filtered opening stats (NFR02)
+
+**Given** any test scenario
+**Then** bucket sum invariant is verified by tests
+**And** empty bucket inclusion is verified for a known sparse dataset
+**And** all tests pass under `cmake --preset=dev-sanitize` (NFR12)
+**And** zero new clang-tidy or cppcheck warnings (NFR11)
+
+### Story 3b.4: Filtered Opening Tree Traversal
+
+As a user,
+I want the opening tree to reflect only positions and statistics from games matching my filter,
+So that when I filter by opponent, the tree shows their actual repertoire rather than the full database.
+
+**Acceptance Criteria:**
+
+**Given** `opening_tree::open` with an optional `search_filter` parameter
+**When** the filter is set
+**Then** all tree node statistics (frequency, white_wins, draws, black_wins, average_white_elo, average_black_elo, elo_weighted_score) are computed over the filtered game set
+**And** the filter is passed through to all underlying `position_store` and `opening_stats` calls
+**And** ELO-weighted score (from Story 3b.2) is included in each `node_continuation`
+
+**Given** `opening_tree::expand` with an optional `search_filter` parameter
+**When** a lazy node expansion is triggered
+**Then** the same filter is applied to the on-demand DuckDB query for that node's children (FR16)
+
+**Given** an empty or absent `search_filter`
+**When** `opening_tree::open` or `expand` is called
+**Then** behavior is identical to the pre-3b implementation — no regression
+
+**Given** a filtered tree opened with `prefetch_depth = 3` on a 4M-game corpus
+**When** `opening_tree::open` is called
+**Then** the call completes in under 500ms (NFR03)
+
+**Given** a filter that matches zero games at a node
+**When** that node is included in the tree
+**Then** the node has zero continuations and is marked `is_expanded = true` — not an error
+
+**Given** any test scenario
+**Then** filtered tree node statistics match manually computed values from the filtered game set
+**And** all tests pass under `cmake --preset=dev-sanitize` (NFR12)
+**And** zero new clang-tidy or cppcheck warnings (NFR11)
+
+### Story 3b.5: HTTP Search & Filter API *(deferrable — may move to motif-chess-web)*
+
+As a developer building a frontend against the motif-chess HTTP API,
+I want game list, opening statistics, and opening tree endpoints to accept filter query parameters,
+So that the Qt or web frontend can drive all search and filtered explorer workflows over HTTP without direct library access.
+
+**Acceptance Criteria:**
+
+**Given** `GET /api/games`
+**When** called with any combination of query parameters: `player` (string), `color` (white|black|either), `min_elo` (int), `max_elo` (int), `result` (string), `eco` (string), `position_hash` (uint64 as string), `offset` (int), `limit` (int, max 500)
+**Then** the response includes a paginated game list and `total_count` reflecting the full filtered result set (FR21)
+**And** the response game objects include `white_elo` and `black_elo` fields
+**And** absent parameters apply no filter for that field; all absent = unfiltered
+
+**Given** `GET /api/positions/{hash}/stats`
+**When** called with optional filter params (player, color, min_elo, max_elo, result, eco)
+**Then** the response reflects filtered opening statistics including `elo_weighted_score` per continuation (FR22)
+
+**Given** `GET /api/positions/{hash}/tree`
+**When** called with optional filter params
+**Then** the tree nodes reflect filtered statistics (FR23)
+
+**Given** the sync toggle (FR17–FR20)
+**When** the API design is reviewed
+**Then** the API is explicitly stateless — each request carries its own complete filter; no session, no sync state is held server-side; sync toggle behavior is a Qt (or web) client responsibility implemented by sharing filter state between panels in the UI layer
+
+**Given** any invalid filter parameter (non-numeric Elo, unrecognized color, invalid result string)
+**When** the endpoint is called
+**Then** HTTP 400 is returned with a descriptive JSON error; the server does not crash (NFR10-equivalent)
+
+**Given** `docs/api/openapi.yaml`
+**When** updated for this story
+**Then** all new query parameters are documented with types, constraints, and examples
+**And** integration tests cover filter combinations, edge cases, and the stateless-sync contract documentation
+**And** all tests pass under `cmake --preset=dev-sanitize`

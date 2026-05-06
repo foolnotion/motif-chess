@@ -20,6 +20,7 @@ struct sqlite3_stmt;
 namespace motif::db
 {
 
+class database_manager;
 class game_writer;
 
 class game_store
@@ -57,7 +58,7 @@ class game_store
     // silently dropped by the unordered_map; deduplicate before calling).
     auto get_game_contexts(std::vector<game_id> const& game_ids) -> result<gtl::flat_hash_map<game_id, game_context>>;
     auto get_game_contexts(std::vector<game_id> const& game_ids) const -> result<gtl::flat_hash_map<game_id, game_context>>;
-    auto list_games(game_list_query const& query) const -> result<std::vector<game_list_entry>>;
+    auto find_games(search_filter const& filter) const -> result<game_list_result>;
     auto count_games() const -> result<std::int64_t>;
 
     // Delete the game row and all associated game_tag rows.
@@ -91,6 +92,8 @@ class game_store
     void clear_insert_caches() noexcept;
 
   private:
+    friend class database_manager;
+
     sqlite3* db_;
     gtl::flat_hash_map<std::string, std::int64_t> player_id_cache_;
     gtl::flat_hash_map<std::string, std::int64_t> event_id_cache_;
@@ -110,6 +113,7 @@ class game_store
     auto find_or_insert_event(event const& evt) -> result<std::int64_t>;
     auto insert_game_tags(game_id game_key, std::vector<std::pair<std::string, std::string>> const& extra_tags) -> result<void>;
     auto prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql) -> result<sqlite3_stmt*>;
+    auto find_games_with_ids(std::vector<game_id> const& game_ids, search_filter const& filter) const -> result<game_list_result>;
 
     auto update_text_field(game_id game_key, std::string_view column, std::string const& value) -> result<void>;
     auto patch_player(game_id game_key,
