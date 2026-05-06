@@ -337,6 +337,36 @@ auto parse_int32(std::string_view str) -> std::optional<std::int32_t>
     return val;
 }
 
+auto parse_uint64(std::string_view str) -> std::optional<std::uint64_t>
+{
+    if (str.empty()) {
+        return std::nullopt;
+    }
+
+    std::uint64_t val {};
+    auto const [ptr, ec] = std::from_chars(str.data(),
+                                           str.data() + str.size(),  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+                                           val);
+    if (ec != std::errc {} || ptr != str.data() + str.size()) {  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        return std::nullopt;
+    }
+    return val;
+}
+
+auto parse_player_color(std::string_view const value) -> std::optional<motif::db::player_color>
+{
+    if (value == "either") {
+        return motif::db::player_color::either;
+    }
+    if (value == "white") {
+        return motif::db::player_color::white;
+    }
+    if (value == "black") {
+        return motif::db::player_color::black;
+    }
+    return std::nullopt;
+}
+
 auto parse_game_id(std::string_view id_str) -> std::optional<motif::db::game_id>
 {
     if (id_str.empty()) {
@@ -952,8 +982,8 @@ void server::impl::setup_routes()
     svr.Get("/api/games",
             [this](httplib::Request const& req, httplib::Response& res) -> void
             {
-                constexpr std::size_t default_game_list_limit {50};
-                constexpr std::size_t max_game_list_limit {200};
+                constexpr auto default_game_list_limit = motif::db::default_search_limit;
+                constexpr auto max_game_list_limit = motif::db::max_search_limit;
 
                 auto const limit_str = req.get_param_value("limit");
                 auto const offset_str = req.get_param_value("offset");
@@ -979,12 +1009,6 @@ void server::impl::setup_routes()
                     offset = *parsed;
                 }
 
-                if (limit == 0) {
-                    res.set_content("[]", "application/json");
-                    res.status = http_ok;
-                    return;
-                }
-
                 std::optional<std::int32_t> min_elo;
                 std::optional<std::int32_t> max_elo;
                 if (req.has_param("min_elo")) {
@@ -1002,24 +1026,44 @@ void server::impl::setup_routes()
                     }
                 }
 
+                auto color = motif::db::player_color::either;
+                if (req.has_param("color")) {
+                    auto parsed = parse_player_color(req.get_param_value("color"));
+                    if (!parsed) {
+                        set_json_error(res, http_bad_request, "invalid color filter");
+                        return;
+                    }
+                    color = *parsed;
+                }
+
+                std::optional<motif::db::zobrist_hash> position;
+                if (req.has_param("position_hash")) {
+                    auto parsed = parse_uint64(req.get_param_value("position_hash"));
+                    if (!parsed) {
+                        set_json_error(res, http_bad_request, "invalid position hash");
+                        return;
+                    }
+                    position = motif::db::zobrist_hash {*parsed};
+                }
+
                 auto to_filter = [](std::string value) -> std::optional<std::string>
                 { return value.empty() ? std::nullopt : std::optional<std::string> {std::move(value)}; };
-                auto query = motif::db::game_list_query {
-                    .player = req.has_param("player") ? to_filter(req.get_param_value("player")) : std::nullopt,
-                    .result = req.has_param("result") ? to_filter(req.get_param_value("result")) : std::nullopt,
-                    .eco_prefix = req.has_param("eco") ? to_filter(req.get_param_value("eco")) : std::nullopt,
-                    .date_from = req.has_param("date_from") ? to_filter(req.get_param_value("date_from")) : std::nullopt,
-                    .date_to = req.has_param("date_to") ? to_filter(req.get_param_value("date_to")) : std::nullopt,
+                auto filter = motif::db::search_filter {
+                    .player_name = req.has_param("player") ? to_filter(req.get_param_value("player")) : std::nullopt,
+                    .player_color = color,
                     .min_elo = min_elo,
                     .max_elo = max_elo,
-                    .limit = limit,
+                    .result = req.has_param("result") ? to_filter(req.get_param_value("result")) : std::nullopt,
+                    .eco_prefix = req.has_param("eco") ? to_filter(req.get_param_value("eco")) : std::nullopt,
+                    .position = position,
                     .offset = offset,
+                    .limit = limit,
                 };
 
-                auto games = [this, &query]() -> decltype(database.store().list_games(query))
+                auto games = [this, &filter]() -> decltype(database.find_games(filter))
                 {
                     std::scoped_lock const lock {database_mutex};
-                    return database.store().list_games(query);
+                    return database.find_games(filter);
                 }();
                 if (!games) {
                     set_json_error(res, http_internal_error, "game list query failed");

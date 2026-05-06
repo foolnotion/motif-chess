@@ -102,28 +102,104 @@ constexpr int white_elo = 10;
 constexpr int black_elo = 11;
 }  // namespace list_col
 
-namespace list_param
+namespace find_filter_param
 {
-constexpr int player_is_null = 1;
-constexpr int white_player = 2;
-constexpr int black_player = 3;
-constexpr int result_is_null = 4;
-constexpr int result = 5;
-constexpr int eco_is_null = 6;
-constexpr int eco_prefix = 7;
-constexpr int date_from_is_null = 8;
-constexpr int date_from = 9;
-constexpr int date_to_is_null = 10;
-constexpr int date_to = 11;
-constexpr int min_elo_is_null = 12;
-constexpr int min_elo_white = 13;
-constexpr int min_elo_black = 14;
-constexpr int max_elo_is_null = 15;
-constexpr int max_elo_white = 16;
-constexpr int max_elo_black = 17;
-constexpr int limit = 18;
-constexpr int offset = 19;
-}  // namespace list_param
+constexpr int player_name_is_null = 1;
+constexpr int player_color = 2;
+constexpr int white_player_name = 3;
+constexpr int black_player_name = 4;
+constexpr int white_player_name_fallback = 5;
+constexpr int black_player_name_fallback = 6;
+constexpr int result_is_null = 7;
+constexpr int result = 8;
+constexpr int eco_is_null = 9;
+constexpr int eco_prefix = 10;
+constexpr int min_elo_is_null = 11;
+constexpr int min_elo_white = 12;
+constexpr int min_elo_black = 13;
+constexpr int max_elo_is_null = 14;
+constexpr int max_elo_white = 15;
+constexpr int max_elo_black = 16;
+constexpr int limit = 17;
+constexpr int offset = 18;
+constexpr int first_game_id = 17;
+}  // namespace find_filter_param
+
+constexpr std::size_t sqlite_parameter_batch_size {999};
+constexpr std::size_t max_game_list_reserve {501};
+
+auto bind_find_filter(sqlite3_stmt* stmt, search_filter const& filter) -> result<void>
+{
+    // Checked wrappers — bind_optional_text/int discard the SQLite return code
+    // (they are used as void helpers elsewhere), so we inline checked calls here.
+    auto const bind_text = [stmt](int col, std::optional<std::string> const& val) -> int
+    {
+        if (val) {
+            return sqlite3_bind_text(stmt, col, val->c_str(), static_cast<int>(val->size()), SQLITE_TRANSIENT);
+        }
+        return sqlite3_bind_null(stmt, col);
+    };
+    auto const bind_int32 = [stmt](int col, std::optional<std::int32_t> const& val) -> int
+    {
+        if (val) {
+            return sqlite3_bind_int(stmt, col, *val);
+        }
+        return sqlite3_bind_null(stmt, col);
+    };
+
+    if (bind_text(find_filter_param::player_name_is_null, filter.player_name) != SQLITE_OK
+        || sqlite3_bind_int(stmt, find_filter_param::player_color, static_cast<int>(filter.player_color)) != SQLITE_OK
+        || bind_text(find_filter_param::white_player_name, filter.player_name) != SQLITE_OK
+        || bind_text(find_filter_param::black_player_name, filter.player_name) != SQLITE_OK
+        || bind_text(find_filter_param::white_player_name_fallback, filter.player_name) != SQLITE_OK
+        || bind_text(find_filter_param::black_player_name_fallback, filter.player_name) != SQLITE_OK
+        || bind_text(find_filter_param::result_is_null, filter.result) != SQLITE_OK
+        || bind_text(find_filter_param::result, filter.result) != SQLITE_OK
+        || bind_text(find_filter_param::eco_is_null, filter.eco_prefix) != SQLITE_OK
+        || bind_text(find_filter_param::eco_prefix, filter.eco_prefix) != SQLITE_OK
+        || bind_int32(find_filter_param::min_elo_is_null, filter.min_elo) != SQLITE_OK
+        || bind_int32(find_filter_param::min_elo_white, filter.min_elo) != SQLITE_OK
+        || bind_int32(find_filter_param::min_elo_black, filter.min_elo) != SQLITE_OK
+        || bind_int32(find_filter_param::max_elo_is_null, filter.max_elo) != SQLITE_OK
+        || bind_int32(find_filter_param::max_elo_white, filter.max_elo) != SQLITE_OK
+        || bind_int32(find_filter_param::max_elo_black, filter.max_elo) != SQLITE_OK)
+    {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+auto append_position_batches(std::string& sql, std::size_t const game_count) -> void
+{
+    sql += "(";
+    for (std::size_t batch_start = 0; batch_start < game_count; batch_start += sqlite_parameter_batch_size) {
+        if (batch_start > 0) {
+            sql += " OR ";
+        }
+
+        auto const batch_count = std::min(sqlite_parameter_batch_size, game_count - batch_start);
+        sql += "g.id IN (";
+        for (std::size_t index = 0; index < batch_count; ++index) {
+            if (index > 0) {
+                sql += ", ";
+            }
+            sql += "?";
+        }
+        sql += ")";
+    }
+    sql += ")";
+}
+
+auto bind_game_ids(sqlite3_stmt* stmt, std::vector<game_id> const& game_ids, int param_index) -> result<int>
+{
+    for (auto const game_key : game_ids) {
+        if (sqlite3_bind_int64(stmt, param_index, static_cast<sqlite3_int64>(game_key.value)) != SQLITE_OK) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        ++param_index;
+    }
+    return param_index;
+}
 
 // NOLINT(llvm-prefer-static-over-anonymous-namespace): conflicts with
 // misc-use-anonymous-namespace
@@ -166,6 +242,26 @@ constexpr int offset = 19;
         return std::nullopt;
     }
     return static_cast<std::int32_t>(sqlite3_column_int(stmt, col));
+}
+
+auto read_game_list_entry(sqlite3_stmt* stmt) -> game_list_entry
+{
+    auto const* src_type_raw = column_text(stmt, list_col::source_type);
+    auto const* rev_status_raw = column_text(stmt, list_col::review_status);
+    return game_list_entry {
+        .id = motif::db::game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt, list_col::game_id))},
+        .white = column_text(stmt, list_col::white),
+        .black = column_text(stmt, list_col::black),
+        .white_elo = column_optional_int32(stmt, list_col::white_elo),
+        .black_elo = column_optional_int32(stmt, list_col::black_elo),
+        .result = column_text(stmt, list_col::result),
+        .event = column_text(stmt, list_col::event),
+        .date = column_text(stmt, list_col::date),
+        .eco = column_text(stmt, list_col::eco),
+        .source_type = (src_type_raw != nullptr) ? std::string {src_type_raw} : "imported",
+        .source_label = column_optional_text(stmt, list_col::source_label),
+        .review_status = (rev_status_raw != nullptr) ? std::string {rev_status_raw} : "new",
+    };
 }
 
 [[nodiscard]] auto exec(sqlite3* conn, char const* sql) -> result<void>
@@ -672,10 +768,76 @@ auto game_store::get_game_contexts(std::vector<game_id> const& game_ids) const -
     return out;
 }
 
-auto game_store::list_games(game_list_query const& query) const -> result<std::vector<game_list_entry>>
+auto game_store::count_games() const -> result<std::int64_t>
 {
     // language=sql
-    static constexpr char const* sql = R"sql(
+    static constexpr char const* sql = R"sql(SELECT COUNT(*) FROM game)sql";
+    auto stmt = prepare(db_, sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+    int const step_rc = sqlite3_step(stmt->get());
+    if (step_rc != SQLITE_ROW) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return sqlite3_column_int64(stmt->get(), 0);
+}
+
+auto game_store::find_games(search_filter const& filter) const -> result<game_list_result>
+{
+    auto const effective_limit = std::min(filter.limit, max_search_limit);
+    constexpr auto sqlite_max = static_cast<std::size_t>(std::numeric_limits<sqlite3_int64>::max());
+    if (effective_limit > sqlite_max || filter.offset > sqlite_max) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    // Wrap COUNT + SELECT in a single read transaction so total_count is
+    // consistent with the rows returned even under concurrent writes.
+    txn_guard txn {db_};
+    if (!txn.began()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    // language=sql
+    static constexpr char const* count_sql = R"sql(
+        SELECT COUNT(*)
+        FROM game g
+        JOIN player w ON w.id = g.white_id
+        JOIN player b ON b.id = g.black_id
+        LEFT JOIN event e ON e.id = g.event_id
+        WHERE (? IS NULL
+               OR (CASE ?
+                     WHEN 1 THEN instr(lower(w.name), lower(?)) > 0
+                     WHEN 2 THEN instr(lower(b.name), lower(?)) > 0
+                     ELSE instr(lower(w.name), lower(?)) > 0
+                          OR instr(lower(b.name), lower(?)) > 0
+                     END))
+          AND (? IS NULL OR g.result = ?)
+          AND (? IS NULL OR g.eco LIKE ? || '%')
+          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
+          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+    )sql";
+
+    auto count_stmt = prepare(db_, count_sql);
+    if (!count_stmt) {
+        return tl::unexpected {count_stmt.error()};
+    }
+    if (auto bind_res = bind_find_filter(count_stmt->get(), filter); !bind_res) {
+        return tl::unexpected {bind_res.error()};
+    }
+
+    int step_rc = sqlite3_step(count_stmt->get());
+    if (step_rc != SQLITE_ROW) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const total_count = sqlite3_column_int64(count_stmt->get(), 0);
+
+    if (total_count == 0 || effective_limit == 0) {
+        return game_list_result {.games = {}, .total_count = total_count};
+    }
+
+    // language=sql
+    static constexpr char const* data_sql = R"sql(
         SELECT
             g.id,
             w.name,
@@ -693,94 +855,180 @@ auto game_store::list_games(game_list_query const& query) const -> result<std::v
         JOIN player w ON w.id = g.white_id
         JOIN player b ON b.id = g.black_id
         LEFT JOIN event e ON e.id = g.event_id
-        WHERE (? IS NULL OR instr(lower(w.name), lower(?)) > 0 OR instr(lower(b.name), lower(?)) > 0)
+        WHERE (? IS NULL
+               OR (CASE ?
+                     WHEN 1 THEN instr(lower(w.name), lower(?)) > 0
+                     WHEN 2 THEN instr(lower(b.name), lower(?)) > 0
+                     ELSE instr(lower(w.name), lower(?)) > 0
+                          OR instr(lower(b.name), lower(?)) > 0
+                     END))
           AND (? IS NULL OR g.result = ?)
           AND (? IS NULL OR g.eco LIKE ? || '%')
-          AND (? IS NULL OR g.date >= ?)
-          AND (? IS NULL OR g.date <= ?)
-          AND (? IS NULL OR w.elo >= ? OR b.elo >= ?)
-          AND (? IS NULL OR w.elo <= ? OR b.elo <= ?)
+          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
+          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
         ORDER BY g.id ASC
         LIMIT ? OFFSET ?
     )sql";
 
-    auto stmt = prepare(db_, sql);
-    if (!stmt) {
-        return tl::unexpected {stmt.error()};
+    auto data_stmt = prepare(db_, data_sql);
+    if (!data_stmt) {
+        return tl::unexpected {data_stmt.error()};
     }
-
-    constexpr auto sqlite_max = static_cast<std::size_t>(std::numeric_limits<sqlite3_int64>::max());
-    if (query.limit > sqlite_max || query.offset > sqlite_max) {
-        return tl::unexpected {error_code::io_failure};
+    if (auto bind_res = bind_find_filter(data_stmt->get(), filter); !bind_res) {
+        return tl::unexpected {bind_res.error()};
     }
-
-    bind_optional_text(stmt->get(), list_param::player_is_null, query.player);
-    bind_optional_text(stmt->get(), list_param::white_player, query.player);
-    bind_optional_text(stmt->get(), list_param::black_player, query.player);
-    bind_optional_text(stmt->get(), list_param::result_is_null, query.result);
-    bind_optional_text(stmt->get(), list_param::result, query.result);
-    bind_optional_text(stmt->get(), list_param::eco_is_null, query.eco_prefix);
-    bind_optional_text(stmt->get(), list_param::eco_prefix, query.eco_prefix);
-    bind_optional_text(stmt->get(), list_param::date_from_is_null, query.date_from);
-    bind_optional_text(stmt->get(), list_param::date_from, query.date_from);
-    bind_optional_text(stmt->get(), list_param::date_to_is_null, query.date_to);
-    bind_optional_text(stmt->get(), list_param::date_to, query.date_to);
-    bind_optional_int(stmt->get(), list_param::min_elo_is_null, query.min_elo);
-    bind_optional_int(stmt->get(), list_param::min_elo_white, query.min_elo);
-    bind_optional_int(stmt->get(), list_param::min_elo_black, query.min_elo);
-    bind_optional_int(stmt->get(), list_param::max_elo_is_null, query.max_elo);
-    bind_optional_int(stmt->get(), list_param::max_elo_white, query.max_elo);
-    bind_optional_int(stmt->get(), list_param::max_elo_black, query.max_elo);
-    if (sqlite3_bind_int64(stmt->get(), list_param::limit, static_cast<sqlite3_int64>(query.limit)) != SQLITE_OK
-        || sqlite3_bind_int64(stmt->get(), list_param::offset, static_cast<sqlite3_int64>(query.offset)) != SQLITE_OK)
+    if (sqlite3_bind_int64(data_stmt->get(), find_filter_param::limit, static_cast<sqlite3_int64>(effective_limit)) != SQLITE_OK
+        || sqlite3_bind_int64(data_stmt->get(), find_filter_param::offset, static_cast<sqlite3_int64>(filter.offset)) != SQLITE_OK)
     {
         return tl::unexpected {error_code::io_failure};
     }
 
     auto entries = std::vector<game_list_entry> {};
-    static constexpr std::size_t max_reserve {256};
-    entries.reserve(std::min(query.limit, max_reserve));
+    entries.reserve(std::min(effective_limit + 1, max_game_list_reserve));
 
-    int step_rc = SQLITE_ROW;
-    while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
-        auto const* src_type_raw = column_text(stmt->get(), list_col::source_type);
-        auto const* rev_status_raw = column_text(stmt->get(), list_col::review_status);
-        entries.push_back(game_list_entry {
-            .id = motif::db::game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), list_col::game_id))},
-            .white = column_text(stmt->get(), list_col::white),
-            .black = column_text(stmt->get(), list_col::black),
-            .white_elo = column_optional_int32(stmt->get(), list_col::white_elo),
-            .black_elo = column_optional_int32(stmt->get(), list_col::black_elo),
-            .result = column_text(stmt->get(), list_col::result),
-            .event = column_text(stmt->get(), list_col::event),
-            .date = column_text(stmt->get(), list_col::date),
-            .eco = column_text(stmt->get(), list_col::eco),
-            .source_type = (src_type_raw != nullptr) ? std::string {src_type_raw} : "imported",
-            .source_label = column_optional_text(stmt->get(), list_col::source_label),
-            .review_status = (rev_status_raw != nullptr) ? std::string {rev_status_raw} : "new",
-        });
+    while ((step_rc = sqlite3_step(data_stmt->get())) == SQLITE_ROW) {
+        entries.push_back(read_game_list_entry(data_stmt->get()));
     }
 
     if (step_rc != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};
     }
 
-    return entries;
+    if (!txn.commit()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return game_list_result {.games = std::move(entries), .total_count = total_count};
 }
 
-auto game_store::count_games() const -> result<std::int64_t>
+auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, search_filter const& filter) const -> result<game_list_result>
 {
-    // language=sql
-    static constexpr char const* sql = R"sql(SELECT COUNT(*) FROM game)sql";
-    auto stmt = prepare(db_, sql);
-    if (!stmt) {
-        return tl::unexpected {stmt.error()};
+    if (game_ids.empty()) {
+        return game_list_result {.games = {}, .total_count = 0};
     }
-    int const step_rc = sqlite3_step(stmt->get());
+
+    auto const effective_limit = std::min(filter.limit, max_search_limit);
+    constexpr auto sqlite_max = static_cast<std::size_t>(std::numeric_limits<sqlite3_int64>::max());
+    if (effective_limit > sqlite_max || filter.offset > sqlite_max) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    // Wrap COUNT + SELECT in a single read transaction for consistency.
+    txn_guard txn {db_};
+    if (!txn.began()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto count_sql = std::string {R"sql(
+        SELECT COUNT(*)
+        FROM game g
+        JOIN player w ON w.id = g.white_id
+        JOIN player b ON b.id = g.black_id
+        LEFT JOIN event e ON e.id = g.event_id
+        WHERE (? IS NULL
+               OR (CASE ?
+                     WHEN 1 THEN instr(lower(w.name), lower(?)) > 0
+                     WHEN 2 THEN instr(lower(b.name), lower(?)) > 0
+                     ELSE instr(lower(w.name), lower(?)) > 0
+                          OR instr(lower(b.name), lower(?)) > 0
+                     END))
+          AND (? IS NULL OR g.result = ?)
+          AND (? IS NULL OR g.eco LIKE ? || '%')
+          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
+          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+          AND )sql"};
+    append_position_batches(count_sql, game_ids.size());
+
+    auto count_stmt = prepare(db_, count_sql.c_str());
+    if (!count_stmt) {
+        return tl::unexpected {count_stmt.error()};
+    }
+    if (auto bind_res = bind_find_filter(count_stmt->get(), filter); !bind_res) {
+        return tl::unexpected {bind_res.error()};
+    }
+    auto next_param = bind_game_ids(count_stmt->get(), game_ids, find_filter_param::first_game_id);
+    if (!next_param) {
+        return tl::unexpected {next_param.error()};
+    }
+
+    int step_rc = sqlite3_step(count_stmt->get());
     if (step_rc != SQLITE_ROW) {
         return tl::unexpected {error_code::io_failure};
     }
-    return sqlite3_column_int64(stmt->get(), 0);
+    auto const total_count = sqlite3_column_int64(count_stmt->get(), 0);
+
+    if (total_count == 0 || effective_limit == 0) {
+        return game_list_result {.games = {}, .total_count = total_count};
+    }
+
+    auto data_sql = std::string {R"sql(
+        SELECT
+            g.id,
+            w.name,
+            b.name,
+            COALESCE(g.result, ''),
+            COALESCE(e.name, ''),
+            COALESCE(g.date, ''),
+            COALESCE(g.eco, ''),
+            COALESCE(g.source_type, 'imported'),
+            g.source_label,
+            COALESCE(g.review_status, 'new'),
+            w.elo,
+            b.elo
+        FROM game g
+        JOIN player w ON w.id = g.white_id
+        JOIN player b ON b.id = g.black_id
+        LEFT JOIN event e ON e.id = g.event_id
+        WHERE (? IS NULL
+               OR (CASE ?
+                     WHEN 1 THEN instr(lower(w.name), lower(?)) > 0
+                     WHEN 2 THEN instr(lower(b.name), lower(?)) > 0
+                     ELSE instr(lower(w.name), lower(?)) > 0
+                          OR instr(lower(b.name), lower(?)) > 0
+                     END))
+          AND (? IS NULL OR g.result = ?)
+          AND (? IS NULL OR g.eco LIKE ? || '%')
+          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
+          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+          AND )sql"};
+    append_position_batches(data_sql, game_ids.size());
+    data_sql += R"sql(
+        ORDER BY g.id ASC
+        LIMIT ? OFFSET ?
+    )sql";
+
+    auto data_stmt = prepare(db_, data_sql.c_str());
+    if (!data_stmt) {
+        return tl::unexpected {data_stmt.error()};
+    }
+
+    if (auto bind_res = bind_find_filter(data_stmt->get(), filter); !bind_res) {
+        return tl::unexpected {bind_res.error()};
+    }
+    next_param = bind_game_ids(data_stmt->get(), game_ids, find_filter_param::first_game_id);
+    if (!next_param) {
+        return tl::unexpected {next_param.error()};
+    }
+    if (sqlite3_bind_int64(data_stmt->get(), *next_param, static_cast<sqlite3_int64>(effective_limit)) != SQLITE_OK
+        || sqlite3_bind_int64(data_stmt->get(), *next_param + 1, static_cast<sqlite3_int64>(filter.offset)) != SQLITE_OK)
+    {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto entries = std::vector<game_list_entry> {};
+    entries.reserve(std::min(effective_limit + 1, max_game_list_reserve));
+
+    while ((step_rc = sqlite3_step(data_stmt->get())) == SQLITE_ROW) {
+        entries.push_back(read_game_list_entry(data_stmt->get()));
+    }
+
+    if (step_rc != SQLITE_DONE) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    if (!txn.commit()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return game_list_result {.games = std::move(entries), .total_count = total_count};
 }
 
 auto game_store::remove(game_id const game_key) -> result<void>

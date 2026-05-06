@@ -32,6 +32,8 @@ class position_store
         -> result<void>;
     auto count_by_zobrist(zobrist_hash hash) const -> result<std::int64_t>;
     auto count_distinct_games_by_zobrist(zobrist_hash hash) const -> result<std::int64_t>;
+    // Ordered by game_id for deterministic downstream pagination.
+    auto distinct_game_ids_by_zobrist(zobrist_hash hash) const -> result<std::vector<game_id>>;
 
   private:
     duckdb_connection con_;

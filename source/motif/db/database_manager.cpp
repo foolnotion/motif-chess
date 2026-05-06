@@ -531,6 +531,26 @@ auto database_manager::remove_game(game_id const game_key) -> result<void>
     return store_->remove(game_key);
 }
 
+auto database_manager::find_games(search_filter const& filter) -> result<game_list_result>
+{
+    if (!positions_ || !store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    if (!filter.position.has_value()) {
+        return store_->find_games(filter);
+    }
+
+    auto game_ids = positions_->distinct_game_ids_by_zobrist(*filter.position);
+    if (!game_ids) {
+        return tl::unexpected {game_ids.error()};
+    }
+
+    auto metadata_filter = filter;
+    metadata_filter.position.reset();
+    return store_->find_games_with_ids(*game_ids, metadata_filter);
+}
+
 auto database_manager::sort_positions() -> result<void>
 {
     if (duck_con_ == nullptr || !positions_) {
