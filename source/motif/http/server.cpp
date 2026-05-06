@@ -46,6 +46,13 @@
 #include "motif/search/opening_stats.hpp"
 #include "motif/search/position_search.hpp"
 
+template<>
+struct glz::meta<motif::db::game_id>
+{
+    using T = motif::db::game_id;  // NOLINT(readability-identifier-naming) — glaze convention
+    static constexpr auto value = &T::value;
+};
+
 // These structs must live in a named namespace — glaze reflection cannot
 // resolve types in anonymous namespaces (no external linkage).
 namespace motif::http::detail
