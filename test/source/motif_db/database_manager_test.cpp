@@ -566,7 +566,139 @@ TEST_CASE("database_manager::remove_game returns not_found for absent id", "[mot
     CHECK(res.error() == motif::db::error_code::not_found);
 }
 
-// ── manifest: game_count and dirty flag
+TEST_CASE("database_manager::find_games intersects position and metadata filters", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"find_games_position"};
+
+    auto mgr = motif::db::database_manager::create(tdir.path, "find-games-position-db");
+    REQUIRE(mgr.has_value());
+
+    chesslib::move e2e4 {};
+    e2e4.source_square = chesslib::square::e2;
+    e2e4.target_square = chesslib::square::e4;
+    e2e4.double_pawn = 1;
+
+    chesslib::move d2d4 {};
+    d2d4.source_square = chesslib::square::d2;
+    d2d4.target_square = chesslib::square::d4;
+    d2d4.double_pawn = 1;
+
+    auto matching_game = motif::db::game {
+        .white = {.name = "Magnus Carlsen", .elo = 2830, .title = {}, .country = {}},
+        .black = {.name = "Ian Nepomniachtchi", .elo = 2795, .title = {}, .country = {}},
+        .event_details = {},
+        .date = "2024.01.01",
+        .result = "1-0",
+        .eco = "B90",
+        .moves = {chesslib::codec::encode(e2e4)},
+        .extra_tags = {},
+        .provenance = {},
+    };
+    auto wrong_player = motif::db::game {
+        .white = {.name = "Fabiano Caruana", .elo = 2780, .title = {}, .country = {}},
+        .black = {.name = "Ding Liren", .elo = 2760, .title = {}, .country = {}},
+        .event_details = {},
+        .date = "2024.01.02",
+        .result = "1-0",
+        .eco = "B90",
+        .moves = {chesslib::codec::encode(e2e4)},
+        .extra_tags = {},
+        .provenance = {},
+    };
+    auto wrong_position = motif::db::game {
+        .white = {.name = "Magnus Carlsen", .elo = 2830, .title = {}, .country = {}},
+        .black = {.name = "Hikaru Nakamura", .elo = 2800, .title = {}, .country = {}},
+        .event_details = {},
+        .date = "2024.01.03",
+        .result = "1-0",
+        .eco = "B90",
+        .moves = {chesslib::codec::encode(d2d4)},
+        .extra_tags = {},
+        .provenance = {},
+    };
+
+    auto const matching_id = mgr->store().insert(matching_game);
+    REQUIRE(matching_id.has_value());
+    REQUIRE(mgr->store().insert(wrong_player).has_value());
+    REQUIRE(mgr->store().insert(wrong_position).has_value());
+    REQUIRE(mgr->rebuild_position_store().has_value());
+
+    auto board = chesslib::board {};
+    chesslib::move_maker {board, e2e4}.make();
+
+    auto games = mgr->find_games(motif::db::search_filter {
+        .player_name = "Carlsen",
+        .player_color = motif::db::player_color::either,
+        .min_elo = {},
+        .max_elo = {},
+        .result = {},
+        .eco_prefix = {},
+        .position = motif::db::zobrist_hash {board.hash()},
+    });
+    REQUIRE(games.has_value());
+    REQUIRE(games->games.size() == 1);
+    CHECK(games->total_count == 1);
+    CHECK(games->games.front().id == *matching_id);
+}
+
+TEST_CASE("database_manager::find_games handles >999 position IDs via batched IN clause",
+          "[motif-db][database_manager]")  // NOLINT(readability-function-cognitive-complexity)
+{
+    // AC6: batching at 999 must be exercised. Insert 1001 games all starting
+    // with 1.e4 so that the position store returns >999 matching IDs.
+    tmp_dir const tdir {"find_games_batch"};
+    auto mgr = motif::db::database_manager::create(tdir.path, "find-games-batch-db");
+    REQUIRE(mgr.has_value());
+
+    chesslib::move e2e4 {};
+    e2e4.source_square = chesslib::square::e2;
+    e2e4.target_square = chesslib::square::e4;
+    e2e4.double_pawn = 1;
+
+    constexpr std::size_t game_count {1001};
+    constexpr std::size_t expected_page {500};
+
+    auto const insert_game = [&](std::size_t index) -> void
+    {
+        auto game_rec = motif::db::game {
+            .white = {.name = "W" + std::to_string(index), .elo = {}, .title = {}, .country = {}},
+            .black = {.name = "B" + std::to_string(index), .elo = {}, .title = {}, .country = {}},
+            .event_details = {},
+            .date = {},
+            .result = "1-0",
+            .eco = {},
+            .moves = {chesslib::codec::encode(e2e4)},
+            .extra_tags = {},
+            .provenance = {},
+        };
+        REQUIRE(mgr->store().insert(game_rec).has_value());
+    };
+
+    for (std::size_t index = 0; index < game_count; ++index) {
+        insert_game(index);
+    }
+    REQUIRE(mgr->rebuild_position_store().has_value());
+
+    auto board = chesslib::board {};
+    chesslib::move_maker {board, e2e4}.make();
+
+    auto const games = mgr->find_games(motif::db::search_filter {
+        .player_name = {},
+        .player_color = motif::db::player_color::either,
+        .min_elo = {},
+        .max_elo = {},
+        .result = {},
+        .eco_prefix = {},
+        .position = motif::db::zobrist_hash {board.hash()},
+        .offset = 0,
+        .limit = expected_page,
+    });
+    REQUIRE(games.has_value());
+    // 1001 games match the position; limit=500 so we get 500 rows but total_count must reflect all.
+    CHECK(games->games.size() == expected_page);
+    CHECK(games->total_count == static_cast<std::int64_t>(game_count));  // NOLINT(modernize-use-integer-sign-comparison)
+}
+
 // ──────────────────────────────────────
 
 TEST_CASE("database_manager::close persists game_count in manifest", "[motif-db][database_manager]")

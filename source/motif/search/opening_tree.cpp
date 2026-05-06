@@ -332,13 +332,15 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
         if (parent_it == board_at_hash.end()) {
             return tl::unexpected {error_code::io_failure};
         }
-        auto const& parent_board = parent_it->second;
+        // Copy before inserting into the same flat_hash_map; emplace may rehash
+        // and invalidate references to existing values.
+        auto const parent_board = parent_it->second;
         auto const& nag = node_aggregates.at(nkey);
         for (auto const& [enc, agg] : nag.continuations) {
             if (!board_at_hash.contains(agg.result_hash)) {
                 auto child_board = parent_board;
                 motif::chess::apply_encoded_move(child_board, enc);
-                board_at_hash.emplace(agg.result_hash, std::move(child_board));
+                board_at_hash.emplace(agg.result_hash, child_board);
             }
         }
     }

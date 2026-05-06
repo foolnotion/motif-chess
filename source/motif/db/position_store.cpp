@@ -444,4 +444,24 @@ auto position_store::count_distinct_games_by_zobrist(zobrist_hash const hash) co
     return duckdb_value_int64(&guard.res, 0, 0);
 }
 
+auto position_store::distinct_game_ids_by_zobrist(zobrist_hash const hash) const -> result<std::vector<game_id>>
+{
+    std::ostringstream sql;
+    sql << "SELECT DISTINCT game_id FROM position WHERE zobrist_hash = CAST(" << hash.value << " AS UBIGINT) ORDER BY game_id";
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const nrows = static_cast<std::size_t>(duckdb_row_count(&guard.res));
+    auto game_ids = std::vector<game_id> {};
+    game_ids.reserve(nrows);
+    for (std::size_t index = 0; index < nrows; ++index) {
+        game_ids.push_back(game_id {duckdb_value_uint32(&guard.res, 0, static_cast<idx_t>(index))});
+    }
+
+    return game_ids;
+}
+
 }  // namespace motif::db

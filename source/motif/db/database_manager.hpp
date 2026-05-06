@@ -72,6 +72,11 @@ class database_manager
     // Returns error_code::not_found if the game does not exist.
     auto remove_game(game_id game_key) -> result<void>;
 
+    // Filtered game list with cross-store position support.
+    // When filter.position is set, queries DuckDB for matching game IDs first,
+    // then applies metadata filters in SQLite.
+    auto find_games(search_filter const& filter) -> result<game_list_result>;
+
     // Drop and repopulate the DuckDB position table from all games in SQLite.
     auto rebuild_position_store(bool sort_by_zobrist = true) -> result<void>;
 
