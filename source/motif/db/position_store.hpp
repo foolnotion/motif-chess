@@ -26,7 +26,7 @@ class position_store
     auto query_by_zobrist(zobrist_hash hash, std::size_t limit = 0, std::size_t offset = 0) const -> result<std::vector<position_match>>;
     auto query_tree_slice(zobrist_hash root_hash, std::uint16_t max_depth) const -> result<std::vector<tree_position_row>>;
     auto query_opening_stats(zobrist_hash hash) const -> result<std::vector<opening_stat_agg_row>>;
-    auto sample_zobrist_hashes(std::size_t limit, std::uint64_t seed = 0) const -> result<std::vector<std::uint64_t>>;
+    auto sample_zobrist_hashes(std::size_t limit, std::uint64_t seed = 0) const -> result<std::vector<zobrist_hash>>;
     auto delete_by_game_id(game_id game_key) -> result<void>;
     auto update_elo_for_game(game_id game_key, std::optional<std::int16_t> new_white_elo, std::optional<std::int16_t> new_black_elo)
         -> result<void>;

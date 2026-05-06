@@ -182,14 +182,14 @@ auto load_position_rows(std::filesystem::path const& path) -> std::vector<stored
     return rows;
 }
 
-auto expected_hashes(std::vector<pgn::move_node> const& moves) -> std::vector<std::uint64_t>
+auto expected_hashes(std::vector<pgn::move_node> const& moves) -> std::vector<motif::db::zobrist_hash>
 {
     auto board = chesslib::board {};
-    auto hashes = std::vector<std::uint64_t> {};
+    auto hashes = std::vector<motif::db::zobrist_hash> {};
     hashes.reserve(moves.size() + 1);
 
     // Starting position (ply = 0)
-    hashes.push_back(board.hash());
+    hashes.push_back(motif::db::zobrist_hash {board.hash()});
 
     for (auto const& move_node : moves) {
         auto move = chesslib::san::from_string(board, move_node.san);
@@ -198,7 +198,7 @@ auto expected_hashes(std::vector<pgn::move_node> const& moves) -> std::vector<st
         }
         chesslib::move_maker maker {board, *move};
         maker.make();
-        hashes.push_back(board.hash());
+        hashes.push_back(motif::db::zobrist_hash {board.hash()});
     }
 
     return hashes;
@@ -236,13 +236,13 @@ auto check_stored_game(motif::db::game const& stored_game, std::size_t move_coun
 }
 
 auto check_stored_positions(std::vector<stored_position_row> const& positions,
-                            std::vector<std::uint64_t> const& hashes,
-                            std::uint32_t game_id) -> void
+                            std::vector<motif::db::zobrist_hash> const& hashes,
+                            motif::db::game_id const game_id) -> void
 {
     require_test(positions.size() == hashes.size(), "stored position count mismatch");
     for (std::size_t index = 0; index < positions.size(); ++index) {
-        require_test(positions[index].zobrist_hash == hashes[index], "zobrist hash mismatch");
-        require_test(positions[index].game_id == game_id, "game id mismatch");
+        require_test(positions[index].zobrist_hash == hashes[index].value, "zobrist hash mismatch");
+        require_test(positions[index].game_id == game_id.value, "game id mismatch");
         require_test(positions[index].ply == static_cast<std::uint16_t>(index), "ply mismatch");
         require_test(positions[index].result == 0, "result mismatch");
         require_test(positions[index].white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_white_elo)},
@@ -353,8 +353,8 @@ TEST_CASE("import_worker: second game with same player reuses player row", "[mot
     CHECK(player_count_after_second == player_count_after_first);
 
     // Verify two distinct games are stored
-    auto game1_res = mgr.store().get(1);
-    auto game2_res = mgr.store().get(2);
+    auto game1_res = mgr.store().get(motif::db::game_id {1});
+    auto game2_res = mgr.store().get(motif::db::game_id {2});
     REQUIRE(game1_res.has_value());
     REQUIRE(game2_res.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -384,7 +384,7 @@ TEST_CASE("import_worker: duplicate game returns error_code::duplicate", "[motif
     CHECK(dup_res.error() == motif::import::error_code::duplicate);
 
     // No additional game row was inserted
-    auto missing = mgr.store().get(2);
+    auto missing = mgr.store().get(motif::db::game_id {2});
     CHECK_FALSE(missing.has_value());
 
     mgr.close();
@@ -436,7 +436,7 @@ TEST_CASE("import_worker: illegal SAN returns parse_error, no row inserted", "[m
     CHECK(res.error() == motif::import::error_code::parse_error);
 
     // No game row was inserted
-    auto missing = mgr.store().get(1);
+    auto missing = mgr.store().get(motif::db::game_id {1});
     CHECK_FALSE(missing.has_value());
 
     mgr.close();

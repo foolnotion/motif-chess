@@ -51,7 +51,7 @@ struct tmp_dir
     auto operator=(tmp_dir&&) -> tmp_dir& = delete;
 };
 
-auto hash_after_sans(std::initializer_list<char const*> sans) -> std::uint64_t
+auto hash_after_sans(std::initializer_list<char const*> sans) -> motif::db::zobrist_hash
 {
     auto board = chesslib::board {};
     for (char const* const san : sans) {
@@ -60,7 +60,7 @@ auto hash_after_sans(std::initializer_list<char const*> sans) -> std::uint64_t
         chesslib::move_maker maker {board, *move};
         maker.make();
     }
-    return board.hash();
+    return motif::db::zobrist_hash {board.hash()};
 }
 
 auto encode_moves(std::initializer_list<char const*> sans) -> std::vector<std::uint16_t>
@@ -180,7 +180,7 @@ struct query_latency_result
 };
 
 auto measure_query_latencies(motif::db::database_manager const& manager,
-                             std::vector<std::uint64_t> const& sample_hashes,
+                             std::vector<motif::db::zobrist_hash> const& sample_hashes,
                              std::string_view const variant_name) -> query_latency_result
 {
     std::vector<double> latencies_us;
@@ -472,7 +472,7 @@ TEST_CASE("opening_stats::query from starting position on real corpus", "[perfor
 
     constexpr auto startpos_elapsed_limit_ms = 200.0;
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
     auto const query_start = std::chrono::steady_clock::now();
     auto stats_res = motif::search::opening_stats::query(*manager, start_hash);
     auto const elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - query_start).count();
@@ -512,7 +512,7 @@ TEST_CASE("opening_stats::query total_games counts unique game ids", "[motif-sea
     auto manager = motif::db::database_manager::create(tdir.path, "total-games-db");
     REQUIRE(manager.has_value());
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
     insert_games_and_rebuild(*manager,
                              {
@@ -556,7 +556,7 @@ TEST_CASE("opening_stats::query total_games excludes duplicate position rows", "
     auto manager = motif::db::database_manager::create(tdir.path, "dedup-db");
     REQUIRE(manager.has_value());
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
     insert_games_and_rebuild(*manager,
                              {
@@ -599,7 +599,7 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
     auto manager = motif::db::database_manager::create(tdir.path, "del-db");
     REQUIRE(manager.has_value());
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
     auto game1_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3"},
                                                        .result = "1-0",
@@ -645,7 +645,7 @@ TEST_CASE("opening_stats::query orphaned rows inflate counts until position stor
     auto manager = motif::db::database_manager::create(tdir.path, "orphan-total-db");
     REQUIRE(manager.has_value());
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
     auto game1_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3"},
                                                        .result = "1-0",
@@ -789,7 +789,7 @@ TEST_CASE("rebuild_position_store makes total_games consistent with game count",
     auto manager = motif::db::database_manager::create(tdir.path, "rebuild-db");
     REQUIRE(manager.has_value());
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
     constexpr int game_count {5};
     constexpr int base_white_elo {2000};

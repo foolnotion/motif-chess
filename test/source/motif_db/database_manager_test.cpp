@@ -225,7 +225,7 @@ TEST_CASE("database_manager::open does not recreate tables (idempotent open)", "
         .provenance = {},
     };
 
-    std::uint32_t game_id {};
+    auto game_id = motif::db::game_id {};
     {
         auto mgr = motif::db::database_manager::create(tdir.path, "persist-db");
         REQUIRE(mgr.has_value());
@@ -265,7 +265,7 @@ TEST_CASE("database_manager: bundle copied to another directory opens successful
         .provenance = {},
     };
 
-    std::uint32_t game_id {};
+    auto game_id = motif::db::game_id {};
     {
         auto mgr = motif::db::database_manager::create(src_dir.path, "portable-db");
         REQUIRE(mgr.has_value());
@@ -559,7 +559,7 @@ TEST_CASE("database_manager::remove_game returns not_found for absent id", "[mot
     auto mgr = motif::db::database_manager::create(tdir.path, "remove-nf-db");
     REQUIRE(mgr.has_value());
 
-    constexpr std::uint32_t absent_id = 99999U;
+    auto const absent_id = motif::db::game_id {99999U};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto const res = mgr->remove_game(absent_id);
     REQUIRE_FALSE(res.has_value());
@@ -694,7 +694,7 @@ TEST_CASE("database_manager::patch_game_metadata syncs elo to DuckDB position ro
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_store().has_value());
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
     // Verify initial elos are in DuckDB.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -768,7 +768,7 @@ TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
 
-    auto const start_hash = chesslib::board {}.hash();
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto rows = mgr->positions().query_by_zobrist(start_hash);
     REQUIRE(rows.has_value());
