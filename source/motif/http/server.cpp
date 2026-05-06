@@ -412,27 +412,6 @@ auto generate_import_id() -> std::string
     return fmt::format("{:016x}{:016x}", high, low);
 }
 
-// Extract "from" and "to" square names from a UCI string (e.g. "e2e4" → "e2", "e4").
-// Returns nullopt if the UCI string is too short to be valid.
-auto uci_squares(std::string const& uci_str) -> std::optional<std::pair<std::string, std::string>>
-{
-    if (uci_str.size() < 4) {
-        return std::nullopt;
-    }
-    return std::pair<std::string, std::string> {uci_str.substr(0, 2), uci_str.substr(2, 2)};
-}
-
-// Extract promotion character from UCI string if present (5th char: q/r/b/n).
-auto uci_promotion(std::string const& uci_str) -> std::optional<std::string>
-{
-    constexpr std::size_t uci_promotion_length {5};
-    constexpr std::size_t uci_promotion_index {4};
-    if (uci_str.size() >= uci_promotion_length) {
-        return std::string {uci_str[uci_promotion_index]};
-    }
-    return std::nullopt;
-}
-
 auto is_valid_uci_syntax(std::string const& uci_str) -> bool
 {
     constexpr std::size_t uci_move_length {4};
@@ -814,7 +793,7 @@ void server::impl::setup_routes()
                      return;
                  }
 
-                 auto board = *board_result;
+                 auto board = std::move(*board_result);
                  auto move_result = motif::chess::apply_uci(board, req_body.uci);
                  if (!move_result) {
                      set_json_error(res, http_bad_request, "illegal move");

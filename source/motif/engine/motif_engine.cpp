@@ -77,7 +77,7 @@ auto pv_to_san(std::string_view start_fen, std::vector<std::string> const& pv_uc
     if (!board_result) {
         return {};
     }
-    auto board = *board_result;
+    auto board = std::move(*board_result);
     std::vector<std::string> san_list;
     for (auto const& uci_str : pv_uci) {
         auto move_result = motif::chess::apply_uci(board, uci_str);
