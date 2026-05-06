@@ -112,6 +112,10 @@
 
 ## Deferred from: code review of 4-1-engine-configuration-lifecycle (2026-04-29)
 
+## Deferred from: code review of 3b-1-search-filter-model-and-filtered-game-list (2026-05-06)
+
+- `database_manager::find_games` releases the mutex between the DuckDB call and the SQLite call — safe for current single-HTTP-request callers (server holds `database_mutex` over the entire call) but fragile if called from future internal paths without a lock [source/motif/db/database_manager.cpp:88-101]
+
 - ~~AC7 crash/error handling requires upstream `ucilib` support~~ — **resolved 2026-04-29**:
   `uci::engine::on_error(error_callback)` merged to ucilib
   (`github:foolnotion/ucilib/0926064e62f46f78366373c96c68abcf6d28fb95`); Story 4.2 wires it.
