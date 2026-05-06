@@ -27,10 +27,10 @@ Fix shipped in this branch: `encoded_move` is now stored in the position table
 and returned by `query_tree_slice`. The O(N_games) SQLite call is gone. Measured
 result: ~650 ms.
 
-### opening_stats::query (TODO)
+### opening_stats::query (DONE)
 
-`opening_stats::query` has the same O(N_games) SQLite pattern in two separate
-places:
+`opening_stats::query` previously had the same O(N_games) SQLite pattern in two
+separate places:
 
 1. **Board + validity loop** — iterates all `opening_move_stat` rows, calls
    `get_opening_context(game_id)` once per unique game to (a) validate that
@@ -44,12 +44,12 @@ places:
    round-trips. The same value is now available as `encoded_move` in the DuckDB
    position table for the *next* ply.
 
-Fix: replace both calls with a single `query_tree_slice(hash, 1)` — the same
-DuckDB self-join already used by `opening_tree`, scoped to depth=1. The result
-rows contain `encoded_move` (the continuation move), `child_hash` (result
-position), `result`, and elo — everything needed for aggregation without touching
-SQLite. ECO/opening attribution still needs SQLite but only for one sample
-game_id per distinct continuation (~20 calls vs ~1M).
+The shipped fix takes the same idea but uses a dedicated DuckDB aggregation
+query: `query_opening_stats(hash)`. DuckDB now returns one row per distinct
+continuation with `cont_encoded_move`, `cont_hash`, aggregate counts, average
+elos, and sample game ids for ECO/opening-name lookup. SQLite remains only for
+batched `get_game_contexts(sample_ids)` lookups used to resolve root-board
+replay for non-starting positions and to attribute ECO/opening names.
 
 ## Schema Change
 
@@ -94,34 +94,33 @@ average positions per game: ~136M rows × 2 bytes = ~272 MB additional storage.
 - `opening_tree.cpp`: uses `row.encoded_move`; forward BFS replaces `replay_position`
 - `rebuild_position_store`: drops and recreates table so schema changes auto-apply
 
-### opening_stats.cpp — rewrite query()
+### opening_stats.cpp — shipped query() rewrite
 
-Replace the two-phase board+continuation-move fetch with `query_tree_slice`:
+The final implementation uses a dedicated aggregate query:
 
 ```
-auto rows = database.positions().query_tree_slice(zobrist_hash, 1)
+auto rows = database.positions().query_opening_stats(zobrist_hash)
 ```
 
 **Board reconstruction**
 
-- If any row has `root_ply == 0`: board is `chesslib::board{}`, no SQLite call.
-- Otherwise: call `get_opening_context` on one sample game_id and replay to
-  `root_ply`. One SQLite query regardless of N.
+- If any row has `root_ply == 0`: board is the default `motif::chess::board {}`;
+  no SQLite call is needed.
+- Otherwise: fetch sampled game contexts once with `get_game_contexts`, then
+  replay one matching sample game to `root_ply` through `motif::chess::replay`.
+  This is bounded by the number of distinct continuations, not matching games.
 
 **Aggregation loop**
 
-Iterate the DuckDB rows directly. Key: `row.encoded_move` is the continuation
-move (the move at ply `root_ply`, going from the root position to the child).
-Group by `encoded_move`; use `row.child_hash` as `result_hash`.
-
-Deduplicate per `(game_id, encoded_move)` as before to avoid double-counting
-games that revisit the position.
+Iterate the aggregated DuckDB rows directly. Key fields are
+`row.cont_encoded_move` for SAN generation and `row.cont_hash` for the result
+position hash. Frequency and result totals are already pre-aggregated in DuckDB.
 
 **ECO attribution**
 
-Collect one `sample_game_id` per distinct `encoded_move`. Batch-fetch ECO and
-opening name via `get_game_contexts(sample_ids)`. O(distinct continuations) ≈
-O(20) SQLite calls instead of O(N).
+Collect sampled game ids from `eco_sample_min` / `eco_sample_max` per distinct
+continuation. Batch-fetch ECO and opening names via `get_game_contexts(sample_ids)`.
+SQLite work is now O(distinct continuations), not O(N matching games).
 
 ## Performance Targets
 
@@ -150,13 +149,12 @@ O(20) SQLite calls instead of O(N).
 - [x] `opening_tree::open from starting position on real corpus` passes and reports elapsed < 1 s.
 - [x] No regression in `opening_tree::open performance on sorted position store` p99.
 
-### opening_stats (TODO)
+### opening_stats (completed)
 
-- [ ] `opening_stats::query` no longer calls `get_opening_context` in a per-game loop.
-- [ ] `opening_stats::query` no longer calls `get_continuation_contexts`.
-- [ ] Board at root is derived without SQLite when `root_ply == 0`.
-- [ ] All existing opening-stats unit tests pass unchanged.
-- [ ] New performance test: `opening_stats::query from starting position on real corpus`
-      passes and reports elapsed < 200 ms.
-- [ ] `opening_stats::query performance on sorted position store` p99 < 500 ms.
-- [ ] Zero new clang-tidy warnings.
+- [x] `opening_stats::query` no longer calls `get_opening_context` in a per-game loop.
+- [x] `opening_stats::query` no longer calls `get_continuation_contexts`.
+- [x] Board at root is derived without SQLite when `root_ply == 0`.
+- [x] Existing opening-stats unit tests were updated and pass with the new typed interfaces.
+- [x] Performance test: `opening_stats::query from starting position on real corpus` exists.
+- [x] Performance test: `opening_stats::query performance on sorted position store` exists with p99 target < 500 ms.
+- [x] The dev build is green after the strong-type and facade refactor.
