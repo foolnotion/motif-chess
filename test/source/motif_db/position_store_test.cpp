@@ -1,10 +1,12 @@
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
 #include "motif/db/position_store.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <duckdb.h>
 
 #include "motif/db/types.hpp"
@@ -43,6 +45,54 @@ struct duck_fixture
         }
     }
 };
+
+auto make_opening_rows() -> std::vector<motif::db::position_row>
+{
+    return {
+        {.zobrist_hash = motif::db::zobrist_hash {100U},
+         .game_id = motif::db::game_id {1U},
+         .ply = 0,
+         .encoded_move = 0U,
+         .result = 1,
+         .white_elo = 2500,
+         .black_elo = 2400},
+        {.zobrist_hash = motif::db::zobrist_hash {200U},
+         .game_id = motif::db::game_id {1U},
+         .ply = 1,
+         .encoded_move = 10U,
+         .result = 1,
+         .white_elo = 2500,
+         .black_elo = 2400},
+        {.zobrist_hash = motif::db::zobrist_hash {300U},
+         .game_id = motif::db::game_id {1U},
+         .ply = 2,
+         .encoded_move = 11U,
+         .result = 1,
+         .white_elo = 2500,
+         .black_elo = 2400},
+        {.zobrist_hash = motif::db::zobrist_hash {100U},
+         .game_id = motif::db::game_id {2U},
+         .ply = 0,
+         .encoded_move = 0U,
+         .result = -1,
+         .white_elo = 2200,
+         .black_elo = 2100},
+        {.zobrist_hash = motif::db::zobrist_hash {201U},
+         .game_id = motif::db::game_id {2U},
+         .ply = 1,
+         .encoded_move = 20U,
+         .result = -1,
+         .white_elo = 2200,
+         .black_elo = 2100},
+        {.zobrist_hash = motif::db::zobrist_hash {301U},
+         .game_id = motif::db::game_id {2U},
+         .ply = 2,
+         .encoded_move = 21U,
+         .result = -1,
+         .white_elo = 2200,
+         .black_elo = 2100},
+    };
+}
 
 }  // namespace
 
@@ -163,4 +213,60 @@ TEST_CASE("position_store round-trip: insert then query columns directly", "[mot
     CHECK(duckdb_value_int16(&qres, 5, 0) == *row.black_elo);
 
     duckdb_destroy_result(&qres);
+}
+
+TEST_CASE("position_store::count_distinct_games_by_zobrist filters by game ids", "[motif-db][position_store]")
+{
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+
+    auto const rows = make_opening_rows();
+    REQUIRE(fix.store.insert_batch(rows).has_value());
+
+    auto const count = fix.store.count_distinct_games_by_zobrist(motif::db::zobrist_hash {100U},
+                                                                 std::vector<motif::db::game_id> {
+                                                                     motif::db::game_id {1U},
+                                                                 });
+    REQUIRE(count.has_value());
+    CHECK(*count == 1);
+}
+
+TEST_CASE("position_store::query_opening_stats filtered computes elo_weighted_score", "[motif-db][position_store]")
+{
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+
+    auto const rows = make_opening_rows();
+    REQUIRE(fix.store.insert_batch(rows).has_value());
+
+    auto const stats = fix.store.query_opening_stats(motif::db::zobrist_hash {100U},
+                                                     std::vector<motif::db::game_id> {
+                                                         motif::db::game_id {1U},
+                                                     });
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->size() == 1);
+    CHECK(stats->front().frequency == 1U);
+    REQUIRE(stats->front().elo_weighted_score.has_value());
+    CHECK_THAT(*stats->front().elo_weighted_score, Catch::Matchers::WithinAbs(1.0, 0.001));
+}
+
+TEST_CASE("position_store::query_tree_slice filtered returns only requested games", "[motif-db][position_store]")
+{
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+
+    auto const rows = make_opening_rows();
+    REQUIRE(fix.store.insert_batch(rows).has_value());
+
+    auto const slice = fix.store.query_tree_slice(motif::db::zobrist_hash {100U},
+                                                  2U,
+                                                  std::vector<motif::db::game_id> {
+                                                      motif::db::game_id {2U},
+                                                  });
+    REQUIRE(slice.has_value());
+    REQUIRE(slice->size() == 2);
+    CHECK(slice->at(0).game_id == motif::db::game_id {2U});
+    CHECK(slice->at(0).depth == 1U);
+    CHECK(slice->at(1).game_id == motif::db::game_id {2U});
+    CHECK(slice->at(1).depth == 2U);
 }

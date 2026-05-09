@@ -55,5 +55,6 @@ struct tree
                         std::size_t prefetch_depth = default_prefetch_depth) -> result<tree>;
 
 [[nodiscard]] auto expand(motif::db::database_manager const& database, node& n) -> result<void>;
+[[nodiscard]] auto expand(motif::db::database_manager const& database, node& n, motif::db::search_filter const& filter) -> result<void>;
 
 }  // namespace motif::search::opening_tree
