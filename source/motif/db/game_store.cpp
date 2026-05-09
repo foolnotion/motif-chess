@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -122,10 +123,8 @@ constexpr int max_elo_white = 15;
 constexpr int max_elo_black = 16;
 constexpr int limit = 17;
 constexpr int offset = 18;
-constexpr int first_game_id = 17;
 }  // namespace find_filter_param
 
-constexpr std::size_t sqlite_parameter_batch_size {999};
 constexpr std::size_t max_game_list_reserve {501};
 
 auto bind_find_filter(sqlite3_stmt* stmt, search_filter const& filter) -> result<void>
@@ -164,41 +163,9 @@ auto bind_find_filter(sqlite3_stmt* stmt, search_filter const& filter) -> result
         || bind_int32(find_filter_param::max_elo_white, filter.max_elo) != SQLITE_OK
         || bind_int32(find_filter_param::max_elo_black, filter.max_elo) != SQLITE_OK)
     {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(sqlite3_db_handle(stmt))}};
     }
     return {};
-}
-
-auto append_position_batches(std::string& sql, std::size_t const game_count) -> void
-{
-    sql += "(";
-    for (std::size_t batch_start = 0; batch_start < game_count; batch_start += sqlite_parameter_batch_size) {
-        if (batch_start > 0) {
-            sql += " OR ";
-        }
-
-        auto const batch_count = std::min(sqlite_parameter_batch_size, game_count - batch_start);
-        sql += "g.id IN (";
-        for (std::size_t index = 0; index < batch_count; ++index) {
-            if (index > 0) {
-                sql += ", ";
-            }
-            sql += "?";
-        }
-        sql += ")";
-    }
-    sql += ")";
-}
-
-auto bind_game_ids(sqlite3_stmt* stmt, std::vector<game_id> const& game_ids, int param_index) -> result<int>
-{
-    for (auto const game_key : game_ids) {
-        if (sqlite3_bind_int64(stmt, param_index, static_cast<sqlite3_int64>(game_key.value)) != SQLITE_OK) {
-            return tl::unexpected {error_code::io_failure};
-        }
-        ++param_index;
-    }
-    return param_index;
 }
 
 // NOLINT(llvm-prefer-static-over-anonymous-namespace): conflicts with
@@ -207,7 +174,7 @@ auto bind_game_ids(sqlite3_stmt* stmt, std::vector<game_id> const& game_ids, int
 {  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
     sqlite3_stmt* raw = nullptr;
     if (sqlite3_prepare_v2(conn, sql, -1, &raw, nullptr) != SQLITE_OK) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(conn)}};
     }
     return unique_stmt {raw};
 }
@@ -244,6 +211,48 @@ auto bind_game_ids(sqlite3_stmt* stmt, std::vector<game_id> const& game_ids, int
     return static_cast<std::int32_t>(sqlite3_column_int(stmt, col));
 }
 
+auto populate_position_temp_table(sqlite3* conn, std::vector<game_id> const& game_ids) -> result<void>
+{
+    if (sqlite3_exec(
+            conn, "CREATE TEMP TABLE IF NOT EXISTS _position_game_ids (id INTEGER PRIMARY KEY NOT NULL)", nullptr, nullptr, nullptr)
+            != SQLITE_OK
+        || sqlite3_exec(conn, "DELETE FROM _position_game_ids", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(conn)}};
+    }
+
+    auto const max_params = static_cast<std::size_t>(sqlite3_limit(conn, SQLITE_LIMIT_VARIABLE_NUMBER, -1));
+    auto const batch_size = max_params > 0U ? max_params : std::size_t {999};
+
+    for (std::size_t batch_start = 0; batch_start < game_ids.size(); batch_start += batch_size) {
+        auto const batch_end = std::min(batch_start + batch_size, game_ids.size());
+        auto const batch_count = batch_end - batch_start;
+
+        auto sql = std::string {"INSERT INTO _position_game_ids (id) VALUES (?)"};
+        for (std::size_t i = 1; i < batch_count; ++i) {
+            sql += ",(?)";
+        }
+
+        auto stmt = prepare(conn, sql.c_str());
+        if (!stmt) {
+            return tl::unexpected {stmt.error()};
+        }
+
+        for (std::size_t i = 0; i < batch_count; ++i) {
+            if (sqlite3_bind_int64(stmt->get(), static_cast<int>(i + 1U), static_cast<sqlite3_int64>(game_ids[batch_start + i].value))
+                != SQLITE_OK)
+            {
+                return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(conn)}};
+            }
+        }
+
+        if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
+            return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(conn)}};
+        }
+    }
+    return {};
+}
+
 auto read_game_list_entry(sqlite3_stmt* stmt) -> game_list_entry
 {
     auto const* src_type_raw = column_text(stmt, list_col::source_type);
@@ -272,7 +281,7 @@ auto read_game_list_entry(sqlite3_stmt* stmt) -> game_list_entry
         sqlite3_free(err_msg);
     }
     if (exec_result != SQLITE_OK) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(conn)}};
     }
     return {};
 }
@@ -284,7 +293,7 @@ auto read_game_list_entry(sqlite3_stmt* stmt) -> game_list_entry
         return tl::unexpected {stmt.error()};
     }
     if (sqlite3_step(stmt->get()) != SQLITE_ROW) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(conn)}};
     }
     return sqlite3_column_int(stmt->get(), 0) == 1;
 }
@@ -386,7 +395,7 @@ auto game_store::create_schema() -> result<void>
         return tl::unexpected {fk_enabled.error()};
     }
     if (!*fk_enabled) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, "foreign keys could not be enabled"}};
     }
 
     // language=sql
@@ -455,7 +464,7 @@ auto game_store::prepare_cached_stmt(sqlite3_stmt*& stmt, char const* sql) -> re
     if (stmt == nullptr) {
         sqlite3_stmt* raw = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &raw, nullptr) != SQLITE_OK) {
-            return tl::unexpected {error_code::io_failure};
+            return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
         }
         stmt = raw;
     }
@@ -492,7 +501,7 @@ auto game_store::find_or_insert_player(player const& plr) -> result<std::int64_t
     bind_optional_text(*ins, 4, plr.country);
 
     if (sqlite3_step(*ins) != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     auto const player_id = sqlite3_last_insert_rowid(db_);
     player_id_cache_.emplace(plr.name, player_id);
@@ -527,7 +536,7 @@ auto game_store::find_or_insert_event(event const& evt) -> result<std::int64_t>
     bind_optional_text(*ins, 3, evt.date);
 
     if (sqlite3_step(*ins) != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     auto const event_id = sqlite3_last_insert_rowid(db_);
     event_id_cache_.emplace(evt.name, event_id);
@@ -558,7 +567,7 @@ auto game_store::insert_game_tags(game_id const game_key, std::vector<std::pair<
                 }
                 sqlite3_bind_text(*tag_ins, 1, tag_name.c_str(), static_cast<int>(tag_name.size()), SQLITE_TRANSIENT);
                 if (sqlite3_step(*tag_ins) != SQLITE_DONE) {
-                    return tl::unexpected {error_code::io_failure};
+                    return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
                 }
                 tag_id = sqlite3_last_insert_rowid(db_);
             }
@@ -573,7 +582,7 @@ auto game_store::insert_game_tags(game_id const game_key, std::vector<std::pair<
         sqlite3_bind_int64(*game_tag_ins, 2, tag_id);
         sqlite3_bind_text(*game_tag_ins, 3, tag_value.c_str(), static_cast<int>(tag_value.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(*game_tag_ins) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
+            return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
         }
     }
 
@@ -613,7 +622,7 @@ auto game_store::get(game_id const game_key) const -> result<game>
         return tl::unexpected {error_code::not_found};
     }
     if (step_rc != SQLITE_ROW) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     game out;
@@ -654,7 +663,7 @@ auto game_store::get(game_id const game_key) const -> result<game>
     auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), get_col::game_moves));
     int const blob_bytes = sqlite3_column_bytes(stmt->get(), get_col::game_moves);
     if (blob_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, "blob size not a multiple of uint16"}};
     }
     auto const move_count = static_cast<std::size_t>(blob_bytes) / sizeof(std::uint16_t);
     out.moves.resize(move_count);
@@ -675,7 +684,7 @@ auto game_store::get(game_id const game_key) const -> result<game>
         out.extra_tags.emplace_back(std::string {column_text(tags_stmt->get(), 0)}, std::string {column_text(tags_stmt->get(), 1)});
     }
     if (tag_rc != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     return out;
@@ -748,7 +757,7 @@ auto game_store::get_game_contexts(std::vector<game_id> const& game_ids) const -
             auto const* blob = static_cast<std::uint8_t const*>(sqlite3_column_blob(stmt->get(), 3));
             int const blob_bytes = sqlite3_column_bytes(stmt->get(), 3);
             if (blob_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0) {
-                return tl::unexpected {error_code::io_failure};
+                return tl::unexpected {error {error_code::io_failure, "blob size not a multiple of uint16"}};
             }
 
             auto const move_count = static_cast<std::size_t>(blob_bytes) / sizeof(std::uint16_t);
@@ -761,7 +770,7 @@ auto game_store::get_game_contexts(std::vector<game_id> const& game_ids) const -
         }
 
         if (step_rc != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
+            return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
         }
     }
 
@@ -778,7 +787,7 @@ auto game_store::count_games() const -> result<std::int64_t>
     }
     int const step_rc = sqlite3_step(stmt->get());
     if (step_rc != SQLITE_ROW) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return sqlite3_column_int64(stmt->get(), 0);
 }
@@ -788,18 +797,18 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
     auto const effective_limit = std::min(filter.limit, max_search_limit);
     constexpr auto sqlite_max = static_cast<std::size_t>(std::numeric_limits<sqlite3_int64>::max());
     if (effective_limit > sqlite_max || filter.offset > sqlite_max) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, "limit or offset exceeds sqlite3_int64 max"}};
     }
 
     // Wrap COUNT + SELECT in a single read transaction so total_count is
     // consistent with the rows returned even under concurrent writes.
     txn_guard txn {db_};
     if (!txn.began()) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     // language=sql
-    static constexpr char const* count_sql = R"sql(
+    constexpr auto count_sql = R"sql(
         SELECT COUNT(*)
         FROM game g
         JOIN player w ON w.id = g.white_id
@@ -828,7 +837,7 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
 
     int step_rc = sqlite3_step(count_stmt->get());
     if (step_rc != SQLITE_ROW) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     auto const total_count = sqlite3_column_int64(count_stmt->get(), 0);
 
@@ -837,7 +846,7 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
     }
 
     // language=sql
-    static constexpr char const* data_sql = R"sql(
+    constexpr auto data_sql = R"sql(
         SELECT
             g.id,
             w.name,
@@ -880,7 +889,7 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
     if (sqlite3_bind_int64(data_stmt->get(), find_filter_param::limit, static_cast<sqlite3_int64>(effective_limit)) != SQLITE_OK
         || sqlite3_bind_int64(data_stmt->get(), find_filter_param::offset, static_cast<sqlite3_int64>(filter.offset)) != SQLITE_OK)
     {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     auto entries = std::vector<game_list_entry> {};
@@ -891,11 +900,11 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
     }
 
     if (step_rc != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     if (!txn.commit()) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return game_list_result {.games = std::move(entries), .total_count = total_count};
 }
@@ -906,21 +915,29 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
         return game_list_result {.games = {}, .total_count = 0};
     }
 
+    auto const lock = std::scoped_lock {position_game_ids_mutex_};
+
     auto const effective_limit = std::min(filter.limit, max_search_limit);
     constexpr auto sqlite_max = static_cast<std::size_t>(std::numeric_limits<sqlite3_int64>::max());
     if (effective_limit > sqlite_max || filter.offset > sqlite_max) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, "limit or offset exceeds sqlite3_int64 max"}};
+    }
+
+    if (auto res = populate_position_temp_table(db_, game_ids); !res) {
+        return tl::unexpected {res.error()};
     }
 
     // Wrap COUNT + SELECT in a single read transaction for consistency.
     txn_guard txn {db_};
     if (!txn.began()) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
-    auto count_sql = std::string {R"sql(
+    // language=sql
+    constexpr auto count_sql = R"sql(
         SELECT COUNT(*)
         FROM game g
+        JOIN _position_game_ids pgi ON pgi.id = g.id
         JOIN player w ON w.id = g.white_id
         JOIN player b ON b.id = g.black_id
         LEFT JOIN event e ON e.id = g.event_id
@@ -935,24 +952,19 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
           AND (? IS NULL OR g.eco LIKE ? || '%')
           AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
           AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
-          AND )sql"};
-    append_position_batches(count_sql, game_ids.size());
+    )sql";
 
-    auto count_stmt = prepare(db_, count_sql.c_str());
+    auto count_stmt = prepare(db_, count_sql);
     if (!count_stmt) {
         return tl::unexpected {count_stmt.error()};
     }
     if (auto bind_res = bind_find_filter(count_stmt->get(), filter); !bind_res) {
         return tl::unexpected {bind_res.error()};
     }
-    auto next_param = bind_game_ids(count_stmt->get(), game_ids, find_filter_param::first_game_id);
-    if (!next_param) {
-        return tl::unexpected {next_param.error()};
-    }
 
     int step_rc = sqlite3_step(count_stmt->get());
     if (step_rc != SQLITE_ROW) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     auto const total_count = sqlite3_column_int64(count_stmt->get(), 0);
 
@@ -960,7 +972,8 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
         return game_list_result {.games = {}, .total_count = total_count};
     }
 
-    auto data_sql = std::string {R"sql(
+    // language=sql
+    constexpr auto data_sql = R"sql(
         SELECT
             g.id,
             w.name,
@@ -975,6 +988,7 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
             w.elo,
             b.elo
         FROM game g
+        JOIN _position_game_ids pgi ON pgi.id = g.id
         JOIN player w ON w.id = g.white_id
         JOIN player b ON b.id = g.black_id
         LEFT JOIN event e ON e.id = g.event_id
@@ -989,14 +1003,11 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
           AND (? IS NULL OR g.eco LIKE ? || '%')
           AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
           AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
-          AND )sql"};
-    append_position_batches(data_sql, game_ids.size());
-    data_sql += R"sql(
         ORDER BY g.id ASC
         LIMIT ? OFFSET ?
     )sql";
 
-    auto data_stmt = prepare(db_, data_sql.c_str());
+    auto data_stmt = prepare(db_, data_sql);
     if (!data_stmt) {
         return tl::unexpected {data_stmt.error()};
     }
@@ -1004,14 +1015,10 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
     if (auto bind_res = bind_find_filter(data_stmt->get(), filter); !bind_res) {
         return tl::unexpected {bind_res.error()};
     }
-    next_param = bind_game_ids(data_stmt->get(), game_ids, find_filter_param::first_game_id);
-    if (!next_param) {
-        return tl::unexpected {next_param.error()};
-    }
-    if (sqlite3_bind_int64(data_stmt->get(), *next_param, static_cast<sqlite3_int64>(effective_limit)) != SQLITE_OK
-        || sqlite3_bind_int64(data_stmt->get(), *next_param + 1, static_cast<sqlite3_int64>(filter.offset)) != SQLITE_OK)
+    if (sqlite3_bind_int64(data_stmt->get(), find_filter_param::limit, static_cast<sqlite3_int64>(effective_limit)) != SQLITE_OK
+        || sqlite3_bind_int64(data_stmt->get(), find_filter_param::offset, static_cast<sqlite3_int64>(filter.offset)) != SQLITE_OK)
     {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     auto entries = std::vector<game_list_entry> {};
@@ -1022,13 +1029,67 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
     }
 
     if (step_rc != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     if (!txn.commit()) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return game_list_result {.games = std::move(entries), .total_count = total_count};
+}
+
+auto game_store::find_game_ids_with_filter(std::vector<game_id> const& game_ids, search_filter const& filter) const
+    -> result<std::vector<game_id>>
+{
+    if (game_ids.empty()) {
+        return std::vector<game_id> {};
+    }
+
+    auto const lock = std::scoped_lock {position_game_ids_mutex_};
+
+    if (auto res = populate_position_temp_table(db_, game_ids); !res) {
+        return tl::unexpected {res.error()};
+    }
+
+    // language=sql
+    constexpr auto ids_sql = R"sql(
+        SELECT g.id
+        FROM game g
+        JOIN _position_game_ids pgi ON pgi.id = g.id
+        JOIN player w ON w.id = g.white_id
+        JOIN player b ON b.id = g.black_id
+        LEFT JOIN event e ON e.id = g.event_id
+        WHERE (? IS NULL
+               OR (CASE ?
+                     WHEN 1 THEN instr(lower(w.name), lower(?)) > 0
+                     WHEN 2 THEN instr(lower(b.name), lower(?)) > 0
+                     ELSE instr(lower(w.name), lower(?)) > 0
+                          OR instr(lower(b.name), lower(?)) > 0
+                     END))
+          AND (? IS NULL OR g.result = ?)
+          AND (? IS NULL OR g.eco LIKE ? || '%')
+          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
+          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+        ORDER BY g.id ASC
+    )sql";
+
+    auto stmt = prepare(db_, ids_sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+    if (auto bind_res = bind_find_filter(stmt->get(), filter); !bind_res) {
+        return tl::unexpected {bind_res.error()};
+    }
+
+    auto out = std::vector<game_id> {};
+    int step_rc {};
+    while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
+        out.push_back(game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), 0))});
+    }
+    if (step_rc != SQLITE_DONE) {
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+    }
+    return out;
 }
 
 auto game_store::remove(game_id const game_key) -> result<void>
@@ -1041,7 +1102,7 @@ auto game_store::remove(game_id const game_key) -> result<void>
     sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(game_key.value));
 
     if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     if (sqlite3_changes(db_) == 0) {
         return tl::unexpected {error_code::not_found};
@@ -1069,7 +1130,7 @@ auto game_store::get_provenance(game_id const game_key) const -> result<game_pro
         return tl::unexpected {error_code::not_found};
     }
     if (step_rc != SQLITE_ROW) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     game_provenance prov;
@@ -1095,7 +1156,7 @@ auto game_store::update_text_field(game_id const game_key, std::string_view colu
     sqlite3_bind_text(upd->get(), 1, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
     sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
     if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return {};
 }
@@ -1127,7 +1188,7 @@ auto game_store::patch_player(game_id const game_key,
     sqlite3_bind_int64(upd->get(), 1, *id_res);
     sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
     if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return {};
 }
@@ -1157,7 +1218,7 @@ auto game_store::patch_event(game_id const game_key,
     sqlite3_bind_int64(upd->get(), 1, *id_res);
     sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
     if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return {};
 }
@@ -1177,7 +1238,7 @@ auto game_store::patch_metadata(game_id const game_key, game_patch const& patch)
 
     txn_guard txn {db_};
     if (!txn.began()) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
     if (patch.white_name || patch.white_elo || patch.black_name || patch.black_elo || patch.event || patch.site) {
@@ -1226,7 +1287,7 @@ auto game_store::patch_metadata(game_id const game_key, game_patch const& patch)
         }
         sqlite3_bind_int64(del->get(), 1, static_cast<std::int64_t>(game_key.value));
         if (sqlite3_step(del->get()) != SQLITE_DONE) {
-            return tl::unexpected {error_code::io_failure};
+            return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
         }
         if (!patch.notes->empty()) {
             if (auto res = insert_game_tags(game_key, {{"_notes", *patch.notes}}); !res) {
@@ -1236,7 +1297,7 @@ auto game_store::patch_metadata(game_id const game_key, game_patch const& patch)
     }
 
     if (!txn.commit()) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return {};
 }
@@ -1274,7 +1335,7 @@ auto game_store::set_manual_provenance(game_id const game_key,
     sqlite3_bind_int64(stmt->get(), 3, static_cast<std::int64_t>(game_key.value));
 
     if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
-        return tl::unexpected {error_code::io_failure};
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     if (sqlite3_changes(db_) == 0) {
         return tl::unexpected {error_code::not_found};

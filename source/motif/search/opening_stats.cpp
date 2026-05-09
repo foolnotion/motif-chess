@@ -56,6 +56,92 @@ auto resolve_eco(motif::db::opening_stat_agg_row const& row, context_map const& 
 
 }  // namespace
 
+namespace
+{
+
+auto build_stats(motif::db::database_manager const& database,
+                 motif::db::zobrist_hash const hash,
+                 std::vector<motif::db::opening_stat_agg_row> const& rows,
+                 std::uint32_t const total_games) -> motif::search::result<motif::search::opening_stats::stats>
+{
+    if (rows.empty()) {
+        motif::search::opening_stats::stats out;
+        out.total_games = total_games;
+        return out;
+    }
+
+    auto candidate_ids = std::vector<motif::db::game_id> {};
+    candidate_ids.reserve(rows.size() * 2);
+    for (auto const& row : rows) {
+        candidate_ids.push_back(row.eco_sample_min);
+        if (row.eco_sample_max != row.eco_sample_min) {
+            candidate_ids.push_back(row.eco_sample_max);
+        }
+    }
+    std::ranges::sort(candidate_ids);
+    auto const tail = std::ranges::unique(candidate_ids);
+    candidate_ids.erase(tail.begin(), tail.end());
+
+    auto contexts_res = database.store().get_game_contexts(candidate_ids);
+    if (!contexts_res) {
+        return tl::unexpected {motif::search::error_code::io_failure};
+    }
+    auto const& contexts = *contexts_res;
+
+    auto position = motif::chess::board {};
+    if (rows.front().root_ply > 0U) {
+        auto board_res = find_root_board(rows, hash, contexts);
+        if (!board_res) {
+            return motif::search::opening_stats::stats {};
+        }
+        position = *board_res;
+    }
+
+    motif::search::opening_stats::stats output;
+    output.total_games = total_games;
+    output.continuations.reserve(rows.size());
+
+    for (auto const& row : rows) {
+        if (!contexts.contains(row.eco_sample_min) && !contexts.contains(row.eco_sample_max)) {
+            continue;
+        }
+
+        auto eco_res = resolve_eco(row, contexts);
+        auto [eco, opening_name] =
+            eco_res ? std::move(*eco_res) : std::make_pair(std::optional<std::string> {}, std::optional<std::string> {});
+
+        auto const san = motif::chess::san(position, row.cont_encoded_move);
+
+        output.continuations.push_back(motif::search::opening_stats::continuation {
+            .san = san,
+            .result_hash = row.cont_hash,
+            .frequency = row.frequency,
+            .white_wins = row.white_wins,
+            .draws = row.draws,
+            .black_wins = row.black_wins,
+            .average_white_elo = row.avg_white_elo,
+            .average_black_elo = row.avg_black_elo,
+            .eco = std::move(eco),
+            .opening_name = std::move(opening_name),
+            .elo_weighted_score = row.elo_weighted_score.value_or(0.0),
+        });
+    }
+
+    std::ranges::sort(
+        output.continuations,
+        [](motif::search::opening_stats::continuation const& left, motif::search::opening_stats::continuation const& right) -> bool
+        {
+            if (left.frequency != right.frequency) {
+                return left.frequency > right.frequency;
+            }
+            return left.san < right.san;
+        });
+
+    return output;
+}
+
+}  // namespace
+
 namespace motif::search::opening_stats
 {
 
@@ -73,77 +159,46 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }
-    auto const& rows = *rows_res;
 
-    auto candidate_ids = std::vector<motif::db::game_id> {};
-    candidate_ids.reserve(rows.size() * 2);
-    for (auto const& row : rows) {
-        candidate_ids.push_back(row.eco_sample_min);
-        if (row.eco_sample_max != row.eco_sample_min) {
-            candidate_ids.push_back(row.eco_sample_max);
-        }
+    return build_stats(database, hash, *rows_res, static_cast<std::uint32_t>(*total_count_res));
+}
+
+auto query(motif::db::database_manager const& database, motif::db::zobrist_hash const hash, motif::db::search_filter const& filter)
+    -> result<stats>
+{
+    bool const has_metadata = filter.player_name.has_value() || filter.min_elo.has_value() || filter.max_elo.has_value()
+        || filter.result.has_value() || filter.eco_prefix.has_value();
+
+    if (!has_metadata) {
+        return query(database, hash);
     }
-    std::ranges::sort(candidate_ids);
-    auto const tail = std::ranges::unique(candidate_ids);
-    candidate_ids.erase(tail.begin(), tail.end());
 
-    auto contexts_res = database.store().get_game_contexts(candidate_ids);
-    if (!contexts_res) {
+    auto all_ids_res = database.positions().distinct_game_ids_by_zobrist(hash);
+    if (!all_ids_res) {
         return tl::unexpected {error_code::io_failure};
     }
-    auto const& contexts = *contexts_res;
-
-    auto position = motif::chess::board {};
-    if (!rows.empty() && rows.front().root_ply > 0U) {
-        auto board_res = find_root_board(rows, hash, contexts);
-        if (!board_res) {
-            return stats {};
-        }
-        position = *board_res;
+    if (all_ids_res->empty()) {
+        return stats {};
     }
 
-    auto output = stats {};
-    output.total_games = static_cast<std::uint32_t>(*total_count_res);
-    output.continuations.reserve(rows.size());
+    auto meta_filter = filter;
+    meta_filter.position = std::nullopt;
 
-    for (auto const& row : rows) {
-        // Skip continuations whose every sampled game has been deleted from the
-        // game store; the position rows are orphaned and should not appear.
-        if (!contexts.contains(row.eco_sample_min) && !contexts.contains(row.eco_sample_max)) {
-            continue;
-        }
+    auto filtered_ids_res = database.store().find_game_ids_with_filter(*all_ids_res, meta_filter);
+    if (!filtered_ids_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (filtered_ids_res->empty()) {
+        return stats {};
+    }
+    auto const& filtered_ids = *filtered_ids_res;
 
-        auto eco_res = resolve_eco(row, contexts);
-        auto [eco, opening_name] =
-            eco_res ? std::move(*eco_res) : std::make_pair(std::optional<std::string> {}, std::optional<std::string> {});
-
-        auto const san = motif::chess::san(position, row.cont_encoded_move);
-
-        output.continuations.push_back(continuation {
-            .san = san,
-            .result_hash = row.cont_hash,
-            .frequency = row.frequency,
-            .white_wins = row.white_wins,
-            .draws = row.draws,
-            .black_wins = row.black_wins,
-            .average_white_elo = row.avg_white_elo,
-            .average_black_elo = row.avg_black_elo,
-            .eco = std::move(eco),
-            .opening_name = std::move(opening_name),
-        });
+    auto rows_res = database.positions().query_opening_stats(hash, filtered_ids);
+    if (!rows_res) {
+        return tl::unexpected {error_code::io_failure};
     }
 
-    std::ranges::sort(output.continuations,
-                      [](continuation const& left, continuation const& right) -> bool
-                      {
-                          if (left.frequency != right.frequency) {
-                              return left.frequency > right.frequency;
-                          }
-
-                          return left.san < right.san;
-                      });
-
-    return output;
+    return build_stats(database, hash, *rows_res, static_cast<std::uint32_t>(filtered_ids.size()));
 }
 
 }  // namespace motif::search::opening_stats

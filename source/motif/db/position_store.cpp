@@ -1,13 +1,16 @@
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include "motif/db/position_store.hpp"
 
 #include <duckdb.h>
+#include <fmt/format.h>
 #include <tl/expected.hpp>
 
 #include "motif/db/error.hpp"
@@ -79,7 +82,71 @@ constexpr idx_t avg_white_elo = 7;
 constexpr idx_t avg_black_elo = 8;
 constexpr idx_t eco_min = 9;
 constexpr idx_t eco_max = 10;
+// present only in the filtered overload (query_opening_stats with game_ids)
+constexpr idx_t elo_weighted_score = 11;
 }  // namespace opening_stats_col
+
+constexpr auto filtered_game_ids_table = "_filtered_game_ids";
+
+auto run_query(duckdb_connection con, char const* sql) -> motif::db::result<void>
+{
+    duckdb_result res {};
+    if (duckdb_query(con, sql, &res) == DuckDBError) {
+        duckdb_destroy_result(&res);
+        return tl::unexpected {motif::db::error_code::io_failure};
+    }
+    duckdb_destroy_result(&res);
+    return {};
+}
+
+auto populate_filtered_game_ids_table(duckdb_connection con, std::vector<motif::db::game_id> const& game_ids) -> motif::db::result<void>
+{
+    // language=sql
+    constexpr auto create_filtered_game_ids = R"sql(
+        CREATE TEMP TABLE IF NOT EXISTS _filtered_game_ids (
+            game_id UINTEGER NOT NULL PRIMARY KEY
+        )
+    )sql";
+    // language=sql
+    constexpr auto clear_filtered_game_ids = R"sql(
+        DELETE FROM _filtered_game_ids
+    )sql";
+
+    if (auto create_res = run_query(con, create_filtered_game_ids); !create_res) {
+        return create_res;
+    }
+    if (auto clear_res = run_query(con, clear_filtered_game_ids); !clear_res) {
+        return clear_res;
+    }
+
+    duckdb_appender appender {};
+    if (duckdb_appender_create(con, nullptr, filtered_game_ids_table, &appender) == DuckDBError) {
+        return tl::unexpected {motif::db::error_code::io_failure};
+    }
+
+    for (auto const game_id : game_ids) {
+        if (duckdb_appender_begin_row(appender) == DuckDBError) {
+            duckdb_appender_destroy(&appender);
+            return tl::unexpected {motif::db::error_code::io_failure};
+        }
+        if (duckdb_append_uint32(appender, game_id.value) == DuckDBError) {
+            duckdb_appender_destroy(&appender);
+            return tl::unexpected {motif::db::error_code::io_failure};
+        }
+        if (duckdb_appender_end_row(appender) == DuckDBError) {
+            duckdb_appender_destroy(&appender);
+            return tl::unexpected {motif::db::error_code::io_failure};
+        }
+    }
+
+    auto const flush_res = duckdb_appender_flush(appender);
+    duckdb_appender_destroy(&appender);
+    if (flush_res == DuckDBError) {
+        return tl::unexpected {motif::db::error_code::io_failure};
+    }
+
+    return {};
+}
 
 struct result_guard
 {
@@ -118,6 +185,19 @@ namespace motif::db
 position_store::position_store(duckdb_connection con) noexcept
     : con_ {con}
 {
+}
+
+position_store::position_store(position_store&& other) noexcept
+    : con_ {std::exchange(other.con_, nullptr)}
+{
+}
+
+auto position_store::operator=(position_store&& other) noexcept -> position_store&
+{
+    if (this != &other) {
+        con_ = std::exchange(other.con_, nullptr);
+    }
+    return *this;
 }
 
 auto position_store::initialize_schema() -> result<void>
@@ -284,7 +364,13 @@ auto position_store::query_opening_stats(zobrist_hash const hash) const -> resul
            "MIN(p_root.ply) AS root_ply, "
            "p_root.result, "
            "p_root.white_elo, "
-           "p_root.black_elo "
+           "p_root.black_elo, "
+           "CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL "
+           "THEN CAST(p_root.result AS DOUBLE) * (p_root.white_elo + p_root.black_elo) / 2.0 "
+           "ELSE NULL END AS weighted_contrib, "
+           "CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL "
+           "THEN (p_root.white_elo + p_root.black_elo) / 2.0 "
+           "ELSE NULL END AS elo_weight "
            "FROM position p_root "
            "JOIN position p_cont "
            "ON  p_cont.game_id = p_root.game_id "
@@ -323,7 +409,8 @@ auto position_store::query_opening_stats(zobrist_hash const hash) const -> resul
            "MIN(ca.avg_white_elo) AS avg_white_elo, "
            "MIN(ca.avg_black_elo) AS avg_black_elo, "
            "MIN(d.game_id) AS eco_sample_min, "
-           "MAX(d.game_id) AS eco_sample_max "
+           "MAX(d.game_id) AS eco_sample_max, "
+           "SUM(d.weighted_contrib) / NULLIF(SUM(d.elo_weight), 0) AS elo_weighted_score "
            "FROM deduped d "
            "JOIN child_agg ca ON ca.zobrist_hash = d.child_hash "
            "GROUP BY d.encoded_move, d.child_hash";
@@ -351,6 +438,7 @@ auto position_store::query_opening_stats(zobrist_hash const hash) const -> resul
             .avg_black_elo = read_optional_double(guard.res, opening_stats_col::avg_black_elo, row),
             .eco_sample_min = motif::db::game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_min, row)},
             .eco_sample_max = motif::db::game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_max, row)},
+            .elo_weighted_score = read_optional_double(guard.res, opening_stats_col::elo_weighted_score, row),
         });
     }
 
@@ -462,6 +550,203 @@ auto position_store::distinct_game_ids_by_zobrist(zobrist_hash const hash) const
     }
 
     return game_ids;
+}
+
+auto position_store::count_distinct_games_by_zobrist(zobrist_hash const hash, std::vector<game_id> const& game_ids) const
+    -> result<std::int64_t>
+{
+    if (game_ids.empty()) {
+        return std::int64_t {0};
+    }
+
+    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
+        return tl::unexpected {populate_res.error()};
+    }
+
+    auto const sql = fmt::format(
+        R"sql(
+            SELECT COUNT(DISTINCT p.game_id)
+            FROM position p
+            JOIN _filtered_game_ids fgi ON fgi.game_id = p.game_id
+            WHERE p.zobrist_hash = CAST({} AS UBIGINT)
+        )sql",
+        hash.value);
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return duckdb_value_int64(&guard.res, 0, 0);
+}
+
+auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<game_id> const& game_ids) const
+    -> result<std::vector<opening_stat_agg_row>>
+{
+    if (game_ids.empty()) {
+        return std::vector<opening_stat_agg_row> {};
+    }
+
+    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
+        return tl::unexpected {populate_res.error()};
+    }
+
+    // language=sql
+    auto const sql = fmt::format(R"sql(
+        WITH deduped AS (
+            SELECT
+                p_root.game_id,
+                p_cont.encoded_move,
+                p_cont.zobrist_hash AS child_hash,
+                MIN(p_root.ply) AS root_ply,
+                p_root.result,
+                p_root.white_elo,
+                p_root.black_elo,
+                CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL
+                     THEN CAST(p_root.result AS DOUBLE) * (p_root.white_elo + p_root.black_elo) / 2.0
+                     ELSE NULL END AS weighted_contrib,
+                CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL
+                     THEN (p_root.white_elo + p_root.black_elo) / 2.0
+                     ELSE NULL END AS elo_weight
+            FROM position p_root
+            JOIN _filtered_game_ids fgi_root ON fgi_root.game_id = p_root.game_id
+            JOIN position p_cont
+            ON  p_cont.game_id = p_root.game_id
+            AND p_cont.ply = p_root.ply + 1
+            WHERE p_root.zobrist_hash = CAST({0} AS UBIGINT)
+            GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash,
+                     p_root.result, p_root.white_elo, p_root.black_elo
+        ),
+        child_hashes AS (
+            SELECT DISTINCT child_hash FROM deduped
+        ),
+        child_agg AS (
+            SELECT
+                uniq.zobrist_hash,
+                COUNT(*) AS frequency,
+                COUNT(CASE WHEN uniq.result > 0 THEN 1 END) AS white_wins,
+                COUNT(CASE WHEN uniq.result = 0 THEN 1 END) AS draws,
+                COUNT(CASE WHEN uniq.result < 0 THEN 1 END) AS black_wins,
+                AVG(CAST(uniq.white_elo AS DOUBLE)) AS avg_white_elo,
+                AVG(CAST(uniq.black_elo AS DOUBLE)) AS avg_black_elo
+            FROM (
+                SELECT DISTINCT p.zobrist_hash, p.game_id, p.result, p.white_elo, p.black_elo
+                FROM position p
+                JOIN _filtered_game_ids fgi ON fgi.game_id = p.game_id
+                JOIN child_hashes ON child_hashes.child_hash = p.zobrist_hash
+            ) AS uniq
+            GROUP BY uniq.zobrist_hash
+        )
+        SELECT
+            d.encoded_move,
+            d.child_hash,
+            MIN(d.root_ply) AS root_ply,
+            MIN(ca.frequency) AS frequency,
+            MIN(ca.white_wins) AS white_wins,
+            MIN(ca.draws) AS draws,
+            MIN(ca.black_wins) AS black_wins,
+            MIN(ca.avg_white_elo) AS avg_white_elo,
+            MIN(ca.avg_black_elo) AS avg_black_elo,
+            MIN(d.game_id) AS eco_sample_min,
+            MAX(d.game_id) AS eco_sample_max,
+            SUM(d.weighted_contrib) / NULLIF(SUM(d.elo_weight), 0) AS elo_weighted_score
+        FROM deduped d
+        JOIN child_agg ca ON ca.zobrist_hash = d.child_hash
+        GROUP BY d.encoded_move, d.child_hash
+    )sql",
+                                 hash.value);
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const nrows = static_cast<std::size_t>(duckdb_row_count(&guard.res));
+    std::vector<opening_stat_agg_row> rows;
+    rows.reserve(nrows);
+
+    for (std::size_t i = 0; i < nrows; ++i) {
+        auto const row = static_cast<idx_t>(i);
+        rows.push_back(opening_stat_agg_row {
+            .cont_encoded_move = duckdb_value_uint16(&guard.res, opening_stats_col::cont_encoded_move, row),
+            .cont_hash = motif::db::zobrist_hash {duckdb_value_uint64(&guard.res, opening_stats_col::cont_hash, row)},
+            .root_ply = duckdb_value_uint16(&guard.res, opening_stats_col::root_ply, row),
+            .frequency = duckdb_value_uint32(&guard.res, opening_stats_col::frequency, row),
+            .white_wins = duckdb_value_uint32(&guard.res, opening_stats_col::white_wins, row),
+            .draws = duckdb_value_uint32(&guard.res, opening_stats_col::draws, row),
+            .black_wins = duckdb_value_uint32(&guard.res, opening_stats_col::black_wins, row),
+            .avg_white_elo = read_optional_double(guard.res, opening_stats_col::avg_white_elo, row),
+            .avg_black_elo = read_optional_double(guard.res, opening_stats_col::avg_black_elo, row),
+            .eco_sample_min = motif::db::game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_min, row)},
+            .eco_sample_max = motif::db::game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_max, row)},
+            .elo_weighted_score = read_optional_double(guard.res, opening_stats_col::elo_weighted_score, row),
+        });
+    }
+
+    return rows;
+}
+
+auto position_store::query_tree_slice(zobrist_hash const root_hash,
+                                      std::uint16_t const max_depth,
+                                      std::vector<game_id> const& game_ids) const -> result<std::vector<tree_position_row>>
+{
+    if (game_ids.empty()) {
+        return std::vector<tree_position_row> {};
+    }
+
+    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
+        return tl::unexpected {populate_res.error()};
+    }
+
+    auto const sql = fmt::format(
+        R"sql(
+            SELECT
+                p_root.game_id,
+                p_root.ply AS root_ply,
+                CAST(p_cont.ply - p_root.ply AS USMALLINT) AS depth,
+                p_cont.zobrist_hash AS child_hash,
+                p_cont.encoded_move,
+                p_cont.result,
+                p_cont.white_elo,
+                p_cont.black_elo
+            FROM position p_root
+            JOIN _filtered_game_ids fgi ON fgi.game_id = p_root.game_id
+            JOIN position p_cont
+            ON  p_root.game_id = p_cont.game_id
+            AND p_cont.ply > p_root.ply
+            AND p_cont.ply <= p_root.ply + {}
+            WHERE p_root.zobrist_hash = CAST({} AS UBIGINT)
+            ORDER BY p_root.game_id, p_cont.ply
+        )sql",
+        max_depth,
+        root_hash.value);
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const nrows = static_cast<std::size_t>(duckdb_row_count(&guard.res));
+    std::vector<tree_position_row> rows;
+    rows.reserve(nrows);
+
+    for (std::size_t i = 0; i < nrows; ++i) {
+        auto const row = static_cast<idx_t>(i);
+        rows.push_back(tree_position_row {
+            .game_id = motif::db::game_id {duckdb_value_uint32(&guard.res, tree_slice_col::game_id, row)},
+            .root_ply = duckdb_value_uint16(&guard.res, tree_slice_col::root_ply, row),
+            .depth = duckdb_value_uint16(&guard.res, tree_slice_col::depth, row),
+            .encoded_move = duckdb_value_uint16(&guard.res, tree_slice_col::encoded_move, row),
+            .child_hash = motif::db::zobrist_hash {duckdb_value_uint64(&guard.res, tree_slice_col::child_hash, row)},
+            .result = duckdb_value_int8(&guard.res, tree_slice_col::result, row),
+            .white_elo = read_optional_int16(guard.res, tree_slice_col::white_elo, row),
+            .black_elo = read_optional_int16(guard.res, tree_slice_col::black_elo, row),
+        });
+    }
+
+    return rows;
 }
 
 }  // namespace motif::db

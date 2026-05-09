@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-14
-last_updated: 2026-05-06  # story 3b-1 approved after code-review patches
+last_updated: 2026-05-07  # 3b-2 review resolved
 project: motif-chess
 project_key: NOKEY
 tracking_system: file-system
@@ -106,10 +106,10 @@ development_status:
 
   # ─── Epic 3b: Search Filters & Filtered Opening Explorer ────────────────────
   epic-3b: in-progress
-  3b-1-search-filter-model-and-filtered-game-list: approved
-  3b-2-filtered-opening-stats-and-elo-weighted-ranking: backlog
-  3b-3-continuous-elo-distribution-per-continuation: backlog
-  3b-4-filtered-opening-tree-traversal: backlog
+  3b-1-search-filter-model-and-filtered-game-list: done
+  3b-2-filtered-opening-stats-and-elo-weighted-ranking: done
+  3b-3-continuous-elo-distribution-per-continuation: ready-for-dev
+  3b-4-filtered-opening-tree-traversal: ready-for-dev
   3b-5-http-search-and-filter-api: backlog
   epic-3b-retrospective: optional
 

@@ -140,6 +140,8 @@ constexpr auto black_elo_high = std::int32_t {2400};
 constexpr auto white_elo_mid = std::int32_t {2300};
 constexpr auto black_elo_other = std::int32_t {2200};
 constexpr auto white_elo_low = std::int32_t {2100};
+constexpr auto min_elo_all = std::int32_t {1000};
+constexpr auto score_tolerance = 0.001;
 constexpr auto white_elo_sicilian = std::int32_t {2200};
 constexpr auto black_elo_sicilian = std::int32_t {2150};
 constexpr auto elo_average_high = 2400.0;
@@ -818,4 +820,469 @@ TEST_CASE("rebuild_position_store makes total_games consistent with game count",
     auto position_count = manager->positions().count_by_zobrist(start_hash);
     REQUIRE(position_count.has_value());
     CHECK(std::cmp_equal(stats->total_games, *position_count));
+}
+
+// ─── Filtered opening stats (3b-2) ───────────────────────────────────────────
+
+namespace
+{
+
+auto make_game_named(game_spec const& spec, std::string_view white_name, std::string_view black_name) -> motif::db::game
+{
+    auto game = make_game(spec);
+    game.white.name = white_name;
+    game.black.name = black_name;
+    return game;
+}
+
+}  // namespace
+
+TEST_CASE("opening_stats::query with empty filter delegates to unfiltered path", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_empty"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-empty-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::string {"King's Knight Opening"}}),
+                              make_game({.sans = {"e4", "c5", "Nf3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::string {"B20"},
+                                         .opening_name = std::string {"Sicilian Defense"}})});
+
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    auto unfiltered = motif::search::opening_stats::query(*manager, start_hash);
+    auto filtered = motif::search::opening_stats::query(*manager, start_hash, motif::db::search_filter {});
+
+    REQUIRE(unfiltered.has_value());
+    REQUIRE(filtered.has_value());
+    CHECK(unfiltered->total_games == filtered->total_games);
+    REQUIRE(unfiltered->continuations.size() == 1);
+    REQUIRE(filtered->continuations.size() == unfiltered->continuations.size());
+
+    auto const expected_score = (2450.0 - 2250.0) / (2450.0 + 2250.0);
+    CHECK_THAT(unfiltered->continuations.front().elo_weighted_score, Catch::Matchers::WithinAbs(expected_score, score_tolerance));
+    CHECK_THAT(filtered->continuations.front().elo_weighted_score, Catch::Matchers::WithinAbs(expected_score, score_tolerance));
+
+    for (std::size_t idx = 0; idx < unfiltered->continuations.size(); ++idx) {
+        CHECK(unfiltered->continuations[idx].san == filtered->continuations[idx].san);
+        CHECK(unfiltered->continuations[idx].frequency == filtered->continuations[idx].frequency);
+        CHECK_THAT(unfiltered->continuations[idx].elo_weighted_score,
+                   Catch::Matchers::WithinAbs(filtered->continuations[idx].elo_weighted_score, score_tolerance));
+    }
+}
+
+TEST_CASE("opening_stats::query filtered by player_name restricts game set", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_player"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-player-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::string {"C40"},
+                                               .opening_name = std::nullopt},
+                                              "Magnus Carlsen",
+                                              "Opponent A"),
+                              make_game_named({.sans = {"e4", "e5", "Nc3"},
+                                               .result = "1/2-1/2",
+                                               .white_elo = white_elo_mid,
+                                               .black_elo = black_elo_other,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus Carlsen",
+                                              "Opponent B"),
+                              make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "0-1",
+                                               .white_elo = white_elo_low,
+                                               .black_elo = black_elo_other,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Fabiano Caruana",
+                                              "Opponent C")});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Magnus Carlsen";
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 2);
+    CHECK(stats->continuations.size() == 2);
+
+    auto const it_nf3 = std::ranges::find_if(
+        stats->continuations, [](motif::search::opening_stats::continuation const& cont) -> bool { return cont.san == "Nf3"; });
+    REQUIRE(it_nf3 != stats->continuations.end());
+    CHECK(it_nf3->frequency == 1);
+    CHECK(it_nf3->white_wins == 1);
+}
+
+TEST_CASE("opening_stats::query filtered by min_elo excludes low-rated games", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_elo"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-elo-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1/2-1/2",
+                                         .white_elo = white_elo_low,
+                                         .black_elo = white_elo_low,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.min_elo = white_elo_mid;  // 2300 — passes high game, not low
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 1);
+    REQUIRE(stats->continuations.size() == 1);
+    CHECK(stats->continuations.front().san == "Nf3");
+    CHECK(stats->continuations.front().frequency == 1);
+    CHECK(stats->continuations.front().white_wins == 1);
+}
+
+TEST_CASE("opening_stats::query filtered by result restricts to matching outcomes", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_result"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-result-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_low,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.result = "1-0";
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 2);
+    REQUIRE(stats->continuations.size() == 1);
+    CHECK(stats->continuations.front().frequency == 2);
+    CHECK(stats->continuations.front().white_wins == 2);
+    CHECK(stats->continuations.front().draws == 0);
+    CHECK(stats->continuations.front().black_wins == 0);
+}
+
+TEST_CASE("opening_stats::query filtered by eco_prefix restricts to matching openings", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_eco"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-eco-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1/2-1/2",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::string {"C41"},
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nc3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_low,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::string {"A46"},
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.eco_prefix = "C4";
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 2);
+    REQUIRE(stats->continuations.size() == 1);
+    CHECK(stats->continuations.front().san == "Nf3");
+    CHECK(stats->continuations.front().frequency == 2);
+}
+
+TEST_CASE("opening_stats::query combined filters apply AND semantics", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_combined"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-combined-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    // 4 games: only the first two pass all filters (player=Magnus AND result=1-0)
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus",
+                                              "Opp1"),
+                              make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_mid,
+                                               .black_elo = black_elo_other,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus",
+                                              "Opp2"),
+                              make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "0-1",  // fails result filter
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus",
+                                              "Opp3"),
+                              make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",  // fails player filter
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Anand",
+                                              "Opp4")});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Magnus";
+    filter.result = "1-0";
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 2);
+    REQUIRE(stats->continuations.size() == 1);
+    CHECK(stats->continuations.front().frequency == 2);
+    CHECK(stats->continuations.front().white_wins == 2);
+}
+
+TEST_CASE("opening_stats::query filter matching zero games returns empty stats without error", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_zero"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-zero-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.result = "0-1";  // no game has this result
+
+    auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}), filter);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 0);
+    CHECK(stats->continuations.empty());
+}
+
+TEST_CASE("opening_stats::query elo_weighted_score computed correctly", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_elo_score"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-elo-score-db");
+    REQUIRE(manager.has_value());
+
+    // 3 games from the position after e4 e5, all playing Nf3
+    // result: +1 (white wins) at avg_elo=2500, 0 (draw) at avg_elo=2000, -1 (black wins) at avg_elo=1500
+    // expected score = (1*2500 + 0*2000 + -1*1500) / (2500+2000+1500) = 1000/6000 ≈ 0.1667
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    constexpr auto elo_a = std::int32_t {2500};
+    constexpr auto elo_b = std::int32_t {2000};
+    constexpr auto elo_c = std::int32_t {1500};
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                         .result = "1-0",
+                                         .white_elo = elo_a,
+                                         .black_elo = elo_a,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3", "d6"},
+                                         .result = "1/2-1/2",
+                                         .white_elo = elo_b,
+                                         .black_elo = elo_b,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3", "Nf6"},
+                                         .result = "0-1",
+                                         .white_elo = elo_c,
+                                         .black_elo = elo_c,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.min_elo = min_elo_all;  // passes all three games
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->continuations.size() == 1);
+
+    auto const& cont = stats->continuations.front();
+    CHECK(cont.san == "Nf3");
+    CHECK(cont.frequency == 3);
+
+    constexpr auto expected_score = 1000.0 / 6000.0;
+    CHECK_THAT(cont.elo_weighted_score, Catch::Matchers::WithinAbs(expected_score, score_tolerance));
+}
+
+TEST_CASE("opening_stats::query elo_weighted_score excludes games with missing Elo", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_elo_null"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-elo-null-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    // Game A: 1-0, elo=2500/2500 — contributes to weighted score
+    // Game B: 1-0, elo=null/null — counted in frequency but excluded from score
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = std::nullopt,
+                                         .black_elo = std::nullopt,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.result = "1-0";  // both games match, trigger filtered path
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->continuations.size() == 1);
+
+    auto const& cont = stats->continuations.front();
+    CHECK(cont.frequency == 2);  // both counted
+    // Only game A (elo=2500/2500) contributes: score = 1.0 (white won, avg_elo=2500 / avg_elo=2500)
+    CHECK_THAT(cont.elo_weighted_score, Catch::Matchers::WithinAbs(1.0, score_tolerance));
+}
+
+TEST_CASE("opening_stats::query continuations sorted by frequency desc then SAN asc", "[motif-search][opening_stats][filter]")
+{
+    tmp_dir const tdir {"filter_sort"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-sort-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    // 2 games play Nf3, 1 game plays Nc3 — Nf3 should appear first (higher frequency)
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nc3"},
+                                         .result = "1/2-1/2",
+                                         .white_elo = white_elo_low,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.min_elo = min_elo_all;
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5, filter);
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->continuations.size() == 2);
+    CHECK(stats->continuations[0].san == "Nf3");  // freq=2 first
+    CHECK(stats->continuations[0].frequency == 2);
+    CHECK(stats->continuations[1].san == "Nc3");  // freq=1 second
+    CHECK(stats->continuations[1].frequency == 1);
+}
+
+TEST_CASE("opening_stats::query filtered with transposition counts only games through parent", "[motif-search][opening_stats][filter]")
+{
+    // Game 1 reaches child_hash via Nf3 Nc6 Nc3 Nf6; Game 2 reaches child_hash via
+    // Nc3 Nf6 Nf3 Nc6 (transposition). Both have "Carlsen" as white.
+    // Query from parent_hash (after Nf3 Nc6 Nc3): only game 1 passes through this
+    // parent. Filter returns [game1] → total_games=1, frequency=1 (game2 never
+    // visits parent_hash so it is excluded from filtered_ids).
+    tmp_dir const tdir {"filter_transposition"};
+    auto manager = motif::db::database_manager::create(tdir.path, "filter-transposition-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"Nf3", "Nc6", "Nc3", "Nf6", "e4"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Carlsen",
+                                              "Opp1"),
+                              make_game_named({.sans = {"Nc3", "Nf6", "Nf3", "Nc6", "e4"},
+                                               .result = "0-1",
+                                               .white_elo = white_elo_mid,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Carlsen",
+                                              "Opp2")});
+
+    auto const parent_hash = hash_after_sans({"Nf3", "Nc6", "Nc3"});
+    auto const child_hash = hash_after_sans({"Nf3", "Nc6", "Nc3", "Nf6"});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Carlsen";
+
+    auto stats = motif::search::opening_stats::query(*manager, parent_hash, filter);
+    REQUIRE(stats.has_value());
+    // Only game 1 passes through this parent position
+    CHECK(stats->total_games == 1);
+    REQUIRE(stats->continuations.size() == 1);
+
+    auto const& cont = stats->continuations.front();
+    CHECK(cont.san == "Nf6");
+    CHECK(cont.result_hash == child_hash);
+    // Only game1 is in filtered_ids (game2 never passes through parent_hash)
+    CHECK(cont.frequency == 1);
 }

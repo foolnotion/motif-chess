@@ -28,6 +28,7 @@ struct continuation
     std::optional<double> average_black_elo;
     std::optional<std::string> eco;
     std::optional<std::string> opening_name;
+    double elo_weighted_score {0.0};
 };
 
 struct stats
@@ -39,5 +40,7 @@ struct stats
 };
 
 [[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash) -> result<stats>;
+[[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash, motif::db::search_filter const& filter)
+    -> result<stats>;
 
 }  // namespace motif::search::opening_stats

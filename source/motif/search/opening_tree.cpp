@@ -340,7 +340,7 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
             if (!board_at_hash.contains(agg.result_hash)) {
                 auto child_board = parent_board;
                 motif::chess::apply_encoded_move(child_board, enc);
-                board_at_hash.emplace(agg.result_hash, child_board);
+                board_at_hash.emplace(agg.result_hash, std::move(child_board));
             }
         }
     }
@@ -395,13 +395,13 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
     return result_tree;
 }
 
-auto expand(motif::db::database_manager const& database, node& n) -> result<void>
+auto expand(motif::db::database_manager const& database, node& n, motif::db::search_filter const& filter) -> result<void>
 {
     if (n.is_expanded) {
         return {};
     }
 
-    auto stats_res = opening_stats::query(database, n.zobrist_hash);
+    auto stats_res = opening_stats::query(database, n.zobrist_hash, filter);
     if (!stats_res) {
         return tl::unexpected {stats_res.error()};
     }
@@ -428,6 +428,11 @@ auto expand(motif::db::database_manager const& database, node& n) -> result<void
     }
     n.is_expanded = true;
     return {};
+}
+
+auto expand(motif::db::database_manager const& database, node& n) -> result<void>
+{
+    return expand(database, n, motif::db::search_filter {});
 }
 
 }  // namespace motif::search::opening_tree
