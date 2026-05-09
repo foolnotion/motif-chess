@@ -239,7 +239,11 @@ auto populate_position_temp_table(sqlite3* conn, std::vector<game_id> const& gam
         }
 
         for (std::size_t i = 0; i < batch_count; ++i) {
-            sqlite3_bind_int64(stmt->get(), static_cast<int>(i + 1U), static_cast<sqlite3_int64>(game_ids[batch_start + i].value));
+            if (sqlite3_bind_int64(stmt->get(), static_cast<int>(i + 1U), static_cast<sqlite3_int64>(game_ids[batch_start + i].value))
+                != SQLITE_OK)
+            {
+                return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(conn)}};
+            }
         }
 
         if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
@@ -804,7 +808,7 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
     }
 
     // language=sql
-    static constexpr char const* count_sql = R"sql(
+    constexpr auto count_sql = R"sql(
         SELECT COUNT(*)
         FROM game g
         JOIN player w ON w.id = g.white_id
@@ -842,7 +846,7 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
     }
 
     // language=sql
-    static constexpr char const* data_sql = R"sql(
+    constexpr auto data_sql = R"sql(
         SELECT
             g.id,
             w.name,
@@ -929,7 +933,8 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
         return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
-    static constexpr char const* count_sql = R"sql(
+    // language=sql
+    constexpr auto count_sql = R"sql(
         SELECT COUNT(*)
         FROM game g
         JOIN _position_game_ids pgi ON pgi.id = g.id
@@ -967,7 +972,8 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
         return game_list_result {.games = {}, .total_count = total_count};
     }
 
-    static constexpr char const* data_sql = R"sql(
+    // language=sql
+    constexpr auto data_sql = R"sql(
         SELECT
             g.id,
             w.name,
@@ -1046,7 +1052,7 @@ auto game_store::find_game_ids_with_filter(std::vector<game_id> const& game_ids,
     }
 
     // language=sql
-    static constexpr char const* ids_sql = R"sql(
+    constexpr auto ids_sql = R"sql(
         SELECT g.id
         FROM game g
         JOIN _position_game_ids pgi ON pgi.id = g.id

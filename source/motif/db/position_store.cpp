@@ -104,7 +104,7 @@ auto populate_filtered_game_ids_table(duckdb_connection con, std::vector<motif::
     // language=sql
     constexpr auto create_filtered_game_ids = R"sql(
         CREATE TEMP TABLE IF NOT EXISTS _filtered_game_ids (
-            game_id UINTEGER NOT NULL
+            game_id UINTEGER NOT NULL PRIMARY KEY
         )
     )sql";
     // language=sql
@@ -125,8 +125,14 @@ auto populate_filtered_game_ids_table(duckdb_connection con, std::vector<motif::
     }
 
     for (auto const game_id : game_ids) {
-        duckdb_appender_begin_row(appender);
-        duckdb_append_uint32(appender, game_id.value);
+        if (duckdb_appender_begin_row(appender) == DuckDBError) {
+            duckdb_appender_destroy(&appender);
+            return tl::unexpected {motif::db::error_code::io_failure};
+        }
+        if (duckdb_append_uint32(appender, game_id.value) == DuckDBError) {
+            duckdb_appender_destroy(&appender);
+            return tl::unexpected {motif::db::error_code::io_failure};
+        }
         if (duckdb_appender_end_row(appender) == DuckDBError) {
             duckdb_appender_destroy(&appender);
             return tl::unexpected {motif::db::error_code::io_failure};
