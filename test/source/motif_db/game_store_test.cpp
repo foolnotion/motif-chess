@@ -288,6 +288,34 @@ TEST_CASE("game_store: find_games filters by player substring and result", "[mot
     CHECK(games->games.front().result == "0-1");
 }
 
+TEST_CASE("game_store: find_game_ids_with_filter returns all matching ids without pagination", "[motif_db][game_store]")
+{
+    db_fixture fix;
+    auto first = make_game("Magnus Carlsen", "Opponent A");
+    first.result = "1-0";
+    auto second = make_game("Fabiano Caruana", "Opponent B");
+    second.result = "0-1";
+    auto third = make_game("Magnus Carlsen", "Opponent C");
+    third.result = "1-0";
+
+    auto const first_id = fix.store.insert(first);
+    auto const second_id = fix.store.insert(second);
+    auto const third_id = fix.store.insert(third);
+    REQUIRE(first_id.has_value());
+    REQUIRE(second_id.has_value());
+    REQUIRE(third_id.has_value());
+
+    auto const ids = std::vector<motif::db::game_id> {*first_id, *second_id, *third_id};
+    auto const filtered = fix.store.find_game_ids_with_filter(ids,
+                                                              motif::db::search_filter {
+                                                                  .player_name = "Magnus",
+                                                                  .result = "1-0",
+                                                              });
+
+    REQUIRE(filtered.has_value());
+    CHECK(*filtered == std::vector<motif::db::game_id> {*first_id, *third_id});
+}
+
 TEST_CASE("game_store: find_games applies stable limit and offset", "[motif_db][game_store]")
 {
     db_fixture fix;

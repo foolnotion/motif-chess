@@ -100,6 +100,7 @@ struct opening_stat_agg_row
     std::optional<double> avg_black_elo;
     motif::db::game_id eco_sample_min {};
     motif::db::game_id eco_sample_max {};
+    std::optional<double> elo_weighted_score;
 };
 
 // source_type values: "manual" (user-added via API), "imported" (bulk import).

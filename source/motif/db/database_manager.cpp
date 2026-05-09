@@ -212,7 +212,7 @@ database_manager::database_manager(database_manager&& other) noexcept
     , dir_ {std::move(other.dir_)}
     , duck_db_ {std::exchange(other.duck_db_, nullptr)}
     , duck_con_ {std::exchange(other.duck_con_, nullptr)}
-    , positions_ {other.positions_}
+    , positions_ {std::move(other.positions_)}
 {
     other.store_.reset();
     other.writer_.reset();
@@ -230,7 +230,7 @@ auto database_manager::operator=(database_manager&& other) noexcept -> database_
         dir_ = std::move(other.dir_);
         duck_db_ = std::exchange(other.duck_db_, nullptr);
         duck_con_ = std::exchange(other.duck_con_, nullptr);
-        positions_ = other.positions_;
+        positions_ = std::move(other.positions_);
         other.store_.reset();
         other.writer_.reset();
         other.positions_.reset();

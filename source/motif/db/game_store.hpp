@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -59,6 +60,8 @@ class game_store
     auto get_game_contexts(std::vector<game_id> const& game_ids) -> result<gtl::flat_hash_map<game_id, game_context>>;
     auto get_game_contexts(std::vector<game_id> const& game_ids) const -> result<gtl::flat_hash_map<game_id, game_context>>;
     auto find_games(search_filter const& filter) const -> result<game_list_result>;
+    // Returns all IDs from game_ids that satisfy the metadata filter; no pagination cap.
+    auto find_game_ids_with_filter(std::vector<game_id> const& game_ids, search_filter const& filter) const -> result<std::vector<game_id>>;
     auto count_games() const -> result<std::int64_t>;
 
     // Delete the game row and all associated game_tag rows.
@@ -95,6 +98,7 @@ class game_store
     friend class database_manager;
 
     sqlite3* db_;
+    mutable std::mutex position_game_ids_mutex_;
     gtl::flat_hash_map<std::string, std::int64_t> player_id_cache_;
     gtl::flat_hash_map<std::string, std::int64_t> event_id_cache_;
     gtl::flat_hash_map<std::string, std::int64_t> tag_id_cache_;
