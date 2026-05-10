@@ -80,6 +80,22 @@ claims:
 
 Omit claims for things you only read. Include one claim per distinct field changed.
 
+## Reconciliation
+
+To apply pending session files to entity frontmatter, run the `bmad-reconcile-session` skill
+(Claude Code: `/bmad-reconcile-session`). For OpenCode or other agents without skill support,
+follow the algorithm in `.claude/skills/bmad-reconcile-session/SKILL.md` directly:
+
+1. Find all `meta/sessions/session-*.yaml` files with `status: pending-reconciliation`.
+2. For each `status_update` / `field_update` claim, locate the entity file via
+   `meta/registry.yaml` + `bmad-output/implementation-artifacts/`, update the YAML frontmatter,
+   and set `provenance.modified` to today.
+3. Check for conflicts: if two sessions set different values for the same `(target, field)`,
+   write a conflict file to `meta/conflicts/` and do not apply either claim silently.
+4. Set the session `status` to `committed` (no conflicts) or `conflicted`, and add
+   `reconciled_at: "<ISO-8601 timestamp>"`.
+5. `insight` claims are informational — do not apply to entity frontmatter.
+
 ## Devlog
 
 When asked "devlog", produce an entry for docs/devlog/YYYY-WNN.md:
