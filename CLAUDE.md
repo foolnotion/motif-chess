@@ -32,7 +32,14 @@ DuckDB API restrictions, error handling, module boundaries, packaging workflow, 
 
 ## Workflow
 
-- Each feature has a spec in specs/NNN-name/spec.md
+- Feature specs, BMAD artifacts, and sprint state live in the sibling repo `motif-chess-meta`
+  (path: `../motif-chess-meta`). Specs are at `specs/NNN-name/spec.md` there.
+- After cloning, create these symlinks so BMAD skill scripts resolve correctly:
+  ```
+  ln -s ../motif-chess-meta/bmad _bmad
+  ln -s ../motif-chess-meta/bmad-output _bmad-output
+  ln -s ../motif-chess-meta/specs specs
+  ```
 - One spec at a time, one branch per spec
 - Done = all acceptance criteria checked off
 - Do not start a spec whose dependencies are incomplete

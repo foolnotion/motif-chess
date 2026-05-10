@@ -68,6 +68,17 @@ constexpr idx_t white_elo = 6;
 constexpr idx_t black_elo = 7;
 }  // namespace tree_slice_col
 
+// Column positions for query_elo_distribution SELECT
+namespace elo_distribution_col
+{
+constexpr idx_t encoded_move = 0;
+constexpr idx_t elo_bucket_floor = 1;
+constexpr idx_t white_wins = 2;
+constexpr idx_t draws = 3;
+constexpr idx_t black_wins = 4;
+constexpr idx_t game_count = 5;
+}  // namespace elo_distribution_col
+
 // Column positions for query_opening_stats SELECT
 namespace opening_stats_col
 {
@@ -681,6 +692,214 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
             .eco_sample_min = motif::db::game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_min, row)},
             .eco_sample_max = motif::db::game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_max, row)},
             .elo_weighted_score = read_optional_double(guard.res, opening_stats_col::elo_weighted_score, row),
+        });
+    }
+
+    return rows;
+}
+
+auto position_store::query_elo_distribution(zobrist_hash const hash, int const bucket_width) const
+    -> result<std::vector<elo_distribution_row>>
+{
+    // language=sql
+    auto const sql = fmt::format(
+        R"sql(
+        WITH deduped AS (
+            SELECT
+                p_root.game_id,
+                p_cont.encoded_move,
+                p_root.result,
+                CAST(floor(CAST(p_root.white_elo + p_root.black_elo AS DOUBLE) / 2.0 / {1}) * {1} AS INTEGER) AS elo_bucket_floor
+            FROM position p_root
+            JOIN position p_cont
+                ON p_cont.game_id = p_root.game_id
+               AND p_cont.ply = p_root.ply + 1
+            WHERE p_root.zobrist_hash = CAST({0} AS UBIGINT)
+              AND p_root.white_elo IS NOT NULL
+              AND p_root.black_elo IS NOT NULL
+            GROUP BY p_root.game_id, p_cont.encoded_move, p_root.result, p_root.white_elo, p_root.black_elo
+        ),
+        move_buckets AS (
+            SELECT
+                encoded_move,
+                elo_bucket_floor,
+                COUNT(CASE WHEN result > 0 THEN 1 END) AS white_wins,
+                COUNT(CASE WHEN result = 0 THEN 1 END) AS draws,
+                COUNT(CASE WHEN result < 0 THEN 1 END) AS black_wins,
+                COUNT(*) AS game_count
+            FROM deduped
+            GROUP BY encoded_move, elo_bucket_floor
+        ),
+        per_move_range AS (
+            SELECT encoded_move,
+                   MIN(elo_bucket_floor) AS min_bucket,
+                   MAX(elo_bucket_floor) AS max_bucket
+            FROM move_buckets
+            GROUP BY encoded_move
+        ),
+        global_range AS (
+            SELECT MIN(min_bucket) AS gmin, MAX(max_bucket) AS gmax
+            FROM per_move_range
+        ),
+        all_buckets AS (
+            SELECT CAST(unnest(generate_series(gmin::BIGINT, gmax::BIGINT, {1}::BIGINT)) AS INTEGER) AS bucket
+            FROM global_range
+            WHERE gmin IS NOT NULL
+        ),
+        all_moves AS (
+            SELECT DISTINCT encoded_move FROM move_buckets
+        ),
+        bucket_spine AS (
+            SELECT m.encoded_move, ab.bucket AS elo_bucket_floor
+            FROM all_moves m
+            CROSS JOIN all_buckets ab
+            JOIN per_move_range r ON r.encoded_move = m.encoded_move
+            WHERE ab.bucket >= r.min_bucket
+              AND ab.bucket <= r.max_bucket
+        )
+        SELECT
+            CAST(bs.encoded_move AS USMALLINT) AS encoded_move,
+            bs.elo_bucket_floor,
+            CAST(COALESCE(mb.white_wins, 0) AS UINTEGER) AS white_wins,
+            CAST(COALESCE(mb.draws, 0) AS UINTEGER) AS draws,
+            CAST(COALESCE(mb.black_wins, 0) AS UINTEGER) AS black_wins,
+            CAST(COALESCE(mb.game_count, 0) AS UINTEGER) AS game_count
+        FROM bucket_spine bs
+        LEFT JOIN move_buckets mb
+            ON mb.encoded_move = bs.encoded_move
+           AND mb.elo_bucket_floor = bs.elo_bucket_floor
+        ORDER BY bs.encoded_move, bs.elo_bucket_floor
+        )sql",
+        hash.value,
+        bucket_width);
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const nrows = static_cast<std::size_t>(duckdb_row_count(&guard.res));
+    std::vector<elo_distribution_row> rows;
+    rows.reserve(nrows);
+
+    for (std::size_t i = 0; i < nrows; ++i) {
+        auto const row = static_cast<idx_t>(i);
+        rows.push_back(elo_distribution_row {
+            .encoded_move = duckdb_value_uint16(&guard.res, elo_distribution_col::encoded_move, row),
+            .elo_bucket_floor = duckdb_value_int32(&guard.res, elo_distribution_col::elo_bucket_floor, row),
+            .white_wins = duckdb_value_uint32(&guard.res, elo_distribution_col::white_wins, row),
+            .draws = duckdb_value_uint32(&guard.res, elo_distribution_col::draws, row),
+            .black_wins = duckdb_value_uint32(&guard.res, elo_distribution_col::black_wins, row),
+            .game_count = duckdb_value_uint32(&guard.res, elo_distribution_col::game_count, row),
+        });
+    }
+
+    return rows;
+}
+
+auto position_store::query_elo_distribution(zobrist_hash const hash, std::vector<game_id> const& game_ids, int const bucket_width) const
+    -> result<std::vector<elo_distribution_row>>
+{
+    if (game_ids.empty()) {
+        return std::vector<elo_distribution_row> {};
+    }
+
+    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
+        return tl::unexpected {populate_res.error()};
+    }
+
+    // language=sql
+    auto const sql = fmt::format(
+        R"sql(
+        WITH deduped AS (
+            SELECT
+                p_root.game_id,
+                p_cont.encoded_move,
+                p_root.result,
+                CAST(floor(CAST(p_root.white_elo + p_root.black_elo AS DOUBLE) / 2.0 / {1}) * {1} AS INTEGER) AS elo_bucket_floor
+            FROM position p_root
+            JOIN _filtered_game_ids fgi ON fgi.game_id = p_root.game_id
+            JOIN position p_cont
+                ON p_cont.game_id = p_root.game_id
+               AND p_cont.ply = p_root.ply + 1
+            WHERE p_root.zobrist_hash = CAST({0} AS UBIGINT)
+              AND p_root.white_elo IS NOT NULL
+              AND p_root.black_elo IS NOT NULL
+            GROUP BY p_root.game_id, p_cont.encoded_move, p_root.result, p_root.white_elo, p_root.black_elo
+        ),
+        move_buckets AS (
+            SELECT
+                encoded_move,
+                elo_bucket_floor,
+                COUNT(CASE WHEN result > 0 THEN 1 END) AS white_wins,
+                COUNT(CASE WHEN result = 0 THEN 1 END) AS draws,
+                COUNT(CASE WHEN result < 0 THEN 1 END) AS black_wins,
+                COUNT(*) AS game_count
+            FROM deduped
+            GROUP BY encoded_move, elo_bucket_floor
+        ),
+        per_move_range AS (
+            SELECT encoded_move,
+                   MIN(elo_bucket_floor) AS min_bucket,
+                   MAX(elo_bucket_floor) AS max_bucket
+            FROM move_buckets
+            GROUP BY encoded_move
+        ),
+        global_range AS (
+            SELECT MIN(min_bucket) AS gmin, MAX(max_bucket) AS gmax
+            FROM per_move_range
+        ),
+        all_buckets AS (
+            SELECT CAST(unnest(generate_series(gmin::BIGINT, gmax::BIGINT, {1}::BIGINT)) AS INTEGER) AS bucket
+            FROM global_range
+            WHERE gmin IS NOT NULL
+        ),
+        all_moves AS (
+            SELECT DISTINCT encoded_move FROM move_buckets
+        ),
+        bucket_spine AS (
+            SELECT m.encoded_move, ab.bucket AS elo_bucket_floor
+            FROM all_moves m
+            CROSS JOIN all_buckets ab
+            JOIN per_move_range r ON r.encoded_move = m.encoded_move
+            WHERE ab.bucket >= r.min_bucket
+              AND ab.bucket <= r.max_bucket
+        )
+        SELECT
+            CAST(bs.encoded_move AS USMALLINT) AS encoded_move,
+            bs.elo_bucket_floor,
+            CAST(COALESCE(mb.white_wins, 0) AS UINTEGER) AS white_wins,
+            CAST(COALESCE(mb.draws, 0) AS UINTEGER) AS draws,
+            CAST(COALESCE(mb.black_wins, 0) AS UINTEGER) AS black_wins,
+            CAST(COALESCE(mb.game_count, 0) AS UINTEGER) AS game_count
+        FROM bucket_spine bs
+        LEFT JOIN move_buckets mb
+            ON mb.encoded_move = bs.encoded_move
+           AND mb.elo_bucket_floor = bs.elo_bucket_floor
+        ORDER BY bs.encoded_move, bs.elo_bucket_floor
+        )sql",
+        hash.value,
+        bucket_width);
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const nrows = static_cast<std::size_t>(duckdb_row_count(&guard.res));
+    std::vector<elo_distribution_row> rows;
+    rows.reserve(nrows);
+
+    for (std::size_t i = 0; i < nrows; ++i) {
+        auto const row = static_cast<idx_t>(i);
+        rows.push_back(elo_distribution_row {
+            .encoded_move = duckdb_value_uint16(&guard.res, elo_distribution_col::encoded_move, row),
+            .elo_bucket_floor = duckdb_value_int32(&guard.res, elo_distribution_col::elo_bucket_floor, row),
+            .white_wins = duckdb_value_uint32(&guard.res, elo_distribution_col::white_wins, row),
+            .draws = duckdb_value_uint32(&guard.res, elo_distribution_col::draws, row),
+            .black_wins = duckdb_value_uint32(&guard.res, elo_distribution_col::black_wins, row),
+            .game_count = duckdb_value_uint32(&guard.res, elo_distribution_col::game_count, row),
         });
     }
 

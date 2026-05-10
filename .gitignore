@@ -20,3 +20,11 @@ compile_commands.json
 
 # Local benchmark corpora
 bench/data/
+
+# Meta-repo content (lives in motif-chess-meta, symlinked locally)
+_bmad
+_bmad/
+_bmad-output
+_bmad-output/
+specs
+specs/
