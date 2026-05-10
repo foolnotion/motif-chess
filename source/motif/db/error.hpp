@@ -18,6 +18,7 @@ enum class error_code : std::uint8_t
     io_failure,
     duplicate,
     not_editable,
+    invalid_argument,
 };
 
 struct error
@@ -58,6 +59,8 @@ using result = tl::expected<T, error>;
             return "duplicate";
         case error_code::not_editable:
             return "not_editable";
+        case error_code::invalid_argument:
+            return "invalid_argument";
     }
 
     return "unknown";

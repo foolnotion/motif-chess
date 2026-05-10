@@ -577,6 +577,10 @@ auto database_manager::query_elo_distribution(zobrist_hash const hash, search_fi
         return tl::unexpected {error_code::io_failure};
     }
 
+    if (bucket_width <= 0) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+
     bool const has_metadata = filter.player_name.has_value() || filter.min_elo.has_value() || filter.max_elo.has_value()
         || filter.result.has_value() || filter.eco_prefix.has_value();
 
