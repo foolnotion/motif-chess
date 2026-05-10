@@ -44,6 +44,12 @@
           };
           inherit (pkgs.llvmPackages_21) stdenv;
           mkShell = pkgs.mkShell.override { inherit stdenv; };
+          kddockwidgets-qtquick = pkgs.kddockwidgets.overrideAttrs (old: {
+            cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+              "-DKDDockWidgets_FRONTENDS=qtquick"
+            ];
+            buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.qt6.qtdeclarative ];
+          });
           glaze-simd-no-ssl = pkgs.glaze.overrideAttrs (old: {
             cmakeFlags = (old.cmakeFlags or [ ]) ++ [
               "-DGLZ_DISABLE_SIMD=OFF"
@@ -113,9 +119,14 @@
             nativeBuildInputs = with pkgs; [
               cmake
               pkg-config
+              qt6.wrapQtAppsHook
             ];
 
             buildInputs = with pkgs; [
+              # Qt 6 — Qt Quick / QML stack (headers confined to motif_app)
+              qt6.qtbase
+              qt6.qtdeclarative
+              kddockwidgets-qtquick
               # core deps (design doc)
               cpptrace
               fmt
