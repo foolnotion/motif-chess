@@ -1530,3 +1530,41 @@ TEST_CASE("query_elo_distribution alternate bucket width produces expected bound
     CHECK((*dist)[0].game_count == 1U);
     CHECK((*dist)[0].white_wins == 1U);
 }
+
+TEST_CASE("query_elo_distribution rejects zero bucket_width", "[motif-search][opening_stats][elo_distribution]")
+{
+    tmp_dir const tdir {"elo_dist_zero_width"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-zero-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"e4", "e5"}), {}, 0);
+    REQUIRE_FALSE(dist.has_value());
+    CHECK(dist.error() == motif::search::error_code::invalid_argument);
+}
+
+TEST_CASE("query_elo_distribution rejects negative bucket_width", "[motif-search][opening_stats][elo_distribution]")
+{
+    tmp_dir const tdir {"elo_dist_neg_width"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-neg-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"e4", "e5"}), {}, -100);
+    REQUIRE_FALSE(dist.has_value());
+    CHECK(dist.error() == motif::search::error_code::invalid_argument);
+}
