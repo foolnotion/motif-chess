@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
+#include <numeric>
 #include <optional>
 #include <ratio>
 #include <string>
@@ -837,6 +838,7 @@ auto make_game_named(game_spec const& spec, std::string_view white_name, std::st
 
 }  // namespace
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("opening_stats::query with empty filter delegates to unfiltered path", "[motif-search][opening_stats][filter]")
 {
     tmp_dir const tdir {"filter_empty"};
@@ -879,6 +881,7 @@ TEST_CASE("opening_stats::query with empty filter delegates to unfiltered path",
     }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("opening_stats::query filtered by player_name restricts game set", "[motif-search][opening_stats][filter]")
 {
     tmp_dir const tdir {"filter_player"};
@@ -1285,4 +1288,245 @@ TEST_CASE("opening_stats::query filtered with transposition counts only games th
     CHECK(cont.result_hash == child_hash);
     // Only game1 is in filtered_ids (game2 never passes through parent_hash)
     CHECK(cont.frequency == 1);
+}
+
+// ─── Elo distribution (3b-3) ─────────────────────────────────────────────────
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("query_elo_distribution sparse-range produces zero-fill between occupied buckets",
+          "[motif-search][opening_stats][elo_distribution]")
+{
+    tmp_dir const tdir {"elo_dist_sparse"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-sparse-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+
+    // Two games playing Nf3, Elos far apart — buckets at 1400 and 2400 (width=100).
+    // Buckets 1500..2300 must be present with game_count=0.
+    constexpr auto elo_low = std::int32_t {1400};
+    constexpr auto elo_high = std::int32_t {2400};
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = elo_low,
+                                         .black_elo = elo_low,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "0-1",
+                                         .white_elo = elo_high,
+                                         .black_elo = elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    constexpr auto bucket_width = 100;
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, after_e4e5, {}, bucket_width);
+    REQUIRE(dist.has_value());
+
+    // Buckets span 1400..2400 inclusive at width=100: 11 buckets
+    constexpr auto expected_bucket_count = std::size_t {11};
+    REQUIRE(dist->size() == expected_bucket_count);
+
+    // All rows belong to the single continuation (Nf3)
+    auto const first_move = (*dist)[0].encoded_move;
+    for (auto const& row : *dist) {
+        CHECK(row.encoded_move == first_move);
+    }
+
+    // Endpoints have data, interior is zero-filled
+    CHECK((*dist).front().elo_bucket_floor == elo_low);
+    CHECK((*dist).front().game_count == 1U);
+    CHECK((*dist).back().elo_bucket_floor == elo_high);
+    CHECK((*dist).back().game_count == 1U);
+
+    auto const zero_buckets =
+        std::ranges::count_if(*dist, [](motif::db::elo_distribution_row const& row) -> bool { return row.game_count == 0; });
+    CHECK(zero_buckets == 9);  // 1500..2300 = 9 zero-filled buckets
+}
+
+TEST_CASE("query_elo_distribution bucket-sum invariant excludes missing-Elo games", "[motif-search][opening_stats][elo_distribution]")
+{
+    tmp_dir const tdir {"elo_dist_sum"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-sum-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+
+    // Game A: has Elo — counted in buckets
+    // Game B: missing Elo — excluded from buckets but counted in opening_stats frequency
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "0-1",
+                                         .white_elo = std::nullopt,
+                                         .black_elo = std::nullopt,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, after_e4e5, {});
+    REQUIRE(dist.has_value());
+
+    auto const total_in_buckets = std::accumulate(dist->begin(),
+                                                  dist->end(),
+                                                  std::uint32_t {0},
+                                                  [](std::uint32_t acc, motif::db::elo_distribution_row const& row) -> std::uint32_t
+                                                  { return acc + row.game_count; });
+
+    // Only game A (with Elo) contributes; game B is excluded
+    CHECK(total_in_buckets == 1U);
+
+    // Verify frequency from query is 2 (both games), confirming the invariant
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5);
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->continuations.size() == 1);
+    CHECK(stats->continuations.front().frequency == 2U);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("query_elo_distribution multiple-continuation isolation", "[motif-search][opening_stats][elo_distribution]")
+{
+    tmp_dir const tdir {"elo_dist_multi"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-multi-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+
+    constexpr auto elo_a = std::int32_t {2000};
+    constexpr auto elo_b = std::int32_t {2200};
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = elo_a,
+                                         .black_elo = elo_a,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nc3"},
+                                         .result = "0-1",
+                                         .white_elo = elo_b,
+                                         .black_elo = elo_b,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    constexpr auto bucket_width = 100;
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, after_e4e5, {}, bucket_width);
+    REQUIRE(dist.has_value());
+
+    // Collect per-move rows
+    auto nf3_rows = std::vector<motif::db::elo_distribution_row> {};
+    auto nc3_rows = std::vector<motif::db::elo_distribution_row> {};
+    for (auto const& row : *dist) {
+        if (row.elo_bucket_floor == elo_a) {
+            nf3_rows.push_back(row);
+        } else if (row.elo_bucket_floor == elo_b) {
+            nc3_rows.push_back(row);
+        }
+    }
+
+    // Each continuation appears in exactly its own bucket, not the other's
+    REQUIRE(!nf3_rows.empty());
+    REQUIRE(!nc3_rows.empty());
+    CHECK(nf3_rows.front().white_wins == 1U);
+    CHECK(nf3_rows.front().black_wins == 0U);
+    CHECK(nc3_rows.front().black_wins == 1U);
+    CHECK(nc3_rows.front().white_wins == 0U);
+
+    // Encoded moves for the two continuations must differ
+    CHECK(nf3_rows.front().encoded_move != nc3_rows.front().encoded_move);
+}
+
+TEST_CASE("query_elo_distribution filtered cases reflect only matching games", "[motif-search][opening_stats][elo_distribution][filter]")
+{
+    tmp_dir const tdir {"elo_dist_filter"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-filter-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+
+    constexpr auto elo_hi = std::int32_t {2500};
+    constexpr auto elo_lo = std::int32_t {1500};
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = elo_hi,
+                                         .black_elo = elo_hi,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "0-1",
+                                         .white_elo = elo_lo,
+                                         .black_elo = elo_lo,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    // Filter out the low-Elo game
+    motif::db::search_filter filter;
+    filter.min_elo = white_elo_mid;  // 2300 — only elo_hi game passes
+
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, after_e4e5, filter);
+    REQUIRE(dist.has_value());
+
+    auto const total_in_buckets = std::accumulate(dist->begin(),
+                                                  dist->end(),
+                                                  std::uint32_t {0},
+                                                  [](std::uint32_t acc, motif::db::elo_distribution_row const& row) -> std::uint32_t
+                                                  { return acc + row.game_count; });
+
+    CHECK(total_in_buckets == 1U);
+    REQUIRE(dist->size() == 1U);
+    CHECK((*dist)[0].white_wins == 1U);
+    CHECK((*dist)[0].black_wins == 0U);
+}
+
+TEST_CASE("query_elo_distribution no-match position returns empty without error", "[motif-search][opening_stats][elo_distribution]")
+{
+    tmp_dir const tdir {"elo_dist_nomatch"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-nomatch-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "c5"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    // Query a position not present in the database
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"d4", "d5", "c4"}), {});
+    REQUIRE(dist.has_value());
+    CHECK(dist->empty());
+}
+
+TEST_CASE("query_elo_distribution alternate bucket width produces expected boundaries", "[motif-search][opening_stats][elo_distribution]")
+{
+    tmp_dir const tdir {"elo_dist_width50"};
+    auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-width50-db");
+    REQUIRE(manager.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+
+    // avg_elo = 2025 → bucket floor with width=50: floor(2025/50)*50 = 40*50 = 2000
+    constexpr auto white_e = std::int32_t {2050};
+    constexpr auto black_e = std::int32_t {2000};  // avg = 2025
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_e,
+                                         .black_elo = black_e,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    constexpr auto bucket_width = 50;
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, after_e4e5, {}, bucket_width);
+    REQUIRE(dist.has_value());
+    REQUIRE(dist->size() == 1U);
+    CHECK((*dist)[0].elo_bucket_floor == 2000);
+    CHECK((*dist)[0].game_count == 1U);
+    CHECK((*dist)[0].white_wins == 1U);
 }

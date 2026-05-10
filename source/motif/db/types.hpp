@@ -103,6 +103,16 @@ struct opening_stat_agg_row
     std::optional<double> elo_weighted_score;
 };
 
+struct elo_distribution_row
+{
+    std::uint16_t encoded_move {};
+    std::int32_t elo_bucket_floor {};
+    std::uint32_t white_wins {};
+    std::uint32_t draws {};
+    std::uint32_t black_wins {};
+    std::uint32_t game_count {};
+};
+
 // source_type values: "manual" (user-added via API), "imported" (bulk import).
 // Only "manual" games are editable or deletable.
 // Existing imported games without a stored source_type default to "imported".
