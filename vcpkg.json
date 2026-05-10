@@ -22,6 +22,19 @@
       "name": "tl-expected"
     },
     {
+      "name": "qtbase",
+      "default-features": false,
+      "features": ["core", "gui"]
+    },
+    {
+      "name": "qtdeclarative"
+    },
+    {
+      "name": "kddockwidgets",
+      "default-features": false,
+      "features": ["qt6", "qtquick"]
+    },
+    {
       "name": "pgnlib"
     }
   ],
