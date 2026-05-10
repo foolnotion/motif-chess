@@ -46,6 +46,7 @@ class board_model : public QObject
   private:
     database_workspace* workspace_ {nullptr};
     game_navigator navigator_;
+    QStringList move_list_;
 };
 
 }  // namespace motif::app

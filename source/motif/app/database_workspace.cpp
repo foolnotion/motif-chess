@@ -76,8 +76,9 @@ auto database_workspace::open_scratch() -> result<void>
     }
     db_.emplace(std::move(*scratch_res));
     kind_ = database_kind::scratch;
-    display_name_ = "Scratch (temporary)";
+    display_name_ = "Scratch";
     active_path_ = "";
+    scratch_dir_ = scratch_dir;
     return {};
 }
 
@@ -86,6 +87,11 @@ void database_workspace::close_active()
     if (db_) {
         db_->close();
         db_.reset();
+    }
+    if (scratch_dir_) {
+        std::error_code remove_err;
+        std::filesystem::remove_all(*scratch_dir_, remove_err);
+        scratch_dir_.reset();
     }
     kind_ = database_kind::none;
     display_name_ = "";

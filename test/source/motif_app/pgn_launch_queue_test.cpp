@@ -1,6 +1,9 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "motif/app/pgn_launch_queue.hpp"
@@ -16,11 +19,18 @@ struct tmp_pgn_file
 
     explicit tmp_pgn_file(std::string const& name)
     {
-        path = std::filesystem::temp_directory_path() / name;
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto const fname = std::filesystem::path {name};
+        auto const unique = fname.stem().string() + "_" + std::to_string(tick) + fname.extension().string();
+        path = std::filesystem::temp_directory_path() / unique;
         std::ofstream {path};
     }
 
-    ~tmp_pgn_file() { std::filesystem::remove(path); }
+    ~tmp_pgn_file()
+    {
+        std::error_code remove_err;
+        std::filesystem::remove(path, remove_err);
+    }
 
     tmp_pgn_file(tmp_pgn_file const&) = delete;
     auto operator=(tmp_pgn_file const&) -> tmp_pgn_file& = delete;
@@ -93,13 +103,13 @@ TEST_CASE("pgn_launch_queue: multiple files — valid and invalid mixed", "[moti
     REQUIRE(queue.invalid_paths.size() == 2);
 }
 
-TEST_CASE("pgn_launch_queue: scratch database exclusion contract", "[motif-app]")
+TEST_CASE("pgn_launch_queue: parse_pgn_args has no filesystem side effects", "[motif-app]")
 {
-    // Queue parsing itself is unrelated to scratch. This test verifies that
-    // parsing does not write any files (i.e., pure function).
-    auto const count_before = std::filesystem::directory_iterator(std::filesystem::temp_directory_path());
+    auto const tmp = std::filesystem::temp_directory_path();
+    auto count = [&]() -> std::ptrdiff_t
+    { return std::distance(std::filesystem::directory_iterator {tmp}, std::filesystem::directory_iterator {}); };
+    auto const before = count();
     auto const queue = motif::app::parse_pgn_args({"nonexistent.pgn"});
     REQUIRE(queue.empty());
-    // No side effects: no files written.
-    (void)count_before;
+    CHECK(count() == before);
 }

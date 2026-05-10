@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -38,7 +39,8 @@ class database_workspace
     // Failed opens leave the previous active database unchanged.
     auto open_database(std::string const& dir_path) -> result<void>;
 
-    // Set scratch as active. Never written to disk, never added to recent list.
+    // Set scratch as active. Creates a temporary on-disk bundle; never added to the recent list.
+    // The bundle is removed when close_active() is called.
     auto open_scratch() -> result<void>;
 
     // Release the active database (returns to none state).
@@ -69,6 +71,7 @@ class database_workspace
     database_kind kind_ {database_kind::none};
     std::string display_name_;
     std::string active_path_;
+    std::optional<std::filesystem::path> scratch_dir_;
 };
 
 }  // namespace motif::app
