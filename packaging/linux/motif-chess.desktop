@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=motif-chess
+Comment=Chess database and analysis tool
+Exec=motif_chess %F
+TryExec=motif_chess
+Icon=motif-chess
+Terminal=false
+MimeType=application/x-chess-pgn;
+Categories=Game;BoardGame;
+Keywords=chess;database;pgn;analysis;
