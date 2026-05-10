@@ -77,6 +77,18 @@ target_link_libraries(motif_chess_test PRIVATE motif_chess Catch2::Catch2WithMai
 target_compile_features(motif_chess_test PRIVATE cxx_std_23)
 catch_discover_tests(motif_chess_test)
 
+if(motif_ENABLE_APP)
+    add_executable(motif_app_test
+        source/motif_app/app_config_test.cpp
+        source/motif_app/database_workspace_test.cpp
+        source/motif_app/game_navigator_test.cpp
+        source/motif_app/pgn_launch_queue_test.cpp
+    )
+    target_link_libraries(motif_app_test PRIVATE motif_app_lib Catch2::Catch2WithMain)
+    target_compile_features(motif_app_test PRIVATE cxx_std_23)
+    catch_discover_tests(motif_app_test)
+endif()
+
 # ---- End-of-file commands ----
 
 add_folders(Test)

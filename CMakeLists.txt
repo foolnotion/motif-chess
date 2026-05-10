@@ -16,6 +16,12 @@ option(
     OFF
 )
 
+option(
+    motif_ENABLE_APP
+    "Build the motif_app Qt module"
+    OFF
+)
+
 if(motif_ENABLE_X86_64_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=x86-64-v3>)
 endif()
@@ -37,6 +43,9 @@ add_subdirectory(source/motif/import)
 add_subdirectory(source/motif/search)
 add_subdirectory(source/motif/engine)
 add_subdirectory(source/motif/http)
+if(motif_ENABLE_APP)
+  add_subdirectory(source/motif/app)
+endif()
 
 # ---- Install rules ----
 
