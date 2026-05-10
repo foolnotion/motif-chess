@@ -1,0 +1,62 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <tl/expected.hpp>
+
+namespace motif::app
+{
+
+enum class error_code : std::uint8_t
+{
+    ok,
+    io_failure,
+    not_found,
+    malformed_config,
+    no_active_database,
+};
+
+struct error
+{
+    error_code code;
+    std::string message;
+
+    // NOLINTNEXTLINE(google-explicit-constructor,hicpp-explicit-conversions)
+    error(error_code err_code) noexcept
+        : code(err_code)
+    {
+    }
+
+    error(error_code err_code, std::string msg)
+        : code(err_code)
+        , message(std::move(msg))
+    {
+    }
+
+    [[nodiscard]] friend auto operator==(error const& lhs, error_code rhs) noexcept -> bool { return lhs.code == rhs; }
+};
+
+template<typename T>
+using result = tl::expected<T, error>;
+
+[[nodiscard]] constexpr auto to_string(error_code code) noexcept -> std::string_view
+{
+    switch (code) {
+        case error_code::ok:
+            return "ok";
+        case error_code::io_failure:
+            return "io_failure";
+        case error_code::not_found:
+            return "not_found";
+        case error_code::malformed_config:
+            return "malformed_config";
+        case error_code::no_active_database:
+            return "no_active_database";
+    }
+    return "unknown";
+}
+
+}  // namespace motif::app
