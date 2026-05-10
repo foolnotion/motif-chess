@@ -1,6 +1,8 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 
 #include "motif/app/app_config.hpp"
@@ -20,9 +22,16 @@ struct tmp_config_dir
 
     explicit tmp_config_dir(std::string const& suffix)
     {
-        root = std::filesystem::temp_directory_path() / ("motif_app_cfg_test_" + suffix);
+        auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+        root = std::filesystem::temp_directory_path() / ("motif_app_cfg_test_" + suffix + "_" + std::to_string(tick));
         std::filesystem::create_directories(root / "motif-chess");
         config_file = root / "motif-chess" / "config.json";
+        // Save previous value to restore on teardown.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe)
+        char const* prev = getenv("XDG_CONFIG_HOME");
+        if (prev != nullptr) {
+            prev_xdg = prev;
+        }
         // NOLINTNEXTLINE(concurrency-mt-unsafe)
         setenv("XDG_CONFIG_HOME", root.c_str(), 1);
     }
@@ -30,14 +39,21 @@ struct tmp_config_dir
     ~tmp_config_dir()
     {
         std::filesystem::remove_all(root);
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
-        unsetenv("XDG_CONFIG_HOME");
+        if (prev_xdg) {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe)
+            setenv("XDG_CONFIG_HOME", prev_xdg->c_str(), 1);
+        } else {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe)
+            unsetenv("XDG_CONFIG_HOME");
+        }
     }
 
     tmp_config_dir(tmp_config_dir const&) = delete;
     auto operator=(tmp_config_dir const&) -> tmp_config_dir& = delete;
     tmp_config_dir(tmp_config_dir&&) = delete;
     auto operator=(tmp_config_dir&&) -> tmp_config_dir& = delete;
+
+    std::optional<std::string> prev_xdg;
 };
 
 }  // namespace

@@ -8,6 +8,7 @@
 #include <fmt/format.h>
 
 #include "motif/app/database_workspace.hpp"
+#include "motif/db/error.hpp"
 #include "motif/db/types.hpp"
 
 namespace motif::app
@@ -46,12 +47,7 @@ auto board_model::game_loaded() const -> bool
 
 auto board_model::move_list() const -> QStringList
 {
-    auto const moves = navigator_.move_list();
-    auto result = QStringList {};
-    for (auto const& san : moves) {
-        result << QString::fromStdString(san);
-    }
-    return result;
+    return move_list_;
 }
 
 void board_model::load_game(quint32 const game_id)
@@ -64,11 +60,20 @@ void board_model::load_game(quint32 const game_id)
 
     auto game_result = mgr->store().get(motif::db::game_id {game_id});
     if (!game_result) {
-        emit error_occurred(QString::fromStdString(fmt::format("Game {} not found", game_id)));
+        auto const& err = game_result.error();
+        if (err == motif::db::error_code::not_found) {
+            emit error_occurred(QString::fromStdString(fmt::format("Game {} not found", game_id)));
+        } else {
+            emit error_occurred(QString::fromStdString(fmt::format("I/O error loading game {}: {}", game_id, motif::db::to_string(err))));
+        }
         return;
     }
 
     navigator_.load(*game_result);
+    move_list_.clear();
+    for (auto const& san : navigator_.move_list()) {
+        move_list_ << QString::fromStdString(san);
+    }
     emit game_loaded_changed();
     emit position_changed();
 }

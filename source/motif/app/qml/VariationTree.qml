@@ -11,11 +11,11 @@ Item {
     property color text_color: "#d4d4d4"
     property color active_color: "#4fc3f7"
     property color number_color: "#777777"
-    property color bg_color: "transparent"
+    property color bg_color: "#1e1e1e"
 
     Rectangle {
         anchors.fill: parent
-        color: "#1e1e1e"
+        color: bg_color
 
         ListView {
             id: moves_view

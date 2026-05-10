@@ -1,4 +1,5 @@
 #include <QVariantMap>
+#include <QtGlobal>
 #include <string>
 
 #include "motif/app/workspace_controller.hpp"
@@ -14,6 +15,8 @@ workspace_controller::workspace_controller(database_workspace* workspace, pgn_la
     , workspace_(workspace)
     , pgn_queue_(pgn_queue)
 {
+    Q_ASSERT(workspace != nullptr);
+    Q_ASSERT(pgn_queue != nullptr);
 }
 
 auto workspace_controller::has_active() const -> bool

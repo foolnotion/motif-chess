@@ -38,7 +38,7 @@ Item {
         return piece_ch >= '♔' && piece_ch <= '♙'
     }
 
-    // Board occupies a square region centred vertically, leaving room for rank/file labels.
+    // Board occupies a square region centered vertically, leaving room for rank/file labels.
     property real label_size: 18
     property real board_size: Math.min(width - label_size, height - label_size)
     property real sq_size: board_size / 8
@@ -98,7 +98,7 @@ Item {
                             : root.piece_symbol("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
                                                 square.file, square.rank)
                         text: sym
-                        // White pieces rendered light; black pieces dark — both visible on either square colour.
+                        // White pieces rendered light; black pieces dark — both visible on either square color.
                         color: root.is_white_piece(sym) ? "#fffff0" : "#1c1c1c"
                         style: Text.Outline
                         styleColor: root.is_white_piece(sym) ? "#3a3a3a" : "#e8e8e8"

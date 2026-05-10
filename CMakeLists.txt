@@ -19,7 +19,7 @@ option(
 option(
     motif_ENABLE_APP
     "Build the motif_app Qt module"
-    ON
+    OFF
 )
 
 if(motif_ENABLE_X86_64_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
