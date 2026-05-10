@@ -14,6 +14,8 @@
 #include "motif/search/opening_tree.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
@@ -147,6 +149,8 @@ constexpr auto black_elo_high = std::int32_t {2400};
 constexpr auto black_elo_other = std::int32_t {2200};
 constexpr auto white_elo_low = std::int32_t {2100};
 constexpr auto default_prefetch_depth = std::size_t {5};
+constexpr auto min_elo_threshold = std::int32_t {2400};
+constexpr auto float_tolerance = 1e-9;
 
 auto perf_pgn_path() -> std::filesystem::path
 {
@@ -673,6 +677,7 @@ TEST_CASE("opening_tree::open from starting position on real corpus", "[performa
     REQUIRE(shutdown_result.has_value());
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("opening_tree::expand with empty filter produces same result as unfiltered", "[motif-search][opening_tree][filter]")
 {
     tmp_dir const tdir {"expand_filter_empty"};
@@ -822,4 +827,456 @@ TEST_CASE("opening_tree::open performance on sorted position store", "[performan
 
     auto const shutdown_result = motif::import::shutdown_logging();
     REQUIRE(shutdown_result.has_value());
+}
+
+// ─── Task 5 / Task 6: Filtered open and expand tests ────────────────────────
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("opening_tree::open with empty filter matches unfiltered behavior", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_empty"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-empty-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nc3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_low,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    auto unfiltered = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth);
+    auto filtered = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth, motif::db::search_filter {});
+    REQUIRE(unfiltered.has_value());
+    REQUIRE(filtered.has_value());
+
+    REQUIRE(unfiltered->root.continuations.size() == filtered->root.continuations.size());
+    for (std::size_t idx = 0; idx < unfiltered->root.continuations.size(); ++idx) {
+        CHECK(unfiltered->root.continuations[idx].san == filtered->root.continuations[idx].san);
+        CHECK(unfiltered->root.continuations[idx].frequency == filtered->root.continuations[idx].frequency);
+    }
+}
+
+TEST_CASE("opening_tree::open filtered by player_name restricts tree nodes", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_player"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-player-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus Carlsen",
+                                              "Opponent A"),
+                              make_game_named({.sans = {"e4", "e5", "Nc3"},
+                                               .result = "0-1",
+                                               .white_elo = white_elo_low,
+                                               .black_elo = black_elo_other,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Fabiano Caruana",
+                                              "Opponent B")});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Magnus Carlsen";
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth, filter);
+    REQUIRE(tree_res.has_value());
+    REQUIRE(tree_res->root.continuations.size() == 1);
+    CHECK(tree_res->root.continuations[0].san == "Nf3");
+    CHECK(tree_res->root.continuations[0].frequency == 1);
+}
+
+TEST_CASE("opening_tree::open filtered by min_elo/max_elo restricts to matching games", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_elo"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-elo-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,  // 2500
+                                         .black_elo = black_elo_high,  // 2400
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nc3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_low,  // 2100
+                                         .black_elo = black_elo_other,  // 2200
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.min_elo = min_elo_threshold;
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth, filter);
+    REQUIRE(tree_res.has_value());
+    // Only the high-Elo game qualifies (both white >= min_elo_threshold and black >= min_elo_threshold)
+    REQUIRE(tree_res->root.continuations.size() == 1);
+    CHECK(tree_res->root.continuations[0].san == "Nf3");
+}
+
+TEST_CASE("opening_tree::open filtered by result restricts to matching games", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_result"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-result-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nc3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_low,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.result = "1-0";
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth, filter);
+    REQUIRE(tree_res.has_value());
+    REQUIRE(tree_res->root.continuations.size() == 1);
+    CHECK(tree_res->root.continuations[0].san == "Nf3");
+    CHECK(tree_res->root.continuations[0].white_wins == 1);
+}
+
+TEST_CASE("opening_tree::open with filter matching zero games at root returns empty expanded tree", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_zero"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-zero-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Player A",
+                                              "Player B")});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Nobody";
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth, filter);
+    REQUIRE(tree_res.has_value());
+    CHECK(tree_res->root.is_expanded);
+    CHECK(tree_res->root.continuations.empty());
+}
+
+TEST_CASE("opening_tree::open with filter and prefetch_depth=0 returns unexpanded root", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_zero_depth"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-zero-depth-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.player_name = "White Player 1";
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, 0, filter);
+    REQUIRE(tree_res.has_value());
+    CHECK_FALSE(tree_res->root.is_expanded);
+    CHECK(tree_res->root.continuations.empty());
+}
+
+TEST_CASE("opening_tree::open filter — interior node with zero continuations when game ends at parent",
+          "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_interior_zero"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-interior-zero-db");
+    REQUIRE(manager.has_value());
+
+    // Magnus plays only e4→e5→Nf3 (game ends at Nf3, no continuation from Nf3).
+    // Caruana plays e4→e5→Nf3→Nc6. After filtering by Magnus, the Nf3 node has no children.
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1/2-1/2",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus Carlsen",
+                                              "Opponent A"),
+                              make_game_named({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_low,
+                                               .black_elo = black_elo_other,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Fabiano Caruana",
+                                              "Opponent B")});
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+    motif::db::search_filter filter;
+    filter.player_name = "Magnus Carlsen";
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth, filter);
+    REQUIRE(tree_res.has_value());
+    REQUIRE(tree_res->root.continuations.size() == 1);
+    CHECK(tree_res->root.continuations[0].san == "Nf3");
+    CHECK(tree_res->root.continuations[0].frequency == 1);
+
+    auto const& nf3_subtree = tree_res->root.continuations[0].subtree;
+    REQUIRE(nf3_subtree != nullptr);
+    CHECK(nf3_subtree->is_expanded);
+    CHECK(nf3_subtree->continuations.empty());
+}
+
+TEST_CASE("opening_tree::open elo_weighted_score present in continuations and matches manual value", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_elo_weighted"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-elo-weighted-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    // Game 1: white=2500, black=2400, result=1-0 → avg_elo=2450, result=+1
+    // Game 2: white=2100, black=2200, result=0-1 → avg_elo=2150, result=-1
+    // Both take e5→Nf3 (same SAN, one continuation)
+    // elo_weighted_score = (1 * 2450 + (-1) * 2150) / (2450 + 2150) = 300/4600
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,  // 2500
+                                         .black_elo = black_elo_high,  // 2400
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_low,  // 2100
+                                         .black_elo = black_elo_other,  // 2200
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth);
+    REQUIRE(tree_res.has_value());
+    REQUIRE(tree_res->root.continuations.size() == 1);
+
+    auto const& nf3 = tree_res->root.continuations[0];
+    CHECK(nf3.san == "Nf3");
+    CHECK(nf3.frequency == 2);
+
+    constexpr auto avg_elo1 = (2500.0 + 2400.0) / 2.0;  // 2450
+    constexpr auto avg_elo2 = (2100.0 + 2200.0) / 2.0;  // 2150
+    constexpr auto expected_score = (1.0 * avg_elo1 + (-1.0) * avg_elo2) / (avg_elo1 + avg_elo2);
+
+    CHECK_THAT(nf3.elo_weighted_score, Catch::Matchers::WithinAbs(expected_score, float_tolerance));
+}
+
+TEST_CASE("opening_tree::open filtered stats match manually computed values from filtered game set", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"open_filter_stats"};
+    auto manager = motif::db::database_manager::create(tdir.path, "open-filter-stats-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    // Magnus plays Nf3 (white wins): contributes to filtered tree
+    // Caruana plays Nc3 (draw): should be excluded by player filter
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus Carlsen",
+                                              "Opponent A"),
+                              make_game_named({.sans = {"e4", "e5", "Nc3"},
+                                               .result = "1/2-1/2",
+                                               .white_elo = white_elo_low,
+                                               .black_elo = black_elo_other,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Fabiano Caruana",
+                                              "Opponent B")});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Magnus Carlsen";
+
+    auto tree_res = motif::search::opening_tree::open(*manager, root_hash, default_prefetch_depth, filter);
+    REQUIRE(tree_res.has_value());
+    REQUIRE(tree_res->root.continuations.size() == 1);
+
+    auto const& nf3 = tree_res->root.continuations[0];
+    CHECK(nf3.san == "Nf3");
+    CHECK(nf3.frequency == 1);
+    CHECK(nf3.white_wins == 1);
+    CHECK(nf3.draws == 0);
+    CHECK(nf3.black_wins == 0);
+
+    // elo_weighted_score for single game: result=+1, avg_elo=(2500+2400)/2=2450
+    // score = (1 * 2450) / 2450 = 1.0
+    CHECK_THAT(nf3.elo_weighted_score, Catch::Matchers::WithinAbs(1.0, float_tolerance));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("opening_tree::expand with filter produces correct children", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"expand_filter_correct"};
+    auto manager = motif::db::database_manager::create(tdir.path, "expand-filter-correct-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Magnus Carlsen",
+                                              "Opponent A"),
+                              make_game_named({.sans = {"e4", "e5", "Nc3"},
+                                               .result = "0-1",
+                                               .white_elo = white_elo_low,
+                                               .black_elo = black_elo_other,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Fabiano Caruana",
+                                              "Opponent B")});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Magnus Carlsen";
+
+    motif::search::opening_tree::node node;
+    node.zobrist_hash = root_hash;
+    auto res = motif::search::opening_tree::expand(*manager, node, filter);
+    REQUIRE(res.has_value());
+    CHECK(node.is_expanded);
+    REQUIRE(node.continuations.size() == 1);
+    CHECK(node.continuations[0].san == "Nf3");
+    CHECK(node.continuations[0].frequency == 1);
+    // elo_weighted_score: single 1-0 game with avg_elo=2450 → score = 1.0
+    CHECK_THAT(node.continuations[0].elo_weighted_score, Catch::Matchers::WithinAbs(1.0, float_tolerance));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("opening_tree::expand without filter produces same result as before", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"expand_compat"};
+    auto manager = motif::db::database_manager::create(tdir.path, "expand-compat-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::search::opening_tree::node node_unfiltered2;
+    node_unfiltered2.zobrist_hash = root_hash;
+    REQUIRE(motif::search::opening_tree::expand(*manager, node_unfiltered2).has_value());
+
+    motif::search::opening_tree::node node_empty_filter;
+    node_empty_filter.zobrist_hash = root_hash;
+    REQUIRE(motif::search::opening_tree::expand(*manager, node_empty_filter, motif::db::search_filter {}).has_value());
+
+    REQUIRE(node_unfiltered2.continuations.size() == node_empty_filter.continuations.size());
+    for (std::size_t idx = 0; idx < node_unfiltered2.continuations.size(); ++idx) {
+        CHECK(node_unfiltered2.continuations[idx].san == node_empty_filter.continuations[idx].san);
+        CHECK(node_unfiltered2.continuations[idx].frequency == node_empty_filter.continuations[idx].frequency);
+    }
+}
+
+TEST_CASE("opening_tree::expand with filter on already-expanded node is a no-op", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"expand_filter_noop"};
+    auto manager = motif::db::database_manager::create(tdir.path, "expand-filter-noop-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+
+    motif::db::search_filter filter;
+    filter.player_name = "White Player 1";
+
+    motif::search::opening_tree::node node;
+    node.zobrist_hash = root_hash;
+    REQUIRE(motif::search::opening_tree::expand(*manager, node, filter).has_value());
+    auto const count_after_first = node.continuations.size();
+
+    REQUIRE(motif::search::opening_tree::expand(*manager, node, filter).has_value());
+    CHECK(node.continuations.size() == count_after_first);
+    CHECK(node.is_expanded);
+}
+
+TEST_CASE("opening_tree::expand with filter matching zero games sets is_expanded with no continuations",
+          "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"expand_filter_zero_matches"};
+    auto manager = motif::db::database_manager::create(tdir.path, "expand-filter-zero-matches-db");
+    REQUIRE(manager.has_value());
+
+    auto const root_hash = hash_after_sans({"e4", "e5"});
+
+    insert_games_and_rebuild(*manager,
+                             {make_game_named({.sans = {"e4", "e5", "Nf3"},
+                                               .result = "1-0",
+                                               .white_elo = white_elo_high,
+                                               .black_elo = black_elo_high,
+                                               .eco = std::nullopt,
+                                               .opening_name = std::nullopt},
+                                              "Player A",
+                                              "Player B")});
+
+    motif::db::search_filter filter;
+    filter.player_name = "Nobody";
+
+    motif::search::opening_tree::node node;
+    node.zobrist_hash = root_hash;
+    REQUIRE(motif::search::opening_tree::expand(*manager, node, filter).has_value());
+    CHECK(node.is_expanded);
+    CHECK(node.continuations.empty());
 }

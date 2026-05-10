@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <duckdb.h>
 
@@ -43,6 +44,10 @@ class database_manager
     // user_version does not match schema::k_version.
     static auto open(std::filesystem::path const& dir) -> result<database_manager>;
 
+    // Create an ephemeral in-memory database (SQLite :memory: + DuckDB in-memory).
+    // dir() returns an empty path; nothing is written to disk; close() is a no-op for persistence.
+    static auto create_scratch() -> result<database_manager>;
+
     // Access the SQLite game store for CRUD operations.
     [[nodiscard]] auto store() noexcept -> game_store&;
     [[nodiscard]] auto store() const noexcept -> game_store const&;
@@ -71,6 +76,13 @@ class database_manager
     // Note: the two deletions are not atomic across a crash boundary.
     // Returns error_code::not_found if the game does not exist.
     auto remove_game(game_id game_key) -> result<void>;
+
+    // Elo distribution per continuation from a given position.
+    // When filter contains metadata criteria, first narrows game IDs via SQLite,
+    // then delegates to position_store with the filtered set. Empty filter uses
+    // the unfiltered position-store query path directly.
+    auto query_elo_distribution(zobrist_hash hash, search_filter const& filter, int bucket_width) const
+        -> result<std::vector<elo_distribution_row>>;
 
     // Filtered game list with cross-store position support.
     // When filter.position is set, queries DuckDB for matching game IDs first,

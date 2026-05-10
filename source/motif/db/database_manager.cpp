@@ -440,6 +440,45 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
     return mgr;
 }
 
+auto database_manager::create_scratch() -> result<database_manager>
+{
+    sqlite3* conn = nullptr;
+    if (sqlite3_open(":memory:", &conn) != SQLITE_OK) {
+        if (conn != nullptr) {
+            sqlite3_close(conn);
+        }
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    if (auto init_res = schema::initialize(conn); !init_res) {
+        sqlite3_close(conn);
+        return tl::unexpected {init_res.error()};
+    }
+
+    database_manager mgr;
+    mgr.conn_ = conn;
+    mgr.store_.emplace(conn);
+    mgr.writer_.emplace(conn);
+    mgr.manifest_ = make_manifest("scratch");
+    // dir_ stays empty — close() skips manifest write for in-memory instances
+
+    if (duckdb_open(nullptr, &mgr.duck_db_) == DuckDBError) {
+        mgr.close();
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (duckdb_connect(mgr.duck_db_, &mgr.duck_con_) == DuckDBError) {
+        mgr.close();
+        return tl::unexpected {error_code::io_failure};
+    }
+    mgr.positions_.emplace(mgr.duck_con_);
+    if (auto schema_res = mgr.positions_->initialize_schema(); !schema_res) {
+        mgr.close();
+        return tl::unexpected {schema_res.error()};
+    }
+
+    return mgr;
+}
+
 // ── Accessors
 // ─────────────────────────────────────────────────────────────────
 
@@ -531,6 +570,42 @@ auto database_manager::remove_game(game_id const game_key) -> result<void>
     return store_->remove(game_key);
 }
 
+auto database_manager::query_elo_distribution(zobrist_hash const hash, search_filter const& filter, int const bucket_width) const
+    -> result<std::vector<elo_distribution_row>>
+{
+    if (!positions_ || !store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    bool const has_metadata = filter.player_name.has_value() || filter.min_elo.has_value() || filter.max_elo.has_value()
+        || filter.result.has_value() || filter.eco_prefix.has_value();
+
+    if (!has_metadata) {
+        return positions_->query_elo_distribution(hash, bucket_width);
+    }
+
+    auto all_ids_res = positions_->distinct_game_ids_by_zobrist(hash);
+    if (!all_ids_res) {
+        return tl::unexpected {all_ids_res.error()};
+    }
+    if (all_ids_res->empty()) {
+        return std::vector<elo_distribution_row> {};
+    }
+
+    auto meta_filter = filter;
+    meta_filter.position = std::nullopt;
+
+    auto filtered_ids_res = store_->find_game_ids_with_filter(*all_ids_res, meta_filter);
+    if (!filtered_ids_res) {
+        return tl::unexpected {filtered_ids_res.error()};
+    }
+    if (filtered_ids_res->empty()) {
+        return std::vector<elo_distribution_row> {};
+    }
+
+    return positions_->query_elo_distribution(hash, *filtered_ids_res, bucket_width);
+}
+
 auto database_manager::find_games(search_filter const& filter) -> result<game_list_result>
 {
     if (!positions_ || !store_) {
@@ -606,7 +681,6 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
     };
 
     log_rss("start");
-
     duckdb_result tx_res {};
     if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
         duckdb_destroy_result(&tx_res);
@@ -653,7 +727,6 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
         return tl::unexpected {error_code::io_failure};
     }
     log_rss("after_collect_game_ids");
-
     std::vector<position_row> pending_rows;
     pending_rows.reserve(rebuild_batch_rows);
 
@@ -720,7 +793,6 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
     }
     duckdb_destroy_result(&commit_res);
     log_rss("after_commit");
-
     return {};
 }
 

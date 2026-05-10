@@ -16,6 +16,8 @@ class database_manager;
 namespace motif::search::opening_stats
 {
 
+inline constexpr int default_elo_bucket_width {25};
+
 struct continuation
 {
     std::string san;
@@ -42,5 +44,11 @@ struct stats
 [[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash) -> result<stats>;
 [[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash, motif::db::search_filter const& filter)
     -> result<stats>;
+
+[[nodiscard]] auto query_elo_distribution(motif::db::database_manager const& database,
+                                          motif::db::zobrist_hash hash,
+                                          motif::db::search_filter const& filter,
+                                          int bucket_width = default_elo_bucket_width)
+    -> result<std::vector<motif::db::elo_distribution_row>>;
 
 }  // namespace motif::search::opening_stats

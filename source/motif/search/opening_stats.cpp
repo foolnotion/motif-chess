@@ -163,6 +163,18 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
     return build_stats(database, hash, *rows_res, static_cast<std::uint32_t>(*total_count_res));
 }
 
+auto query_elo_distribution(motif::db::database_manager const& database,
+                            motif::db::zobrist_hash const hash,
+                            motif::db::search_filter const& filter,
+                            int const bucket_width) -> result<std::vector<motif::db::elo_distribution_row>>
+{
+    auto res = database.query_elo_distribution(hash, filter, bucket_width);
+    if (!res) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return std::move(*res);
+}
+
 auto query(motif::db::database_manager const& database, motif::db::zobrist_hash const hash, motif::db::search_filter const& filter)
     -> result<stats>
 {

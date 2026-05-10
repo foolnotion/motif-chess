@@ -79,6 +79,8 @@ struct tree_continuation_aggregate
     std::uint32_t white_elo_count {};
     std::int64_t black_elo_sum {};
     std::uint32_t black_elo_count {};
+    double weighted_contrib_sum {0.0};  // Σ (result × avg_elo)
+    double elo_weight_sum {0.0};  // Σ avg_elo
     std::optional<std::string> eco;
     std::optional<std::string> opening_name;
     motif::db::game_id sample_game_id {};  // one game that took this continuation, for eco lookup
@@ -108,6 +110,7 @@ void note_result(tree_continuation_aggregate& aggregate, std::int8_t const resul
 }
 
 void note_elo(tree_continuation_aggregate& aggregate,
+              std::int8_t const result,
               std::optional<std::int16_t> const& white_elo,
               std::optional<std::int16_t> const& black_elo)
 {
@@ -118,6 +121,11 @@ void note_elo(tree_continuation_aggregate& aggregate,
     if (black_elo.has_value()) {
         aggregate.black_elo_sum += static_cast<std::int64_t>(*black_elo);
         ++aggregate.black_elo_count;
+    }
+    if (white_elo.has_value() && black_elo.has_value()) {
+        auto const avg_elo = (static_cast<double>(*white_elo) + static_cast<double>(*black_elo)) / 2.0;
+        aggregate.weighted_contrib_sum += static_cast<double>(result) * avg_elo;
+        aggregate.elo_weight_sum += avg_elo;
     }
 }
 
@@ -153,6 +161,7 @@ auto build_continuation(tree_continuation_aggregate const& aggregate,
         .average_black_elo = average_elo(aggregate.black_elo_sum, aggregate.black_elo_count),
         .eco = aggregate.eco,
         .opening_name = aggregate.opening_name,
+        .elo_weighted_score = aggregate.elo_weight_sum > 0.0 ? aggregate.weighted_contrib_sum / aggregate.elo_weight_sum : 0.0,
         .subtree = std::move(child_node),
     };
 }
@@ -238,7 +247,7 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
             }
             ++aggregate.frequency;
             note_result(aggregate, row.result);
-            note_elo(aggregate, row.white_elo, row.black_elo);
+            note_elo(aggregate, row.result, row.white_elo, row.black_elo);
 
             parent_hash = row.child_hash;
         }
@@ -395,6 +404,244 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
     return result_tree;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+auto open(motif::db::database_manager const& database,
+          motif::db::zobrist_hash const root_hash,
+          std::size_t const prefetch_depth,
+          motif::db::search_filter const& filter) -> result<tree>
+{
+    bool const has_metadata = filter.player_name.has_value() || filter.min_elo.has_value() || filter.max_elo.has_value()
+        || filter.result.has_value() || filter.eco_prefix.has_value();
+
+    if (!has_metadata) {
+        return open(database, root_hash, prefetch_depth);
+    }
+
+    if (prefetch_depth == 0U) {
+        return tree {
+            .root = node {.zobrist_hash = root_hash, .continuations = {}, .is_expanded = false},
+            .prefetch_depth = prefetch_depth,
+        };
+    }
+
+    if (prefetch_depth > static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max())) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+
+    auto const max_depth = static_cast<std::uint16_t>(prefetch_depth);
+
+    auto all_ids_res = database.positions().distinct_game_ids_by_zobrist(root_hash);
+    if (!all_ids_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (all_ids_res->empty()) {
+        return tree {
+            .root = node {.zobrist_hash = root_hash, .continuations = {}, .is_expanded = true},
+            .prefetch_depth = prefetch_depth,
+        };
+    }
+
+    auto meta_filter = filter;
+    meta_filter.position = std::nullopt;
+
+    auto filtered_ids_res = database.store().find_game_ids_with_filter(*all_ids_res, meta_filter);
+    if (!filtered_ids_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (filtered_ids_res->empty()) {
+        return tree {
+            .root = node {.zobrist_hash = root_hash, .continuations = {}, .is_expanded = true},
+            .prefetch_depth = prefetch_depth,
+        };
+    }
+
+    auto rows_res = database.positions().query_tree_slice(root_hash, max_depth, *filtered_ids_res);
+    if (!rows_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    if (rows_res->empty()) {
+        return tree {
+            .root = node {.zobrist_hash = root_hash, .continuations = {}, .is_expanded = true},
+            .prefetch_depth = prefetch_depth,
+        };
+    }
+
+    // Group rows by (game_id, root_ply) occurrence.
+    auto rows_by_occurrence = gtl::flat_hash_map<occurrence_key, std::vector<motif::db::tree_position_row>, occurrence_key_hash> {};
+    for (auto const& row : *rows_res) {
+        rows_by_occurrence[occurrence_key {.game_id = row.game_id, .root_ply = row.root_ply}].push_back(row);
+    }
+
+    auto node_aggregates = gtl::flat_hash_map<node_key, node_aggregate, node_key_hash> {};
+
+    for (auto& [occurrence, occurrence_rows] : rows_by_occurrence) {
+        std::ranges::sort(occurrence_rows,
+                          [](motif::db::tree_position_row const& left, motif::db::tree_position_row const& right) -> bool
+                          { return left.depth < right.depth; });
+
+        auto parent_hash = root_hash;
+        for (auto const& row : occurrence_rows) {
+            auto const nkey = node_key {.depth = row.depth, .parent_hash = parent_hash};
+            auto& nag = node_aggregates.try_emplace(nkey, node_aggregate {}).first->second;
+            if (!nag.has_sample) {
+                nag.sample_game_id = occurrence.game_id;
+                nag.sample_root_ply = occurrence.root_ply;
+                nag.has_sample = true;
+            }
+
+            auto& aggregate = nag.continuations.try_emplace(row.encoded_move, tree_continuation_aggregate {}).first->second;
+            aggregate.encoded_move = row.encoded_move;
+            if (aggregate.frequency == 0U) {
+                aggregate.result_hash = row.child_hash;
+                aggregate.sample_game_id = occurrence.game_id;
+            }
+            ++aggregate.frequency;
+            note_result(aggregate, row.result);
+            note_elo(aggregate, row.result, row.white_elo, row.black_elo);
+
+            parent_hash = row.child_hash;
+        }
+    }
+
+    auto all_keys = std::vector<node_key> {};
+    all_keys.reserve(node_aggregates.size());
+    for (auto const& [nkey, nag] : node_aggregates) {
+        all_keys.push_back(nkey);
+    }
+    std::ranges::sort(all_keys,
+                      [](node_key const& left, node_key const& right) -> bool
+                      {
+                          if (left.depth != right.depth) {
+                              return left.depth < right.depth;
+                          }
+                          return left.parent_hash < right.parent_hash;
+                      });
+
+    auto sample_ids = std::vector<motif::db::game_id> {};
+    sample_ids.reserve(node_aggregates.size() * 4U);
+    for (auto const& [nkey, nag] : node_aggregates) {
+        if (nag.has_sample) {
+            sample_ids.push_back(nag.sample_game_id);
+        }
+        for (auto const& [enc, agg] : nag.continuations) {
+            sample_ids.push_back(agg.sample_game_id);
+        }
+    }
+    std::ranges::sort(sample_ids);
+    auto const sample_unique_end = std::ranges::unique(sample_ids);
+    sample_ids.erase(sample_unique_end.begin(), sample_unique_end.end());
+
+    auto sample_contexts_res = database.store().get_game_contexts(sample_ids);
+    if (!sample_contexts_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const& sample_contexts = *sample_contexts_res;
+
+    for (auto& [nkey, nag] : node_aggregates) {
+        for (auto& [enc, agg] : nag.continuations) {
+            auto const ctx_it = sample_contexts.find(agg.sample_game_id);
+            if (ctx_it == sample_contexts.end()) {
+                continue;
+            }
+            auto const& ctx = ctx_it->second;
+            agg.eco = ctx.eco;
+            agg.opening_name = ctx.opening_name;
+        }
+    }
+
+    auto root_board = [&]() -> result<motif::chess::board>
+    {
+        auto const depth1_key = node_key {.depth = 1U, .parent_hash = root_hash};
+        auto const nag_it = node_aggregates.find(depth1_key);
+        if (nag_it == node_aggregates.end()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        if (nag_it->second.sample_root_ply == 0U) {
+            return motif::chess::board {};
+        }
+        auto const ctx_it = sample_contexts.find(nag_it->second.sample_game_id);
+        if (ctx_it == sample_contexts.end()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto replayed = motif::chess::replay(ctx_it->second.moves, nag_it->second.sample_root_ply);
+        if (!replayed) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        return *replayed;
+    }();
+    if (!root_board) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto board_at_hash = gtl::flat_hash_map<motif::db::zobrist_hash, motif::chess::board> {};
+    board_at_hash.emplace(root_hash, *root_board);
+
+    for (auto const& nkey : all_keys) {
+        auto const parent_it = board_at_hash.find(nkey.parent_hash);
+        if (parent_it == board_at_hash.end()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto const parent_board = parent_it->second;
+        auto const& nag = node_aggregates.at(nkey);
+        for (auto const& [enc, agg] : nag.continuations) {
+            if (!board_at_hash.contains(agg.result_hash)) {
+                auto child_board = parent_board;
+                motif::chess::apply_encoded_move(child_board, enc);
+                board_at_hash.emplace(agg.result_hash, std::move(child_board));
+            }
+        }
+    }
+
+    auto built_nodes = gtl::flat_hash_map<node_key, std::unique_ptr<node>, node_key_hash> {};
+
+    for (auto const& nkey : all_keys | std::views::reverse) {
+        auto const nag_it = node_aggregates.find(nkey);
+        if (nag_it == node_aggregates.end()) {
+            continue;
+        }
+        auto const& nag = nag_it->second;
+
+        auto const parent_board_it = board_at_hash.find(nkey.parent_hash);
+        if (parent_board_it == board_at_hash.end()) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto const& parent_board = parent_board_it->second;
+
+        auto current_node = std::make_unique<node>(node {.zobrist_hash = nkey.parent_hash, .continuations = {}, .is_expanded = true});
+
+        for (auto const& [encoded_move, aggregate] : nag.continuations) {
+            auto const child_key = node_key {.depth = static_cast<std::uint16_t>(nkey.depth + 1U), .parent_hash = aggregate.result_hash};
+            auto const is_boundary = nkey.depth >= max_depth;
+            auto cont = build_continuation(aggregate, parent_board, !is_boundary, aggregate.result_hash);
+
+            auto const child_it = built_nodes.find(child_key);
+            if (child_it != built_nodes.end()) {
+                cont.subtree = std::move(child_it->second);
+            }
+
+            current_node->continuations.push_back(std::move(cont));
+        }
+
+        sort_continuations(current_node->continuations);
+        built_nodes[nkey] = std::move(current_node);
+    }
+
+    auto const root_key = node_key {.depth = 1U, .parent_hash = root_hash};
+    auto root_node_it = built_nodes.find(root_key);
+    if (root_node_it == built_nodes.end()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto result_tree = tree {};
+    result_tree.root = std::move(*root_node_it->second);
+    result_tree.root.zobrist_hash = root_hash;
+    result_tree.root.is_expanded = true;
+    result_tree.prefetch_depth = prefetch_depth;
+
+    return result_tree;
+}
+
 auto expand(motif::db::database_manager const& database, node& n, motif::db::search_filter const& filter) -> result<void>
 {
     if (n.is_expanded) {
@@ -419,6 +666,7 @@ auto expand(motif::db::database_manager const& database, node& n, motif::db::sea
             .average_black_elo = cont.average_black_elo,
             .eco = cont.eco,
             .opening_name = cont.opening_name,
+            .elo_weighted_score = cont.elo_weighted_score,
             .subtree = std::make_unique<node>(node {
                 .zobrist_hash = cont.result_hash,
                 .continuations = {},

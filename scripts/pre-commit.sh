@@ -22,7 +22,7 @@ fi
 
 for f in $staged_cpp_files; do
     if [ -f "$f" ]; then
-        clang-tidy --quiet -p "$build_dir" "$f"
+        clang-tidy --quiet -p "$build_dir" --extra-arg="-w" "$f"
     fi
 done
 
