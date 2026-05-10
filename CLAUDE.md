@@ -48,7 +48,27 @@ DuckDB API restrictions, error handling, module boundaries, packaging workflow, 
 
 - Story and spec files use YAML frontmatter: `id`, `uuid`, `type`, `title`, `epic`, `status`, `assignee`, `depends_on`, `implements`, `acceptance_criteria`, `provenance`.
 - `meta/registry.yaml` (in `motif-chess-meta`) maps slugs to UUIDs — add an entry whenever you create a new entity.
-- At session end, write `meta/sessions/session-YYYY-MM-DD-{short-id}.yaml` with `status: pending-reconciliation` and a `claims` list (types: `status_update`, `field_update`, `insight`).
+- At session end, write `meta/sessions/session-YYYY-MM-DD-{short-id}.yaml` with `status: pending-reconciliation` and a `claims` list. Claim types:
+  - `status_update` — entity status changed (e.g. story moved to review)
+  - `field_update` — any other frontmatter field changed (e.g. AC status flipped to verified)
+  - `insight` — technical finding worth preserving across sessions
+
+  Minimal example:
+  ```yaml
+  id: session-2026-05-10-a3f2
+  uuid: <generate-fresh-uuid>
+  type: session
+  agent: claude-sonnet-4-6
+  status: pending-reconciliation
+  claims:
+    - type: status_update
+      target: story-7-2
+      field: status
+      value: review
+    - type: insight
+      text: "Qt QML compiler generates float equality comparisons in property bindings; suppress -Werror=float-equal on the app target only"
+      affects: [story-7-2]
+  ```
 - `sprint-status.yaml` is a **generated view** — never hand-edit it. Run `bmad-sprint-status` to regenerate.
 - Conflicts (two sessions modified the same field on the same entity) go to `meta/conflicts/` — do not silently overwrite.
 - All `depends_on`, `implements`, and `affects` references use **slugs only** — never write UUIDs into these fields.
