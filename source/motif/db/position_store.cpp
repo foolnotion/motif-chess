@@ -701,6 +701,9 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
 auto position_store::query_elo_distribution(zobrist_hash const hash, int const bucket_width) const
     -> result<std::vector<elo_distribution_row>>
 {
+    if (bucket_width <= 0) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
     // language=sql
     auto const sql = fmt::format(
         R"sql(
@@ -800,6 +803,9 @@ auto position_store::query_elo_distribution(zobrist_hash const hash, int const b
 auto position_store::query_elo_distribution(zobrist_hash const hash, std::vector<game_id> const& game_ids, int const bucket_width) const
     -> result<std::vector<elo_distribution_row>>
 {
+    if (bucket_width <= 0) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
     if (game_ids.empty()) {
         return std::vector<elo_distribution_row> {};
     }

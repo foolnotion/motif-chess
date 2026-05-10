@@ -168,8 +168,14 @@ auto query_elo_distribution(motif::db::database_manager const& database,
                             motif::db::search_filter const& filter,
                             int const bucket_width) -> result<std::vector<motif::db::elo_distribution_row>>
 {
+    if (bucket_width <= 0) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
     auto res = database.query_elo_distribution(hash, filter, bucket_width);
     if (!res) {
+        if (res.error() == motif::db::error_code::invalid_argument) {
+            return tl::unexpected {error_code::invalid_argument};
+        }
         return tl::unexpected {error_code::io_failure};
     }
     return std::move(*res);
