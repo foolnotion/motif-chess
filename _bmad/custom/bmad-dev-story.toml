@@ -1,0 +1,16 @@
+[workflow]
+
+on_complete = """
+Before closing this session, write a session file to
+../motif-chess-meta/meta/sessions/session-YYYY-MM-DD-{short-id}.yaml
+(replace YYYY-MM-DD with today's date, short-id with 4-6 random hex chars).
+
+Use status: pending-reconciliation and include a claims list capturing every
+change made during this session:
+  - type: status_update  — for any story/spec status change
+  - type: field_update   — for any other frontmatter field change (AC verified, assignee, provenance, etc.)
+  - type: insight        — for technical findings worth preserving across sessions
+
+Omit claims for things you only read. Follow the full session write protocol in
+CLAUDE.md / AGENTS.md (the example YAML with agent, started, ended, claims fields).
+"""
