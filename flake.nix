@@ -119,14 +119,9 @@
             nativeBuildInputs = with pkgs; [
               cmake
               pkg-config
-              qt6.wrapQtAppsHook
             ];
 
             buildInputs = with pkgs; [
-              # Qt 6 — Qt Quick / QML stack (headers confined to motif_app)
-              qt6.qtbase
-              qt6.qtdeclarative
-              kddockwidgets-qtquick
               # core deps (design doc)
               cpptrace
               fmt
@@ -157,11 +152,22 @@
             ];
           };
 
+          packages.app = packages.default.overrideAttrs (old: {
+            name = "motif-chess-app";
+            cmakeFlags = old.cmakeFlags ++ [ "-Dmotif_ENABLE_APP=ON" ];
+            nativeBuildInputs = old.nativeBuildInputs ++ (with pkgs; [ qt6.wrapQtAppsHook ]);
+            buildInputs = old.buildInputs ++ (with pkgs; [
+              qt6.qtbase
+              qt6.qtdeclarative
+              kddockwidgets-qtquick
+            ]);
+          });
+
           devShells.default = mkShell {
             name = "motif-chess-dev";
 
             nativeBuildInputs =
-              packages.default.nativeBuildInputs
+              packages.app.nativeBuildInputs
               ++ (with pkgs; [
                 # analysis and formatting
                 clang-tools
@@ -180,7 +186,7 @@
               ]);
 
             buildInputs =
-              packages.default.buildInputs
+              packages.app.buildInputs
               ++ (with pkgs; [
                 # testing
                 catch2_3
