@@ -34,6 +34,7 @@ struct node_continuation
     std::optional<double> average_black_elo;
     std::optional<std::string> eco;
     std::optional<std::string> opening_name;
+    double elo_weighted_score {0.0};
     std::unique_ptr<node> subtree;
 };
 
@@ -53,6 +54,11 @@ struct tree
 [[nodiscard]] auto open(motif::db::database_manager const& database,
                         motif::db::zobrist_hash root_hash,
                         std::size_t prefetch_depth = default_prefetch_depth) -> result<tree>;
+
+[[nodiscard]] auto open(motif::db::database_manager const& database,
+                        motif::db::zobrist_hash root_hash,
+                        std::size_t prefetch_depth,
+                        motif::db::search_filter const& filter) -> result<tree>;
 
 [[nodiscard]] auto expand(motif::db::database_manager const& database, node& n) -> result<void>;
 [[nodiscard]] auto expand(motif::db::database_manager const& database, node& n, motif::db::search_filter const& filter) -> result<void>;

@@ -40,6 +40,9 @@ class position_store
     auto delete_by_game_id(game_id game_key) -> result<void>;
     auto update_elo_for_game(game_id game_key, std::optional<std::int16_t> new_white_elo, std::optional<std::int16_t> new_black_elo)
         -> result<void>;
+    auto query_elo_distribution(zobrist_hash hash, int bucket_width) const -> result<std::vector<elo_distribution_row>>;
+    auto query_elo_distribution(zobrist_hash hash, std::vector<game_id> const& game_ids, int bucket_width) const
+        -> result<std::vector<elo_distribution_row>>;
     auto count_by_zobrist(zobrist_hash hash) const -> result<std::int64_t>;
     auto count_distinct_games_by_zobrist(zobrist_hash hash) const -> result<std::int64_t>;
     auto count_distinct_games_by_zobrist(zobrist_hash hash, std::vector<game_id> const& game_ids) const -> result<std::int64_t>;
