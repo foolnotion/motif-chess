@@ -11,7 +11,7 @@ DuckDB API restrictions, error handling, module boundaries, packaging workflow, 
 
 ## Code
 
-- C++23, Clang 21 (llvmPackages_21)
+- C++23, Clang 21
 - Zero warnings from clang-tidy and cppcheck
 - clang-format before every commit
 - tl::expected for errors, not exceptions
@@ -34,12 +34,6 @@ DuckDB API restrictions, error handling, module boundaries, packaging workflow, 
 
 - Feature specs, BMAD artifacts, and sprint state live in the sibling repo `motif-chess-meta`
   (path: `../motif-chess-meta`). Specs are at `specs/NNN-name/spec.md` there.
-- After cloning, create these symlinks so BMAD skill scripts resolve correctly:
-  ```
-  ln -s ../motif-chess-meta/bmad _bmad
-  ln -s ../motif-chess-meta/bmad-output _bmad-output
-  ln -s ../motif-chess-meta/specs specs
-  ```
 - One spec at a time, one branch per spec
 - Done = all acceptance criteria checked off
 - Do not start a spec whose dependencies are incomplete
@@ -48,30 +42,43 @@ DuckDB API restrictions, error handling, module boundaries, packaging workflow, 
 
 - Story and spec files use YAML frontmatter: `id`, `uuid`, `type`, `title`, `epic`, `status`, `assignee`, `depends_on`, `implements`, `acceptance_criteria`, `provenance`.
 - `meta/registry.yaml` (in `motif-chess-meta`) maps slugs to UUIDs — add an entry whenever you create a new entity.
-- At session end, write `meta/sessions/session-YYYY-MM-DD-{short-id}.yaml` with `status: pending-reconciliation` and a `claims` list. Claim types:
-  - `status_update` — entity status changed (e.g. story moved to review)
-  - `field_update` — any other frontmatter field changed (e.g. AC status flipped to verified)
-  - `insight` — technical finding worth preserving across sessions
-
-  Minimal example:
-  ```yaml
-  id: session-2026-05-10-a3f2
-  uuid: <generate-fresh-uuid>
-  type: session
-  agent: claude-sonnet-4-6
-  status: pending-reconciliation
-  claims:
-    - type: status_update
-      target: story-7-2
-      field: status
-      value: review
-    - type: insight
-      text: "Qt QML compiler generates float equality comparisons in property bindings; suppress -Werror=float-equal on the app target only"
-      affects: [story-7-2]
-  ```
-- `sprint-status.yaml` is a **generated view** — never hand-edit it. Run `bmad-sprint-status` to regenerate.
+- `sprint-status.yaml` is a **generated view** — never hand-edit it.
 - Conflicts (two sessions modified the same field on the same entity) go to `meta/conflicts/` — do not silently overwrite.
 - All `depends_on`, `implements`, and `affects` references use **slugs only** — never write UUIDs into these fields.
+
+## Session Write (required at end of every session)
+
+Write `../motif-chess-meta/meta/sessions/session-YYYY-MM-DD-{short-id}.yaml` before closing the
+conversation. Use a short random ID (4–6 hex chars). Set `status: pending-reconciliation`.
+
+Claim types:
+- `status_update` — story/spec status changed
+- `field_update` — any other frontmatter field changed (AC verified, assignee set, etc.)
+- `insight` — technical finding worth preserving across sessions
+
+```yaml
+id: session-2026-05-10-a3f2
+uuid: <generate-fresh-uuid>
+type: session
+agent: <your-agent-id>          # e.g. opencode, claude-sonnet-4-6, gemini-2-5-pro
+started: "2026-05-10T10:00:00Z" # approximate
+ended: "2026-05-10T11:30:00Z"   # approximate
+status: pending-reconciliation
+claims:
+  - type: status_update
+    target: story-7-2
+    field: status
+    value: review
+  - type: field_update
+    target: story-7-2
+    field: provenance.modified
+    value: {at: "2026-05-10", by: claude-sonnet-4-6}
+  - type: insight
+    text: "Qt QML compiler generates float equality comparisons in property bindings; suppress -Werror=float-equal on the app target only"
+    affects: [story-7-2]
+```
+
+Omit claims for things you only read. Include one claim per distinct field changed.
 
 ## Devlog
 

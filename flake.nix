@@ -44,6 +44,12 @@
           };
           inherit (pkgs.llvmPackages_21) stdenv;
           mkShell = pkgs.mkShell.override { inherit stdenv; };
+          kddockwidgets-qtquick = pkgs.kddockwidgets.overrideAttrs (old: {
+            cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+              "-DKDDockWidgets_FRONTENDS=qtquick"
+            ];
+            buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.qt6.qtdeclarative ];
+          });
           glaze-simd-no-ssl = pkgs.glaze.overrideAttrs (old: {
             cmakeFlags = (old.cmakeFlags or [ ]) ++ [
               "-DGLZ_DISABLE_SIMD=OFF"
@@ -146,11 +152,22 @@
             ];
           };
 
+          packages.app = packages.default.overrideAttrs (old: {
+            name = "motif-chess-app";
+            cmakeFlags = old.cmakeFlags ++ [ "-Dmotif_ENABLE_APP=ON" ];
+            nativeBuildInputs = old.nativeBuildInputs ++ (with pkgs; [ qt6.wrapQtAppsHook ]);
+            buildInputs = old.buildInputs ++ (with pkgs; [
+              qt6.qtbase
+              qt6.qtdeclarative
+              kddockwidgets-qtquick
+            ]);
+          });
+
           devShells.default = mkShell {
             name = "motif-chess-dev";
 
             nativeBuildInputs =
-              packages.default.nativeBuildInputs
+              packages.app.nativeBuildInputs
               ++ (with pkgs; [
                 # analysis and formatting
                 clang-tools
@@ -169,7 +186,7 @@
               ]);
 
             buildInputs =
-              packages.default.buildInputs
+              packages.app.buildInputs
               ++ (with pkgs; [
                 # testing
                 catch2_3
