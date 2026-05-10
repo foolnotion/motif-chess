@@ -6,12 +6,52 @@ import QtQuick.Dialogs
 Item {
     id: root
 
+    function folder_url_to_path(folder_url) {
+        if (folder_url === undefined || folder_url === null) {
+            return ""
+        }
+        if (typeof folder_url.toLocalFile === "function") {
+            return folder_url.toLocalFile()
+        }
+        var text = folder_url.toString()
+        if (text.startsWith("file://")) {
+            return decodeURIComponent(text.substring(7))
+        }
+        return text
+    }
+
     // Emitted when any database activation succeeds.
     signal database_activated()
+
+    property bool busy: false
 
     Rectangle {
         anchors.fill: parent
         color: palette.window
+    }
+
+    // Busy overlay — covers the form while a synchronous DB operation runs.
+    Rectangle {
+        anchors.fill: parent
+        color: palette.window
+        opacity: 0.85
+        visible: root.busy
+        z: 10
+
+        ColumnLayout {
+            anchors.centerIn: parent
+            spacing: 16
+
+            BusyIndicator {
+                Layout.alignment: Qt.AlignHCenter
+                running: root.busy
+            }
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                text: "Opening database…"
+                font.pointSize: 11
+            }
+        }
     }
 
     ColumnLayout {
@@ -51,9 +91,11 @@ Item {
             text: "Use Scratch Database"
             Layout.fillWidth: true
             onClicked: {
-                if (workspace.open_scratch()) {
-                    root.database_activated()
-                }
+                root.busy = true
+                Qt.callLater(function() {
+                    if (workspace.open_scratch()) { root.database_activated() }
+                    root.busy = false
+                })
             }
         }
 
@@ -99,9 +141,12 @@ Item {
                 }
 
                 onClicked: {
-                    if (workspace.open_database(modelData.path)) {
-                        root.database_activated()
-                    }
+                    root.busy = true
+                    var p = modelData.path
+                    Qt.callLater(function() {
+                        if (workspace.open_database(p)) { root.database_activated() }
+                        root.busy = false
+                    })
                 }
 
                 // Right-click to remove
@@ -136,7 +181,7 @@ Item {
         id: create_dir_dialog
         title: "Choose Parent Directory for New Database"
         onAccepted: {
-            name_dialog.parent_dir = selectedFolder.toLocalFile()
+            name_dialog.parent_dir = root.folder_url_to_path(selectedFolder)
             name_dialog.open()
         }
     }
@@ -161,9 +206,11 @@ Item {
             var trimmed = name_field.text.trim()
             if (trimmed.length === 0) return
             var bundle_path = name_dialog.parent_dir + "/" + trimmed
-            if (workspace.create_database(bundle_path, trimmed)) {
-                root.database_activated()
-            }
+            root.busy = true
+            Qt.callLater(function() {
+                if (workspace.create_database(bundle_path, trimmed)) { root.database_activated() }
+                root.busy = false
+            })
         }
         onClosed: name_field.clear()
     }
@@ -173,10 +220,12 @@ Item {
         id: open_dir_dialog
         title: "Open Database Bundle"
         onAccepted: {
-            var path = selectedFolder.toLocalFile()
-            if (workspace.open_database(path)) {
-                root.database_activated()
-            }
+            var path = root.folder_url_to_path(selectedFolder)
+            root.busy = true
+            Qt.callLater(function() {
+                if (workspace.open_database(path)) { root.database_activated() }
+                root.busy = false
+            })
         }
     }
 

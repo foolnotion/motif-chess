@@ -22,6 +22,7 @@ class workspace_controller : public QObject
     Q_PROPERTY(QVariantList recent_databases READ recent_databases NOTIFY recent_changed)
     Q_PROPERTY(bool has_queued_pgn READ has_queued_pgn CONSTANT)
     Q_PROPERTY(int queued_pgn_count READ queued_pgn_count CONSTANT)
+    Q_PROPERTY(bool is_importing READ is_importing NOTIFY importing_changed)
 
   public:
     explicit workspace_controller(database_workspace* workspace, pgn_launch_queue const* pgn_queue, QObject* parent = nullptr);
@@ -33,20 +34,25 @@ class workspace_controller : public QObject
     [[nodiscard]] auto recent_databases() const -> QVariantList;
     [[nodiscard]] auto has_queued_pgn() const -> bool;
     [[nodiscard]] auto queued_pgn_count() const -> int;
+    [[nodiscard]] auto is_importing() const -> bool;
 
     Q_INVOKABLE bool create_database(QString const& dir_path, QString const& name);
     Q_INVOKABLE bool open_database(QString const& dir_path);
     Q_INVOKABLE bool open_scratch();
     Q_INVOKABLE bool remove_recent(QString const& path);
+    Q_INVOKABLE void import_pgn(QString const& path);
 
   signals:
     void active_changed();
     void recent_changed();
     void error_occurred(QString const& message);
+    void importing_changed();
+    void import_finished(int committed, int errors);
 
   private:
     database_workspace* workspace_ {nullptr};
     pgn_launch_queue const* pgn_queue_ {nullptr};
+    bool is_importing_ {false};
 };
 
 }  // namespace motif::app
