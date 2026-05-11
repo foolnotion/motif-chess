@@ -78,14 +78,19 @@ target_compile_features(motif_chess_test PRIVATE cxx_std_23)
 catch_discover_tests(motif_chess_test)
 
 if(motif_ENABLE_APP)
+    find_package(Qt6 REQUIRED COMPONENTS Core)
+
     add_executable(motif_app_test
+        ../source/motif/app/game_list_model.cpp
         source/motif_app/app_config_test.cpp
         source/motif_app/database_workspace_test.cpp
+        source/motif_app/game_list_model_test.cpp
         source/motif_app/game_navigator_test.cpp
         source/motif_app/pgn_launch_queue_test.cpp
     )
-    target_link_libraries(motif_app_test PRIVATE motif_app_lib Catch2::Catch2WithMain)
+    target_link_libraries(motif_app_test PRIVATE motif_app_lib Qt6::Core Catch2::Catch2WithMain)
     target_compile_features(motif_app_test PRIVATE cxx_std_23)
+    set_target_properties(motif_app_test PROPERTIES AUTOMOC ON)
     catch_discover_tests(motif_app_test)
 endif()
 
