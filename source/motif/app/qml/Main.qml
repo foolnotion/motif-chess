@@ -66,8 +66,12 @@ ApplicationWindow {
             id: dock_game_list
             uniqueName: "game_list"
             title: "Games"
-            Rectangle { anchors.fill: parent; color: "#2a2a2a"
-                Label { anchors.centerIn: parent; text: "Game List"; color: "white" } }
+            GameListPanel {
+                anchors.fill: parent
+                onGame_activated: function(game_id) {
+                    board.load_game(game_id)
+                }
+            }
         }
 
         KDDW.DockWidget {

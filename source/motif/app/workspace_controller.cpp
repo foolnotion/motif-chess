@@ -6,6 +6,7 @@
 
 #include "motif/app/database_workspace.hpp"
 #include "motif/app/pgn_launch_queue.hpp"
+#include "motif/import/import_pipeline.hpp"
 
 namespace motif::app
 {
@@ -97,11 +98,44 @@ bool workspace_controller::open_scratch()
 bool workspace_controller::remove_recent(QString const& path)
 {
     if (auto res = workspace_->remove_recent_entry(path.toStdString()); !res) {
-        emit error_occurred(QString::fromStdString(res.error().message));
+        emit error_occurred(QString::fromStdString(res.error().message));  // NOLINT(misc-include-cleaner)
         return false;
     }
-    emit recent_changed();
+    emit recent_changed();  // NOLINT(misc-include-cleaner)
     return true;
+}
+
+auto workspace_controller::is_importing() const -> bool
+{
+    return is_importing_;
+}
+
+void workspace_controller::import_pgn(QString const& path)
+{
+    if (is_importing_) {
+        return;
+    }
+
+    auto* dbm = workspace_->persistent_db();
+    if (dbm == nullptr) {
+        emit error_occurred(QStringLiteral("No active database"));  // NOLINT(misc-include-cleaner)
+        return;
+    }
+
+    is_importing_ = true;
+    emit importing_changed();  // NOLINT(misc-include-cleaner)
+
+    motif::import::import_pipeline pipeline(*dbm);
+    auto result = pipeline.run(path.toStdString());
+
+    is_importing_ = false;
+    emit importing_changed();  // NOLINT(misc-include-cleaner)
+
+    if (!result) {
+        emit error_occurred(QString::fromStdString(result.error().message));  // NOLINT(misc-include-cleaner)
+        return;
+    }
+    emit import_finished(static_cast<int>(result->committed), static_cast<int>(result->errors));  // NOLINT(misc-include-cleaner)
 }
 
 }  // namespace motif::app
