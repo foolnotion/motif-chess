@@ -14,7 +14,7 @@ QT_FORWARD_DECLARE_CLASS(QTimer)
 namespace motif::import
 {
 class import_pipeline;
-}
+}  // namespace motif::import
 
 namespace motif::app
 {
@@ -42,6 +42,10 @@ class workspace_controller : public QObject
   public:
     explicit workspace_controller(database_workspace* workspace, pgn_launch_queue const* pgn_queue, QObject* parent = nullptr);
     ~workspace_controller() override;
+    workspace_controller(workspace_controller const&) = delete;
+    workspace_controller(workspace_controller&&) = delete;
+    auto operator=(workspace_controller const&) -> workspace_controller& = delete;
+    auto operator=(workspace_controller&&) -> workspace_controller& = delete;
 
     [[nodiscard]] auto has_active() const -> bool;
     [[nodiscard]] auto is_temporary() const -> bool;
@@ -58,10 +62,10 @@ class workspace_controller : public QObject
     [[nodiscard]] auto import_total() const -> int;
     [[nodiscard]] auto import_phase_text() const -> QString;
 
-    Q_INVOKABLE bool create_database(QString const& dir_path, QString const& name);
-    Q_INVOKABLE bool open_database(QString const& dir_path);
-    Q_INVOKABLE bool open_scratch();
-    Q_INVOKABLE bool remove_recent(QString const& path);
+    Q_INVOKABLE auto create_database(QString const& dir_path, QString const& name) -> bool;
+    Q_INVOKABLE auto open_database(QString const& dir_path) -> bool;
+    Q_INVOKABLE auto open_scratch() -> bool;
+    Q_INVOKABLE auto remove_recent(QString const& path) -> bool;
     Q_INVOKABLE void import_pgn(QString const& path);
 
   signals:
@@ -73,20 +77,19 @@ class workspace_controller : public QObject
     void import_finished(int committed, int errors);
     void import_progress_changed();
 
-  private slots:
-    void poll_import_progress();
-    void finish_import(bool success, int committed, int errors, QString error_message);
-
   private:
+    void poll_import_progress();
+    void finish_import(bool success, int committed, int errors, QString const& error_message);
+
     database_workspace* workspace_ {nullptr};
     pgn_launch_queue const* pgn_queue_ {nullptr};
     bool is_loading_ {false};
     int loading_total_games_ {0};
-    QString loading_name_ {};
+    QString loading_name_;
     bool is_importing_ {false};
     int import_processed_ {0};
     int import_total_ {0};
-    QString import_phase_text_ {};
+    QString import_phase_text_;
     std::unique_ptr<motif::import::import_pipeline> pipeline_;
     QTimer* progress_timer_ {nullptr};
     QThread* open_thread_ {nullptr};
