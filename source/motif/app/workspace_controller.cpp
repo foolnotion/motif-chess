@@ -126,6 +126,8 @@ auto workspace_controller::open_database(QString const& dir_path) -> bool
                 [this, succeeded, db_ptr, dir_path_str, err]() mutable -> void
                 {
                     is_loading_ = false;
+                    loading_name_.clear();
+                    loading_total_games_ = 0;
                     open_thread_ = nullptr;
                     emit loading_changed();  // NOLINT(misc-include-cleaner)
                     if (!succeeded) {
@@ -277,6 +279,12 @@ void workspace_controller::finish_import(bool success, int committed, int errors
         progress_timer_ = nullptr;
     }
     import_thread_ = nullptr;
+
+    // Capture final progress before releasing the pipeline so import_processed()
+    // is non-zero even when the import finishes before the first timer tick.
+    if (pipeline_) {
+        poll_import_progress();
+    }
 
     is_importing_ = false;
     pipeline_.reset();

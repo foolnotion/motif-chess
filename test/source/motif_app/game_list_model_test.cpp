@@ -1,6 +1,5 @@
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -44,11 +43,16 @@ struct tmp_dir
 auto ensure_qcore_application() -> QCoreApplication&
 {
     static auto argc = 1;
+    // NOLINTBEGIN(hicpp-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,hicpp-no-array-decay,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     static char arg0[] = "motif_app_test";
     static char* argv[] = {arg0, nullptr};
     static QCoreApplication app(argc, argv);
+    // NOLINTEND(hicpp-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,hicpp-no-array-decay,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     return app;
 }
+
+// Slightly longer than the 200ms debounce in game_list_model.
+constexpr auto k_debounce_wait = std::chrono::milliseconds {250};
 
 void pump_events_for(std::chrono::milliseconds const duration)
 {
@@ -510,6 +514,7 @@ TEST_CASE("game_list_model data path: offset beyond total returns empty games wi
     CHECK(list_result->games.empty());
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("game_list_model API: exposes rows, headers, ids and filters via Qt model interface", "[game-list-model]")
 {
     (void)ensure_qcore_application();
@@ -562,13 +567,13 @@ TEST_CASE("game_list_model API: exposes rows, headers, ids and filters via Qt mo
     CHECK(model.total_count() == 2);
 
     model.set_player_filter(QStringLiteral("alice"));
-    pump_events_for(std::chrono::milliseconds {250});
+    pump_events_for(k_debounce_wait);
     CHECK(model.rowCount(QModelIndex()) == 1);
     CHECK(model.total_count() == 1);
     CHECK(model.data(model.index(0, 0), Qt::DisplayRole).toString() == QStringLiteral("Alice Alpha"));
 
     model.set_player_filter(QStringLiteral(""));
-    pump_events_for(std::chrono::milliseconds {250});
+    pump_events_for(k_debounce_wait);
     CHECK(model.rowCount(QModelIndex()) == 2);
     CHECK(model.total_count() == 2);
 
@@ -576,6 +581,7 @@ TEST_CASE("game_list_model API: exposes rows, headers, ids and filters via Qt mo
     CHECK(model.rowCount(QModelIndex()) == 2);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("game_list_model API: supports fetchMore pagination", "[game-list-model]")
 {
     (void)ensure_qcore_application();
@@ -626,7 +632,7 @@ TEST_CASE("game_list_model perf: initial model load stays below 100ms for 100k g
     }
 
     auto const start = std::chrono::steady_clock::now();
-    motif::app::game_list_model model(&workspace);
+    motif::app::game_list_model const model(&workspace);
     auto const elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
 
     CHECK(model.total_count() == num_games);
