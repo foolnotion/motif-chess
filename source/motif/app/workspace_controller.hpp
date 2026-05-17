@@ -3,9 +3,18 @@
 #include <QObject>
 #include <QString>
 #include <QVariantList>
+#include <memory>
 
 #include "motif/app/database_workspace.hpp"
 #include "motif/app/pgn_launch_queue.hpp"
+
+QT_FORWARD_DECLARE_CLASS(QThread)
+QT_FORWARD_DECLARE_CLASS(QTimer)
+
+namespace motif::import
+{
+class import_pipeline;
+}
 
 namespace motif::app
 {
@@ -22,10 +31,17 @@ class workspace_controller : public QObject
     Q_PROPERTY(QVariantList recent_databases READ recent_databases NOTIFY recent_changed)
     Q_PROPERTY(bool has_queued_pgn READ has_queued_pgn CONSTANT)
     Q_PROPERTY(int queued_pgn_count READ queued_pgn_count CONSTANT)
+    Q_PROPERTY(bool is_loading READ is_loading NOTIFY loading_changed)
+    Q_PROPERTY(int loading_total_games READ loading_total_games NOTIFY loading_changed)
+    Q_PROPERTY(QString loading_name READ loading_name NOTIFY loading_changed)
     Q_PROPERTY(bool is_importing READ is_importing NOTIFY importing_changed)
+    Q_PROPERTY(int import_processed READ import_processed NOTIFY import_progress_changed)
+    Q_PROPERTY(int import_total READ import_total NOTIFY import_progress_changed)
+    Q_PROPERTY(QString import_phase_text READ import_phase_text NOTIFY import_progress_changed)
 
   public:
     explicit workspace_controller(database_workspace* workspace, pgn_launch_queue const* pgn_queue, QObject* parent = nullptr);
+    ~workspace_controller() override;
 
     [[nodiscard]] auto has_active() const -> bool;
     [[nodiscard]] auto is_temporary() const -> bool;
@@ -34,7 +50,13 @@ class workspace_controller : public QObject
     [[nodiscard]] auto recent_databases() const -> QVariantList;
     [[nodiscard]] auto has_queued_pgn() const -> bool;
     [[nodiscard]] auto queued_pgn_count() const -> int;
+    [[nodiscard]] auto is_loading() const -> bool;
+    [[nodiscard]] auto loading_total_games() const -> int;
+    [[nodiscard]] auto loading_name() const -> QString;
     [[nodiscard]] auto is_importing() const -> bool;
+    [[nodiscard]] auto import_processed() const -> int;
+    [[nodiscard]] auto import_total() const -> int;
+    [[nodiscard]] auto import_phase_text() const -> QString;
 
     Q_INVOKABLE bool create_database(QString const& dir_path, QString const& name);
     Q_INVOKABLE bool open_database(QString const& dir_path);
@@ -46,13 +68,29 @@ class workspace_controller : public QObject
     void active_changed();
     void recent_changed();
     void error_occurred(QString const& message);
+    void loading_changed();
     void importing_changed();
     void import_finished(int committed, int errors);
+    void import_progress_changed();
+
+  private slots:
+    void poll_import_progress();
+    void finish_import(bool success, int committed, int errors, QString error_message);
 
   private:
     database_workspace* workspace_ {nullptr};
     pgn_launch_queue const* pgn_queue_ {nullptr};
+    bool is_loading_ {false};
+    int loading_total_games_ {0};
+    QString loading_name_ {};
     bool is_importing_ {false};
+    int import_processed_ {0};
+    int import_total_ {0};
+    QString import_phase_text_ {};
+    std::unique_ptr<motif::import::import_pipeline> pipeline_;
+    QTimer* progress_timer_ {nullptr};
+    QThread* open_thread_ {nullptr};
+    QThread* import_thread_ {nullptr};
 };
 
 }  // namespace motif::app

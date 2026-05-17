@@ -87,33 +87,46 @@ Item {
             }
         }
 
-        // Toast notification shown after import completes
+        // Import progress — shown while a PGN import is running.
         Rectangle {
-            id: import_toast
-            property int committed: 0
-            property int errors: 0
-            visible: false
-            z: 5
-            anchors.bottom: parent.bottom
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottomMargin: 8
-            radius: 6
-            color: palette.highlight
-            implicitWidth: toast_label.implicitWidth + 24
-            implicitHeight: toast_label.implicitHeight + 12
+            Layout.fillWidth: true
+            visible: workspace.is_importing
+            color: palette.window
+            implicitHeight: import_col.implicitHeight + 16
 
-            Label {
-                id: toast_label
-                anchors.centerIn: parent
-                text: "Imported " + import_toast.committed + " games" +
-                      (import_toast.errors > 0 ? " (" + import_toast.errors + " errors)" : "")
-                color: palette.highlightedText
-            }
+            ColumnLayout {
+                id: import_col
+                anchors {
+                    left: parent.left; right: parent.right
+                    verticalCenter: parent.verticalCenter
+                    leftMargin: 10; rightMargin: 10
+                }
+                spacing: 4
 
-            Timer {
-                id: import_toast_timer
-                interval: 4000
-                onTriggered: import_toast.visible = false
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label {
+                        text: workspace.import_phase_text
+                        font.bold: true
+                    }
+                    Item { Layout.fillWidth: true }
+                    Label {
+                        text: workspace.import_total > 0
+                            ? workspace.import_processed + " / " + workspace.import_total + " games"
+                            : workspace.import_processed + " games"
+                        color: palette.mid
+                        font.pointSize: 9
+                    }
+                }
+
+                ProgressBar {
+                    Layout.fillWidth: true
+                    indeterminate: workspace.import_total === 0
+                    from: 0; to: 1
+                    value: workspace.import_total > 0
+                        ? workspace.import_processed / workspace.import_total
+                        : 0
+                }
             }
         }
 
@@ -199,6 +212,36 @@ Item {
                 var gid = game_list.game_id_at(idx.row)
                 if (gid > 0) { root.game_activated(gid) }
             }
+        }
+    }
+
+    // Toast notification — sibling of ColumnLayout so anchors are valid (not inside a layout).
+    Rectangle {
+        id: import_toast
+        property int committed: 0
+        property int errors: 0
+        visible: false
+        z: 5
+        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottomMargin: 8
+        radius: 6
+        color: palette.highlight
+        implicitWidth: toast_label.implicitWidth + 24
+        implicitHeight: toast_label.implicitHeight + 12
+
+        Label {
+            id: toast_label
+            anchors.centerIn: parent
+            text: "Imported " + import_toast.committed + " games" +
+                  (import_toast.errors > 0 ? " (" + import_toast.errors + " errors)" : "")
+            color: palette.highlightedText
+        }
+
+        Timer {
+            id: import_toast_timer
+            interval: 4000
+            onTriggered: import_toast.visible = false
         }
     }
 

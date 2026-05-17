@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import com.kdab.dockwidgets 2.0 as KDDW
+import "qrc:/kddockwidgets/qtquick/views/qml/" as KDDWQml
 
 ApplicationWindow {
     id: root
@@ -9,39 +10,28 @@ ApplicationWindow {
     height: 800
     visible: true
 
-    // Global keyboard navigation — arrow keys advance/retreat the board regardless of focus.
-    Keys.onPressed: function(event) {
-        if (!board || !board.game_loaded) { return }
-        switch (event.key) {
-        case Qt.Key_Right:
-            board.advance()
-            event.accepted = true
-            break
-        case Qt.Key_Left:
-            board.retreat()
-            event.accepted = true
-            break
-        case Qt.Key_Home:
-            board.jump_to_start()
-            event.accepted = true
-            break
-        case Qt.Key_End:
-            board.jump_to_end()
-            event.accepted = true
-            break
-        }
-    }
-
     // Status bar label showing active database
     footer: ToolBar {
         visible: workspace.has_active
+        background: Rectangle { color: palette.window }
         Label {
             anchors.verticalCenter: parent.verticalCenter
             leftPadding: 8
+            color: palette.text
             text: workspace.is_temporary
                   ? "⚡ " + workspace.display_name + " (temporary)"
                   : "● " + workspace.display_name + "  —  " + workspace.active_path
             font.pointSize: 9
+        }
+    }
+
+    Keys.onPressed: function(event) {
+        if (!board || !board.game_loaded) { return }
+        switch (event.key) {
+        case Qt.Key_Right:  board.advance();        event.accepted = true; break
+        case Qt.Key_Left:   board.retreat();        event.accepted = true; break
+        case Qt.Key_Home:   board.jump_to_start();  event.accepted = true; break
+        case Qt.Key_End:    board.jump_to_end();    event.accepted = true; break
         }
     }
 
@@ -52,6 +42,15 @@ ApplicationWindow {
         uniqueName: "main_dock_area"
         anchors.fill: parent
         visible: workspace.has_active
+
+        // Wayland drag-and-drop: KDDW uses QDrag::exec() on Wayland, which requires the
+        // drop-target window to have a QML DropArea so setAcceptDrops(true) is called and
+        // drag events are routed through the KDDW GlobalEventFilter to the C++ DropArea.
+        // FloatingWindow.qml does this for floating windows; we do it here for the main window.
+        KDDWQml.DropArea {
+            anchors.fill: parent
+            dropAreaCpp: kddw_bridge.drop_area_view
+        }
 
         KDDW.DockWidget {
             id: dock_chessboard
@@ -104,6 +103,8 @@ ApplicationWindow {
         //   |               |--Notation----------|
         //   +--Explorer-----+--Engine Analysis---+
         Component.onCompleted: {
+            // Expose the C++ DropArea to the QML DropArea above for Wayland DnD support.
+            kddw_bridge.refresh()
             // Chessboard takes the left side
             addDockWidget(dock_chessboard, KDDW.KDDockWidgets.Location_OnLeft);
             // Game list fills the right, top
@@ -127,4 +128,5 @@ ApplicationWindow {
             // overlay hides automatically via visible binding
         }
     }
+
 }
