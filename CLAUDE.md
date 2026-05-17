@@ -96,6 +96,20 @@ When asked "devlog", produce an entry for docs/devlog/YYYY-WNN.md:
 
 Decisions are numbered sequentially across all entries (D001, D002, ...).
 
+## Research Order
+
+When investigating a library or framework API (Qt, KDDockWidgets, DuckDB, etc.):
+1. **Read project docs / official docs online first** — prefer authoritative documentation over source spelunking
+2. **Grep / read source only as a fallback** — when docs are absent, ambiguous, or the answer requires seeing the actual implementation
+
+## After Every New Binary
+
+Run the app briefly and check stderr for Qt diagnostic output before declaring a build successful:
+
+    ./build/bin/motif_chess 2>&1 | head -40
+
+Qt silently swallows QML errors, missing resources, and type-registration warnings unless stderr is inspected. A clean compile does not mean a clean runtime.
+
 ## Commits
 
 Conventional commits: feat, fix, refactor, docs, test, chore.

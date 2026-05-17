@@ -121,9 +121,7 @@ void game_list_model::fetchMore(QModelIndex const& parent)
     append_page(entries_.size());
 }
 
-// NOLINTNEXTLINE(modernize-use-trailing-return-type,readability-convert-member-functions-to-static) — Q_INVOKABLE restrictions; false
-// positive (accesses entries_)
-quint32 game_list_model::game_id_at(int row) const
+auto game_list_model::game_id_at(int row) const -> quint32
 {
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return 0;

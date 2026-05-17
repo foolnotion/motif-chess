@@ -26,13 +26,13 @@
 #include "motif/app/view_factory.hpp"
 #include "motif/app/workspace_controller.hpp"
 
-int main(int argc, char* argv[])
+auto main(int argc, char* argv[]) -> int
 {
     auto const start = std::chrono::steady_clock::now();
 
     QApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);  // NOLINT(misc-include-cleaner)
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
-    QApplication app(argc, argv);
+    QApplication const app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("motif-chess"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     QApplication::setOrganizationName(QStringLiteral("motif"));
@@ -44,7 +44,7 @@ int main(int argc, char* argv[])
     }
 
     KDDockWidgets::initFrontend(KDDockWidgets::FrontendType::QtQuick);
-    KDDockWidgets::Config::self().setViewFactory(new motif::app::view_factory());
+    KDDockWidgets::Config::self().setViewFactory(new motif::app::view_factory());  // NOLINT(cppcoreguidelines-owning-memory)
 
     auto const qt_args = QApplication::arguments();
     std::vector<std::string> raw_args;
@@ -81,7 +81,7 @@ int main(int argc, char* argv[])
 
     QQmlApplicationEngine engine;
 
-    auto add_qt_paths_from_prefixes = [&](QString const& prefixes)
+    auto add_qt_paths_from_prefixes = [&](QString const& prefixes) -> void
     {
         for (auto const& prefix : prefixes.split(':', Qt::SkipEmptyParts)) {
             auto const qml_candidate = QDir(prefix).filePath(QStringLiteral("lib/qt-6/qml"));

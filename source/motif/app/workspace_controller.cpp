@@ -84,7 +84,7 @@ auto workspace_controller::queued_pgn_count() const -> int
     return static_cast<int>(pgn_queue_->size());
 }
 
-bool workspace_controller::create_database(QString const& dir_path, QString const& name)
+auto workspace_controller::create_database(QString const& dir_path, QString const& name) -> bool
 {
     if (auto res = workspace_->create_database(dir_path.toStdString(), name.toStdString()); !res) {
         emit error_occurred(QString::fromStdString(res.error().message));
@@ -95,7 +95,7 @@ bool workspace_controller::create_database(QString const& dir_path, QString cons
     return true;
 }
 
-bool workspace_controller::open_database(QString const& dir_path)
+auto workspace_controller::open_database(QString const& dir_path) -> bool
 {
     if (is_loading_) {
         return false;
@@ -110,25 +110,25 @@ bool workspace_controller::open_database(QString const& dir_path)
     emit loading_changed();  // NOLINT(misc-include-cleaner)
 
     open_thread_ = QThread::create(
-        [this, path, dir_path_str = dir_path.toStdString()]()
+        [this, path, dir_path_str = dir_path.toStdString()]() -> void
         {
             // Only the slow DuckDB open runs here; all workspace state writes happen
             // on the main thread in the QueuedConnection lambda below.
             auto open_res = motif::db::database_manager::open(path);
-            bool const ok = open_res.has_value();
+            bool const succeeded = open_res.has_value();
 
-            auto db_ptr = ok ? std::make_shared<motif::db::database_manager>(std::move(*open_res)) : nullptr;
+            auto db_ptr = succeeded ? std::make_shared<motif::db::database_manager>(std::move(*open_res)) : nullptr;
             QString const err =
-                !ok ? QString::fromStdString(fmt::format("open failed: {}", motif::db::to_string(open_res.error()))) : QString {};
+                !succeeded ? QString::fromStdString(fmt::format("open failed: {}", motif::db::to_string(open_res.error()))) : QString {};
 
             QMetaObject::invokeMethod(
                 this,
-                [this, ok, db_ptr, dir_path_str, err]() mutable
+                [this, succeeded, db_ptr, dir_path_str, err]() mutable -> void
                 {
                     is_loading_ = false;
                     open_thread_ = nullptr;
                     emit loading_changed();  // NOLINT(misc-include-cleaner)
-                    if (!ok) {
+                    if (!succeeded) {
                         emit error_occurred(err);  // NOLINT(misc-include-cleaner)
                         return;
                     }
@@ -146,7 +146,7 @@ bool workspace_controller::open_database(QString const& dir_path)
     return true;
 }
 
-bool workspace_controller::open_scratch()
+auto workspace_controller::open_scratch() -> bool
 {
     if (auto res = workspace_->open_scratch(); !res) {
         emit error_occurred(QString::fromStdString(res.error().message));
@@ -156,7 +156,7 @@ bool workspace_controller::open_scratch()
     return true;
 }
 
-bool workspace_controller::remove_recent(QString const& path)
+auto workspace_controller::remove_recent(QString const& path) -> bool
 {
     if (auto res = workspace_->remove_recent_entry(path.toStdString()); !res) {
         emit error_occurred(QString::fromStdString(res.error().message));  // NOLINT(misc-include-cleaner)
@@ -222,21 +222,24 @@ void workspace_controller::import_pgn(QString const& path)
 
     pipeline_ = std::make_unique<import::import_pipeline>(*dbm);
 
-    progress_timer_ = new QTimer(this);
-    progress_timer_->setInterval(200);
+    progress_timer_ = new QTimer(this);  // NOLINT(cppcoreguidelines-owning-memory)
+    static constexpr int k_progress_interval_ms = 200;
+    progress_timer_->setInterval(k_progress_interval_ms);
     connect(progress_timer_, &QTimer::timeout, this, &workspace_controller::poll_import_progress);
     progress_timer_->start();
 
     import_thread_ = QThread::create(
-        [this, path_str = path.toStdString()]()
+        [this, path_str = path.toStdString()]() -> void
         {
             auto result = pipeline_->run(path_str);
-            bool ok = result.has_value();
-            int committed = ok ? static_cast<int>(result->committed) : 0;
-            int errors = ok ? static_cast<int>(result->errors) : 0;
-            QString msg = !ok ? QString::fromStdString(result.error().message) : QString {};
+            bool const succeeded = result.has_value();
+            int const committed = succeeded ? static_cast<int>(result->committed) : 0;
+            int const errors = succeeded ? static_cast<int>(result->errors) : 0;
+            QString const msg = !succeeded ? QString::fromStdString(result.error().message) : QString {};
             QMetaObject::invokeMethod(
-                this, [this, ok, committed, errors, msg]() { finish_import(ok, committed, errors, msg); }, Qt::QueuedConnection);
+                this,
+                [this, succeeded, committed, errors, msg]() -> void { finish_import(succeeded, committed, errors, msg); },
+                Qt::QueuedConnection);
         });
     connect(import_thread_, &QThread::finished, import_thread_, &QThread::deleteLater);
     import_thread_->start();
@@ -247,11 +250,11 @@ void workspace_controller::poll_import_progress()
     if (!pipeline_) {
         return;
     }
-    auto p = pipeline_->progress();
-    import_processed_ = static_cast<int>(p.games_processed);
-    import_total_ = static_cast<int>(p.total_games);
+    auto const progress = pipeline_->progress();
+    import_processed_ = static_cast<int>(progress.games_processed);
+    import_total_ = static_cast<int>(progress.total_games);
 
-    switch (p.phase) {
+    switch (progress.phase) {
         case import::import_phase::ingesting:
             import_phase_text_ = QStringLiteral("Ingesting games…");
             break;
@@ -266,7 +269,7 @@ void workspace_controller::poll_import_progress()
     emit import_progress_changed();  // NOLINT(misc-include-cleaner)
 }
 
-void workspace_controller::finish_import(bool success, int committed, int errors, QString error_message)
+void workspace_controller::finish_import(bool success, int committed, int errors, QString const& error_message)
 {
     if (progress_timer_ != nullptr) {
         progress_timer_->stop();
