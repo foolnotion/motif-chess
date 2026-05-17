@@ -20,6 +20,11 @@ class board_model : public QObject
     Q_PROPERTY(int total_plies READ total_plies NOTIFY position_changed)
     Q_PROPERTY(bool game_loaded READ game_loaded NOTIFY game_loaded_changed)
     Q_PROPERTY(QStringList move_list READ move_list NOTIFY game_loaded_changed)
+    Q_PROPERTY(QString white_name READ white_name NOTIFY game_loaded_changed)
+    Q_PROPERTY(QString black_name READ black_name NOTIFY game_loaded_changed)
+    Q_PROPERTY(QString game_result READ game_result NOTIFY game_loaded_changed)
+    Q_PROPERTY(QString event_name READ event_name NOTIFY game_loaded_changed)
+    Q_PROPERTY(QString game_date READ game_date NOTIFY game_loaded_changed)
 
   public:
     explicit board_model(database_workspace* workspace, QObject* parent = nullptr);
@@ -30,6 +35,11 @@ class board_model : public QObject
     [[nodiscard]] auto total_plies() const -> int;
     [[nodiscard]] auto game_loaded() const -> bool;
     [[nodiscard]] auto move_list() const -> QStringList;
+    [[nodiscard]] auto white_name() const -> QString;
+    [[nodiscard]] auto black_name() const -> QString;
+    [[nodiscard]] auto game_result() const -> QString;
+    [[nodiscard]] auto event_name() const -> QString;
+    [[nodiscard]] auto game_date() const -> QString;
 
     Q_INVOKABLE void load_game(quint32 game_id);
     Q_INVOKABLE void advance();
@@ -47,6 +57,11 @@ class board_model : public QObject
     database_workspace* workspace_ {nullptr};
     game_navigator navigator_;
     QStringList move_list_;
+    QString white_name_;
+    QString black_name_;
+    QString game_result_;
+    QString event_name_;
+    QString game_date_;
 };
 
 }  // namespace motif::app
