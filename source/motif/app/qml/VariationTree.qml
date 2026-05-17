@@ -1,10 +1,9 @@
 import QtQuick
 import QtQuick.Controls
 
-// Displays the game's main-line moves as a scrollable notation list.
-// Current move is highlighted. Click a move to jump to that ply.
-// Variations are not stored in the database (import pipeline stores main line only);
-// this component is architected to support branching when variation storage is added.
+// Displays the game's main-line moves as inline paragraph-style notation.
+// Moves wrap naturally like text. Current move is highlighted.
+// Click any move token to jump to that ply.
 Item {
     id: root
 
@@ -17,104 +16,67 @@ Item {
         anchors.fill: parent
         color: bg_color
 
-        ListView {
-            id: moves_view
+        Flickable {
+            id: flick
             anchors {
                 fill: parent
-                margins: 6
+                margins: 8
             }
             clip: true
-            spacing: 2
+            contentWidth: width
+            contentHeight: notation_flow.implicitHeight
 
-            // Each row covers one full move (white + black half-moves).
-            model: board ? Math.ceil(board.move_list.length / 2) : 0
+            ScrollBar.vertical: ScrollBar {}
 
-            delegate: Row {
-                id: move_row
+            Flow {
+                id: notation_flow
+                width: flick.width
                 spacing: 4
-                height: 22
 
-                property int move_num: index + 1
-                property int white_ply: index * 2      // 0-based index into move_list
-                property int black_ply: index * 2 + 1
-                property var moves: board ? board.move_list : []
-                property int current: board ? board.current_ply : 0
+                Repeater {
+                    model: board ? board.move_list.length : 0
 
-                // Move number
-                Text {
-                    text: move_row.move_num + "."
-                    color: root.number_color
-                    font.pixelSize: 13
-                    verticalAlignment: Text.AlignVCenter
-                    height: move_row.height
-                }
+                    // Each delegate is an atomic unit: [number.]? + move.
+                    // Keeping them in a Row prevents wrapping between the
+                    // move number and the white half-move.
+                    delegate: Row {
+                        spacing: 2
 
-                // White half-move
-                Rectangle {
-                    visible: move_row.white_ply < move_row.moves.length
-                    color: move_row.current === move_row.white_ply + 1
-                           ? Qt.rgba(0.3, 0.76, 0.97, 0.25)
-                           : "transparent"
-                    radius: 3
-                    height: move_row.height
-                    width: white_text.implicitWidth + 8
-
-                    Text {
-                        id: white_text
-                        anchors.centerIn: parent
-                        text: move_row.white_ply < move_row.moves.length
-                              ? move_row.moves[move_row.white_ply]
-                              : ""
-                        color: move_row.current === move_row.white_ply + 1
-                               ? root.active_color
-                               : root.text_color
-                        font.pixelSize: 13
-                        font.bold: move_row.current === move_row.white_ply + 1
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (board) { board.navigate_to(move_row.white_ply + 1) }
+                        Text {
+                            visible: index % 2 === 0
+                            text: (Math.floor(index / 2) + 1) + "."
+                            color: root.number_color
+                            font.pixelSize: 13
+                            anchors.verticalCenter: parent.verticalCenter
                         }
-                    }
-                }
 
-                // Black half-move
-                Rectangle {
-                    visible: move_row.black_ply < move_row.moves.length
-                    color: move_row.current === move_row.black_ply + 1
-                           ? Qt.rgba(0.3, 0.76, 0.97, 0.25)
-                           : "transparent"
-                    radius: 3
-                    height: move_row.height
-                    width: black_text.implicitWidth + 8
+                        Rectangle {
+                            property bool is_current: board && board.current_ply === index + 1
+                            color: is_current ? Qt.rgba(0.3, 0.76, 0.97, 0.2) : "transparent"
+                            radius: 3
+                            height: move_text.implicitHeight + 4
+                            width: move_text.implicitWidth + 8
 
-                    Text {
-                        id: black_text
-                        anchors.centerIn: parent
-                        text: move_row.black_ply < move_row.moves.length
-                              ? move_row.moves[move_row.black_ply]
-                              : ""
-                        color: move_row.current === move_row.black_ply + 1
-                               ? root.active_color
-                               : root.text_color
-                        font.pixelSize: 13
-                        font.bold: move_row.current === move_row.black_ply + 1
-                    }
+                            Text {
+                                id: move_text
+                                anchors.centerIn: parent
+                                text: board ? board.move_list[index] : ""
+                                color: parent.is_current ? root.active_color : root.text_color
+                                font.pixelSize: 13
+                                font.bold: parent.is_current
+                            }
 
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (board) { board.navigate_to(move_row.black_ply + 1) }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (board) { board.navigate_to(index + 1) }
+                                }
+                            }
                         }
                     }
                 }
             }
-
-            ScrollBar.vertical: ScrollBar {}
         }
     }
 }
