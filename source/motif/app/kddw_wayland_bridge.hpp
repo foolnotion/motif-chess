@@ -20,7 +20,7 @@ class kddw_wayland_bridge : public QObject
     auto drop_area_view() const -> QObject*;
 
     // Call from QML Component.onCompleted on the DockingArea — at that point the KDDW
-    // MainWindow is fully initialised and DockRegistry knows about it.
+    // MainWindow is fully initialized and DockRegistry knows about it.
     Q_INVOKABLE void refresh();
 
   Q_SIGNALS:

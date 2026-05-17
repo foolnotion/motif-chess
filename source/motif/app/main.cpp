@@ -37,7 +37,7 @@ auto main(int argc, char* argv[]) -> int
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     QApplication::setOrganizationName(QStringLiteral("motif"));
 
-    // Fusion reads from QPalette so the system theme controls colours.
+    // Fusion reads from QPalette so the system theme controls colors.
     // QT_QUICK_CONTROLS_STYLE overrides this if set explicitly.
     if (qgetenv("QT_QUICK_CONTROLS_STYLE").isEmpty()) {
         QQuickStyle::setStyle(QStringLiteral("Fusion"));
