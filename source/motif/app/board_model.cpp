@@ -50,6 +50,31 @@ auto board_model::move_list() const -> QStringList
     return move_list_;
 }
 
+auto board_model::white_name() const -> QString
+{
+    return white_name_;
+}
+
+auto board_model::black_name() const -> QString
+{
+    return black_name_;
+}
+
+auto board_model::game_result() const -> QString
+{
+    return game_result_;
+}
+
+auto board_model::event_name() const -> QString
+{
+    return event_name_;
+}
+
+auto board_model::game_date() const -> QString
+{
+    return game_date_;
+}
+
 void board_model::load_game(quint32 const game_id)
 {
     auto* mgr = workspace_ != nullptr ? workspace_->persistent_db() : nullptr;
@@ -69,11 +94,19 @@ void board_model::load_game(quint32 const game_id)
         return;
     }
 
-    navigator_.load(*game_result);
+    auto const& game = *game_result;
+    navigator_.load(game);
     move_list_.clear();
     for (auto const& san : navigator_.move_list()) {
         move_list_ << QString::fromStdString(san);
     }
+
+    white_name_ = QString::fromStdString(game.white.name);
+    black_name_ = QString::fromStdString(game.black.name);
+    game_result_ = QString::fromStdString(game.result);
+    event_name_ = game.event_details ? QString::fromStdString(game.event_details->name) : QString {};
+    game_date_ = game.date ? QString::fromStdString(*game.date) : QString {};
+
     emit game_loaded_changed();
     emit position_changed();
 }
