@@ -66,6 +66,22 @@ auto database_workspace::open_database(std::string const& dir_path) -> result<vo
     return {};
 }
 
+auto database_workspace::accept_opened_database(motif::db::database_manager manager, std::string const& dir_path) -> result<void>
+{
+    auto const opened_name = std::string {manager.manifest().name};
+    auto next_config = *config_;
+    push_recent(next_config, opened_name, dir_path);
+    if (auto save_res = save_config(next_config); !save_res) {
+        return tl::unexpected {error {save_res.error().code, "failed to persist recent databases"}};
+    }
+    *config_ = std::move(next_config);
+    db_.emplace(std::move(manager));
+    kind_ = database_kind::persistent;
+    display_name_ = opened_name;
+    active_path_ = dir_path;
+    return {};
+}
+
 auto database_workspace::open_scratch() -> result<void>
 {
     auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();

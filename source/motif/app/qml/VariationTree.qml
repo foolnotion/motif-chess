@@ -1,120 +1,143 @@
 import QtQuick
 import QtQuick.Controls
 
-// Displays the game's main-line moves as a scrollable notation list.
-// Current move is highlighted. Click a move to jump to that ply.
-// Variations are not stored in the database (import pipeline stores main line only);
-// this component is architected to support branching when variation storage is added.
+// Displays game header (players, event, date) and main-line moves as
+// inline paragraph-style notation. Current move is highlighted.
+// Click any move token to jump to that ply.
 Item {
     id: root
 
     property color text_color: "#d4d4d4"
     property color active_color: "#4fc3f7"
     property color number_color: "#777777"
+    property color meta_color: "#999999"
     property color bg_color: "#1e1e1e"
 
     Rectangle {
         anchors.fill: parent
         color: bg_color
 
-        ListView {
-            id: moves_view
+        Column {
             anchors {
                 fill: parent
-                margins: 6
+                margins: 8
             }
-            clip: true
-            spacing: 2
+            spacing: 6
 
-            // Each row covers one full move (white + black half-moves).
-            model: board ? Math.ceil(board.move_list.length / 2) : 0
+            // ── Header ───────────────────────────────────────────────────
+            Column {
+                visible: board && board.game_loaded
+                width: parent.width
+                spacing: 2
 
-            delegate: Row {
-                id: move_row
-                spacing: 4
-                height: 22
-
-                property int move_num: index + 1
-                property int white_ply: index * 2      // 0-based index into move_list
-                property int black_ply: index * 2 + 1
-                property var moves: board ? board.move_list : []
-                property int current: board ? board.current_ply : 0
-
-                // Move number
                 Text {
-                    text: move_row.move_num + "."
-                    color: root.number_color
+                    width: parent.width
+                    text: board ? (board.white_name + " – " + board.black_name) : ""
+                    color: root.text_color
                     font.pixelSize: 13
-                    verticalAlignment: Text.AlignVCenter
-                    height: move_row.height
+                    font.bold: true
+                    elide: Text.ElideRight
                 }
 
-                // White half-move
-                Rectangle {
-                    visible: move_row.white_ply < move_row.moves.length
-                    color: move_row.current === move_row.white_ply + 1
-                           ? Qt.rgba(0.3, 0.76, 0.97, 0.25)
-                           : "transparent"
-                    radius: 3
-                    height: move_row.height
-                    width: white_text.implicitWidth + 8
-
-                    Text {
-                        id: white_text
-                        anchors.centerIn: parent
-                        text: move_row.white_ply < move_row.moves.length
-                              ? move_row.moves[move_row.white_ply]
-                              : ""
-                        color: move_row.current === move_row.white_ply + 1
-                               ? root.active_color
-                               : root.text_color
-                        font.pixelSize: 13
-                        font.bold: move_row.current === move_row.white_ply + 1
+                Text {
+                    visible: text.length > 0
+                    width: parent.width
+                    text: {
+                        if (!board) { return "" }
+                        var parts = []
+                        if (board.event_name) { parts.push(board.event_name) }
+                        if (board.game_date)  { parts.push(board.game_date) }
+                        return parts.join("  ·  ")
                     }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (board) { board.navigate_to(move_row.white_ply + 1) }
-                        }
-                    }
+                    color: root.meta_color
+                    font.pixelSize: 11
+                    elide: Text.ElideRight
                 }
 
-                // Black half-move
-                Rectangle {
-                    visible: move_row.black_ply < move_row.moves.length
-                    color: move_row.current === move_row.black_ply + 1
-                           ? Qt.rgba(0.3, 0.76, 0.97, 0.25)
-                           : "transparent"
-                    radius: 3
-                    height: move_row.height
-                    width: black_text.implicitWidth + 8
-
-                    Text {
-                        id: black_text
-                        anchors.centerIn: parent
-                        text: move_row.black_ply < move_row.moves.length
-                              ? move_row.moves[move_row.black_ply]
-                              : ""
-                        color: move_row.current === move_row.black_ply + 1
-                               ? root.active_color
-                               : root.text_color
-                        font.pixelSize: 13
-                        font.bold: move_row.current === move_row.black_ply + 1
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (board) { board.navigate_to(move_row.black_ply + 1) }
-                        }
-                    }
-                }
+                Rectangle { width: parent.width; height: 1; color: "#333333" }
             }
 
-            ScrollBar.vertical: ScrollBar {}
+            // ── Moves ─────────────────────────────────────────────────────
+            Flickable {
+                id: flick
+                width: parent.width
+                height: parent.height - (board && board.game_loaded ? header_col.implicitHeight + 6 : 0)
+                clip: true
+                contentWidth: width
+                contentHeight: notation_flow.implicitHeight + (result_text.visible ? result_text.implicitHeight + 4 : 0)
+
+                ScrollBar.vertical: ScrollBar {}
+
+                Flow {
+                    id: notation_flow
+                    width: flick.width
+                    spacing: 4
+
+                    Repeater {
+                        model: board ? board.move_list.length : 0
+
+                        // Atomic unit: [number.]? + move token.
+                        // Row prevents wrapping between move number and white half-move.
+                        delegate: Row {
+                            spacing: 2
+
+                            Text {
+                                visible: index % 2 === 0
+                                text: (Math.floor(index / 2) + 1) + "."
+                                color: root.number_color
+                                font.pixelSize: 13
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Rectangle {
+                                property bool is_current: board && board.current_ply === index + 1
+                                color: is_current ? Qt.rgba(0.3, 0.76, 0.97, 0.2) : "transparent"
+                                radius: 3
+                                height: move_text.implicitHeight + 4
+                                width: move_text.implicitWidth + 8
+
+                                Text {
+                                    id: move_text
+                                    anchors.centerIn: parent
+                                    text: board ? board.move_list[index] : ""
+                                    color: parent.is_current ? root.active_color : root.text_color
+                                    font.pixelSize: 13
+                                    font.bold: parent.is_current
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (board) { board.navigate_to(index + 1) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    id: result_text
+                    visible: board && board.game_loaded && board.game_result.length > 0
+                    anchors.top: notation_flow.bottom
+                    anchors.topMargin: 4
+                    text: board ? board.game_result : ""
+                    color: root.meta_color
+                    font.pixelSize: 13
+                    font.bold: true
+                }
+            }
         }
+    }
+
+    // Invisible item used only to measure header height for Flickable sizing.
+    Column {
+        id: header_col
+        visible: false
+        spacing: 2
+        Text { font.pixelSize: 13; font.bold: true; text: "x" }
+        Text { font.pixelSize: 11; text: "x" }
+        Rectangle { width: 1; height: 1 }
     }
 }
