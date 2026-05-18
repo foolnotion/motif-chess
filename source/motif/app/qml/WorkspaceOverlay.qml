@@ -23,33 +23,49 @@ Item {
     // Emitted when any database activation succeeds.
     signal database_activated()
 
-    property bool busy: false
-
     Rectangle {
         anchors.fill: parent
         color: palette.window
     }
 
-    // Busy overlay — covers the form while a synchronous DB operation runs.
+    // Loading overlay — shown while open_database runs on the background thread.
     Rectangle {
         anchors.fill: parent
         color: palette.window
-        opacity: 0.85
-        visible: root.busy
+        visible: workspace.is_loading
         z: 10
 
         ColumnLayout {
             anchors.centerIn: parent
             spacing: 16
+            width: Math.min(380, parent.width - 64)
 
             BusyIndicator {
                 Layout.alignment: Qt.AlignHCenter
-                running: root.busy
+                running: workspace.is_loading
             }
+
             Label {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Opening database…"
+                text: "Opening " + workspace.loading_name + "…"
                 font.pointSize: 11
+            }
+
+            ProgressBar {
+                Layout.fillWidth: true
+                // indeterminate — DuckDB open has no intermediate progress
+                from: 0
+                to: 1
+                value: 0
+                indeterminate: true
+            }
+
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                visible: workspace.loading_total_games > 0
+                text: Number(workspace.loading_total_games).toLocaleString(Qt.locale(), 'f', 0) + " games"
+                font.pointSize: 9
+                color: palette.mid
             }
         }
     }
@@ -90,13 +106,7 @@ Item {
         Button {
             text: "Use Scratch Database"
             Layout.fillWidth: true
-            onClicked: {
-                root.busy = true
-                Qt.callLater(function() {
-                    if (workspace.open_scratch()) { root.database_activated() }
-                    root.busy = false
-                })
-            }
+            onClicked: workspace.open_scratch()
         }
 
         Item { implicitHeight: 8 }
@@ -140,14 +150,7 @@ Item {
                     }
                 }
 
-                onClicked: {
-                    root.busy = true
-                    var p = modelData.path
-                    Qt.callLater(function() {
-                        if (workspace.open_database(p)) { root.database_activated() }
-                        root.busy = false
-                    })
-                }
+                onClicked: workspace.open_database(modelData.path)
 
                 // Right-click to remove
                 TapHandler {
@@ -206,11 +209,7 @@ Item {
             var trimmed = name_field.text.trim()
             if (trimmed.length === 0) return
             var bundle_path = name_dialog.parent_dir + "/" + trimmed
-            root.busy = true
-            Qt.callLater(function() {
-                if (workspace.create_database(bundle_path, trimmed)) { root.database_activated() }
-                root.busy = false
-            })
+            workspace.create_database(bundle_path, trimmed)
         }
         onClosed: name_field.clear()
     }
@@ -219,14 +218,7 @@ Item {
     FolderDialog {
         id: open_dir_dialog
         title: "Open Database Bundle"
-        onAccepted: {
-            var path = root.folder_url_to_path(selectedFolder)
-            root.busy = true
-            Qt.callLater(function() {
-                if (workspace.open_database(path)) { root.database_activated() }
-                root.busy = false
-            })
-        }
+        onAccepted: workspace.open_database(root.folder_url_to_path(selectedFolder))
     }
 
     Connections {

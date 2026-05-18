@@ -55,16 +55,14 @@
               "-DGLZ_DISABLE_SIMD=OFF"
               "-DGLZ_ENABLE_SSL=OFF"
             ];
-            postInstall =
-              (old.postInstall or "")
-              + ''
-                substituteInPlace "$out/share/glaze/glazeConfig.cmake" \
-                  --replace 'set(_glaze_ENABLE_SSL "TRUE")' 'set(_glaze_ENABLE_SSL "FALSE")'
+            postInstall = (old.postInstall or "") + ''
+              substituteInPlace "$out/share/glaze/glazeConfig.cmake" \
+                --replace 'set(_glaze_ENABLE_SSL "TRUE")' 'set(_glaze_ENABLE_SSL "FALSE")'
 
-                substituteInPlace "$out/share/glaze/glazeTargets.cmake" \
-                  --replace 'INTERFACE_COMPILE_DEFINITIONS "GLZ_DISABLE_SIMD;GLZ_ENABLE_SSL"' 'INTERFACE_COMPILE_DEFINITIONS ""' \
-                  --replace 'INTERFACE_LINK_LIBRARIES "OpenSSL::SSL;OpenSSL::Crypto"' 'INTERFACE_LINK_LIBRARIES ""'
-              '';
+              substituteInPlace "$out/share/glaze/glazeTargets.cmake" \
+                --replace 'INTERFACE_COMPILE_DEFINITIONS "GLZ_DISABLE_SIMD;GLZ_ENABLE_SSL"' 'INTERFACE_COMPILE_DEFINITIONS ""' \
+                --replace 'INTERFACE_LINK_LIBRARIES "OpenSSL::SSL;OpenSSL::Crypto"' 'INTERFACE_LINK_LIBRARIES ""'
+            '';
           });
         in
         rec {
@@ -79,13 +77,17 @@
             ];
             config = {
               Entrypoint = [ "${packages.serve}/bin/motif-serve" ];
-              ExposedPorts = { "8080/tcp" = { }; };
+              ExposedPorts = {
+                "8080/tcp" = { };
+              };
               Env = [
                 "MOTIF_DB_PATH=/data/db"
                 "MOTIF_HTTP_PORT=8080"
                 "MOTIF_HTTP_HOST=0.0.0.0"
               ];
-              Volumes = { "/data/db" = { }; };
+              Volumes = {
+                "/data/db" = { };
+              };
             };
           };
 
@@ -147,7 +149,7 @@
               fast-float
               gtl
               taskflow
-              xxHash
+              xxhash
               zstd
             ];
           };
@@ -156,11 +158,13 @@
             name = "motif-chess-app";
             cmakeFlags = old.cmakeFlags ++ [ "-Dmotif_ENABLE_APP=ON" ];
             nativeBuildInputs = old.nativeBuildInputs ++ (with pkgs; [ qt6.wrapQtAppsHook ]);
-            buildInputs = old.buildInputs ++ (with pkgs; [
-              qt6.qtbase
-              qt6.qtdeclarative
-              kddockwidgets-qtquick
-            ]);
+            buildInputs =
+              old.buildInputs
+              ++ (with pkgs; [
+                qt6.qtbase
+                qt6.qtdeclarative
+                kddockwidgets-qtquick
+              ]);
           });
 
           devShells.default = mkShell {

@@ -39,6 +39,11 @@ class database_workspace
     // Failed opens leave the previous active database unchanged.
     auto open_database(std::string const& dir_path) -> result<void>;
 
+    // Finalize an already-opened database_manager on the main thread:
+    // updates config, recent list, and workspace state. Called after
+    // database_manager::open() completes on a background thread.
+    auto accept_opened_database(motif::db::database_manager manager, std::string const& dir_path) -> result<void>;
+
     // Set scratch as active. Creates a temporary on-disk bundle; never added to the recent list.
     // The bundle is removed when close_active() is called.
     auto open_scratch() -> result<void>;

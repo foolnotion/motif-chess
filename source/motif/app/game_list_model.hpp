@@ -51,8 +51,7 @@ class game_list_model : public QAbstractTableModel
     [[nodiscard]] auto total_count() const noexcept -> qint64 { return total_count_; }
 
     // Returns the game_id for the given row, or 0 if the row is out of range.
-    // NOLINTNEXTLINE(modernize-use-trailing-return-type) — Q_INVOKABLE does not support trailing return type
-    Q_INVOKABLE quint32 game_id_at(int row) const;
+    Q_INVOKABLE auto game_id_at(int row) const -> quint32;
 
     // Slots — update filter and/or reload the game list from the active database.
     // NOLINTNEXTLINE(readability-redundant-access-specifiers)

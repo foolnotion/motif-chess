@@ -137,6 +137,7 @@ Item {
         // Navigation toolbar
         ToolBar {
             Layout.fillWidth: true
+            background: Rectangle { color: palette.window }
 
             RowLayout {
                 anchors.fill: parent

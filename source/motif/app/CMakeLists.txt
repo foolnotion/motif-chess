@@ -1,7 +1,7 @@
 find_package(fmt REQUIRED)
 find_package(glaze REQUIRED)
 find_package(tl-expected REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Svg)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Qml Quick QuickControls2 Svg)
 find_package(KDDockWidgets-qt6 REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.5)
@@ -36,9 +36,12 @@ qt_add_executable(motif_chess_app
     main.cpp
     board_model.cpp
     game_list_model.cpp
+    kddw_wayland_bridge.cpp
     workspace_controller.cpp
+    view_factory.cpp
 )
 
+qt_policy(SET QTP0004 NEW)
 qt_add_qml_module(motif_chess_app
     URI com.motif.app
     VERSION 1.0
@@ -46,6 +49,9 @@ qt_add_qml_module(motif_chess_app
         qml/ChessboardPanel.qml
         qml/GameListPanel.qml
         qml/Main.qml
+        qml/MotifDockWidget.qml
+        qml/MotifSeparator.qml
+        qml/MotifTitleBar.qml
         qml/VariationTree.qml
         qml/WorkspaceOverlay.qml
     RESOURCES
@@ -73,6 +79,7 @@ target_link_libraries(motif_chess_app PRIVATE
     motif_app_lib
     Qt6::Core
     Qt6::Gui
+    Qt6::Widgets
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
