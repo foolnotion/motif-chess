@@ -9,7 +9,7 @@
     chesslib.url = "github:foolnotion/chesslib";
     chesslib.inputs.nixpkgs.follows = "nixpkgs";
     chesslib.inputs.foolnotion.follows = "foolnotion";
-    pgnlib.url = "github:foolnotion/pgnlib";
+    pgnlib.url = "github:foolnotion/pgnlib/420ee3687d3b81355c4b090cd11c11f9f0a6c9ad";
     pgnlib.inputs.nixpkgs.follows = "nixpkgs";
     pgnlib.inputs.foolnotion.follows = "foolnotion";
     ucilib.url = "github:foolnotion/ucilib";
@@ -139,7 +139,6 @@
               duckdb
               httplib
               reproc
-              lexy
               chesslib.packages.${system}.default
               pgnlib.packages.${system}.default
               ucilib.packages.${system}.default
