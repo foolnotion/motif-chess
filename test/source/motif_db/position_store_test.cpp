@@ -46,51 +46,66 @@ struct duck_fixture
     }
 };
 
+constexpr auto opening_root_hash = 100U;
+constexpr auto first_child_hash = 200U;
+constexpr auto first_grandchild_hash = 300U;
+constexpr auto second_child_hash = 201U;
+constexpr auto second_grandchild_hash = 301U;
+constexpr auto first_move = 10U;
+constexpr auto second_move = 11U;
+constexpr auto third_move = 20U;
+constexpr auto fourth_move = 21U;
+constexpr auto first_white_elo = 2500;
+constexpr auto first_black_elo = 2400;
+constexpr auto second_white_elo = 2200;
+constexpr auto second_black_elo = 2100;
+constexpr auto score_tolerance = 0.001;
+
 auto make_opening_rows() -> std::vector<motif::db::position_row>
 {
     return {
-        {.zobrist_hash = motif::db::zobrist_hash {100U},
+        {.zobrist_hash = motif::db::zobrist_hash {opening_root_hash},
          .game_id = motif::db::game_id {1U},
          .ply = 0,
          .encoded_move = 0U,
          .result = 1,
-         .white_elo = 2500,
-         .black_elo = 2400},
-        {.zobrist_hash = motif::db::zobrist_hash {200U},
+         .white_elo = first_white_elo,
+         .black_elo = first_black_elo},
+        {.zobrist_hash = motif::db::zobrist_hash {first_child_hash},
          .game_id = motif::db::game_id {1U},
          .ply = 1,
-         .encoded_move = 10U,
+         .encoded_move = first_move,
          .result = 1,
-         .white_elo = 2500,
-         .black_elo = 2400},
-        {.zobrist_hash = motif::db::zobrist_hash {300U},
+         .white_elo = first_white_elo,
+         .black_elo = first_black_elo},
+        {.zobrist_hash = motif::db::zobrist_hash {first_grandchild_hash},
          .game_id = motif::db::game_id {1U},
          .ply = 2,
-         .encoded_move = 11U,
+         .encoded_move = second_move,
          .result = 1,
-         .white_elo = 2500,
-         .black_elo = 2400},
-        {.zobrist_hash = motif::db::zobrist_hash {100U},
+         .white_elo = first_white_elo,
+         .black_elo = first_black_elo},
+        {.zobrist_hash = motif::db::zobrist_hash {opening_root_hash},
          .game_id = motif::db::game_id {2U},
          .ply = 0,
          .encoded_move = 0U,
          .result = -1,
-         .white_elo = 2200,
-         .black_elo = 2100},
-        {.zobrist_hash = motif::db::zobrist_hash {201U},
+         .white_elo = second_white_elo,
+         .black_elo = second_black_elo},
+        {.zobrist_hash = motif::db::zobrist_hash {second_child_hash},
          .game_id = motif::db::game_id {2U},
          .ply = 1,
-         .encoded_move = 20U,
+         .encoded_move = third_move,
          .result = -1,
-         .white_elo = 2200,
-         .black_elo = 2100},
-        {.zobrist_hash = motif::db::zobrist_hash {301U},
+         .white_elo = second_white_elo,
+         .black_elo = second_black_elo},
+        {.zobrist_hash = motif::db::zobrist_hash {second_grandchild_hash},
          .game_id = motif::db::game_id {2U},
          .ply = 2,
-         .encoded_move = 21U,
+         .encoded_move = fourth_move,
          .result = -1,
-         .white_elo = 2200,
-         .black_elo = 2100},
+         .white_elo = second_white_elo,
+         .black_elo = second_black_elo},
     };
 }
 
@@ -223,7 +238,7 @@ TEST_CASE("position_store::count_distinct_games_by_zobrist filters by game ids",
     auto const rows = make_opening_rows();
     REQUIRE(fix.store.insert_batch(rows).has_value());
 
-    auto const count = fix.store.count_distinct_games_by_zobrist(motif::db::zobrist_hash {100U},
+    auto const count = fix.store.count_distinct_games_by_zobrist(motif::db::zobrist_hash {opening_root_hash},
                                                                  std::vector<motif::db::game_id> {
                                                                      motif::db::game_id {1U},
                                                                  });
@@ -239,7 +254,7 @@ TEST_CASE("position_store::query_opening_stats filtered computes elo_weighted_sc
     auto const rows = make_opening_rows();
     REQUIRE(fix.store.insert_batch(rows).has_value());
 
-    auto const stats = fix.store.query_opening_stats(motif::db::zobrist_hash {100U},
+    auto const stats = fix.store.query_opening_stats(motif::db::zobrist_hash {opening_root_hash},
                                                      std::vector<motif::db::game_id> {
                                                          motif::db::game_id {1U},
                                                      });
@@ -247,7 +262,8 @@ TEST_CASE("position_store::query_opening_stats filtered computes elo_weighted_sc
     REQUIRE(stats->size() == 1);
     CHECK(stats->front().frequency == 1U);
     REQUIRE(stats->front().elo_weighted_score.has_value());
-    CHECK_THAT(*stats->front().elo_weighted_score, Catch::Matchers::WithinAbs(1.0, 0.001));
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_THAT(*stats->front().elo_weighted_score, Catch::Matchers::WithinAbs(1.0, score_tolerance));
 }
 
 TEST_CASE("position_store::query_tree_slice filtered returns only requested games", "[motif-db][position_store]")
@@ -258,7 +274,7 @@ TEST_CASE("position_store::query_tree_slice filtered returns only requested game
     auto const rows = make_opening_rows();
     REQUIRE(fix.store.insert_batch(rows).has_value());
 
-    auto const slice = fix.store.query_tree_slice(motif::db::zobrist_hash {100U},
+    auto const slice = fix.store.query_tree_slice(motif::db::zobrist_hash {opening_root_hash},
                                                   2U,
                                                   std::vector<motif::db::game_id> {
                                                       motif::db::game_id {2U},
