@@ -60,6 +60,7 @@ constexpr auto first_black_elo = 2400;
 constexpr auto second_white_elo = 2200;
 constexpr auto second_black_elo = 2100;
 constexpr auto score_tolerance = 0.001;
+constexpr auto missing_game_id = 999U;
 
 auto make_opening_rows() -> std::vector<motif::db::position_row>
 {
@@ -107,6 +108,24 @@ auto make_opening_rows() -> std::vector<motif::db::position_row>
          .white_elo = second_white_elo,
          .black_elo = second_black_elo},
     };
+}
+
+auto opening_rollups_exist(duckdb_connection con) -> bool
+{
+    duckdb_result result {};
+    auto const status = duckdb_query(
+        con,
+        "SELECT COUNT(*) = 2 FROM information_schema.tables "
+        "WHERE table_schema = 'main' "
+        "AND table_name IN ('opening_continuation', 'position_summary')",
+        &result);
+    if (status == DuckDBError) {
+        duckdb_destroy_result(&result);
+        return false;
+    }
+    auto const exists = duckdb_value_boolean(&result, 0, 0);
+    duckdb_destroy_result(&result);
+    return exists;
 }
 
 }  // namespace
@@ -264,6 +283,39 @@ TEST_CASE("position_store::query_opening_stats filtered computes elo_weighted_sc
     REQUIRE(stats->front().elo_weighted_score.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK_THAT(*stats->front().elo_weighted_score, Catch::Matchers::WithinAbs(1.0, score_tolerance));
+}
+
+TEST_CASE("position_store::rebuild_opening_stats_rollups stores direct and transposition counts", "[motif-db][position_store]")
+{
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+
+    auto const rows = make_opening_rows();
+    REQUIRE(fix.store.insert_batch(rows).has_value());
+    REQUIRE(fix.store.rebuild_opening_stats_rollups().has_value());
+
+    auto const stats = fix.store.query_opening_stats(motif::db::zobrist_hash {opening_root_hash});
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->size() == 2);
+    CHECK(stats->at(0).frequency == 1U);
+    CHECK(stats->at(0).transposition_frequency == 1U);
+    CHECK(stats->at(1).frequency == 1U);
+    CHECK(stats->at(1).transposition_frequency == 1U);
+}
+
+TEST_CASE("position_store no-op mutations retain opening rollups", "[motif-db][position_store]")
+{
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+    REQUIRE(fix.store.insert_batch(make_opening_rows()).has_value());
+    REQUIRE(fix.store.rebuild_opening_stats_rollups().has_value());
+    REQUIRE(opening_rollups_exist(fix.con));
+
+    REQUIRE(fix.store.delete_by_game_id(motif::db::game_id {missing_game_id}).has_value());
+    CHECK(opening_rollups_exist(fix.con));
+
+    REQUIRE(fix.store.update_elo_for_game(motif::db::game_id {missing_game_id}, first_white_elo, std::nullopt).has_value());
+    CHECK(opening_rollups_exist(fix.con));
 }
 
 TEST_CASE("position_store::query_tree_slice filtered returns only requested games", "[motif-db][position_store]")

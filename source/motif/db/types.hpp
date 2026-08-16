@@ -93,6 +93,7 @@ struct opening_stat_agg_row
     motif::db::zobrist_hash cont_hash {};
     std::uint16_t root_ply {};  // MIN(p_root.ply) — for board reconstruction
     std::uint32_t frequency {};
+    std::uint32_t transposition_frequency {};
     std::uint32_t white_wins {};
     std::uint32_t draws {};
     std::uint32_t black_wins {};

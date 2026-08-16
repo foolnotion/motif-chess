@@ -137,4 +137,27 @@ The DuckDB position table was empty in the measured test db (data not checkpoint
 - P99 latency previously varied between runs (321–706ms) because unseeded reservoir sampling could select extremely popular positions (e.g., after 1.e4) with thousands of games. With a fixed seed, results are reproducible.
 - p50 is consistently ~730–760µs, which is fast. The p99 tail is dominated by a handful of high-fanout positions.
 - **Remaining NFR02 gap:** The formal acceptance target is `<500ms P99` on a 10M-game corpus. On the current 1M corpus, p99 can exceed 500ms for the most popular positions. The remaining bottleneck is per-game SQLite context fetch (moves blob + eco + opening_name). A future optimization could extract just the continuation byte at offset `2*ply` from each blob rather than deserializing the entire moves vector.
+
+---
+
+## 2026-08-16 — Materialized Opening Continuation Rollup
+
+**Machine:** Linux, Clang 21, isolated Release build without clang-tidy/cppcheck.
+
+### Opening Explorer — 989,967 games (`bench/data/twic-1m.pgn`)
+
+| Benchmark | p50 (µs) | p99 (µs) | min (µs) | max (µs) | total (ms) |
+|---|---:|---:|---:|---:|---:|
+| `opening_stats::query` with rollup ordered by root hash | 2,949 | 6,744 | 2,289 | 6,744 | 323 |
+
+| Benchmark | Total games | Continuations | Elapsed (ms) |
+|---|---:|---:|---:|
+| Starting-position explorer | 989,967 | 20 | 19.5 |
+
+### Notes
+
+- The rollup materializes direct edge statistics by `(root_hash, encoded_move, child_hash)` during position-store rebuild.
+- `frequency` now means games that selected the displayed continuation. `transposition_frequency` separately reports games reaching the child hash through any move order.
+- The previous 1M-game runs recorded p99 values of 321-706ms for the dynamic aggregate. This run reduces the sampled p99 to 6.7ms, but its p50 is higher than the former ~0.7ms because every query now reads the compact materialized relation and reconstructs response context.
+- Results are on the available 1M corpus. They do not establish the 10M-game performance target.
 - The P99 `CHECK` is only enforced on release builds; dev builds emit `WARN` instead.

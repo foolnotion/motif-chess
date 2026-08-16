@@ -28,6 +28,7 @@ class position_store
 
     auto initialize_schema() -> result<void>;
     auto sort_by_zobrist() -> result<void>;
+    auto rebuild_opening_stats_rollups() -> result<void>;
     auto insert_batch(std::span<position_row const> rows) -> result<void>;
     auto row_count() const -> result<std::int64_t>;
     auto query_by_zobrist(zobrist_hash hash, std::size_t limit = 0, std::size_t offset = 0) const -> result<std::vector<position_match>>;
@@ -50,8 +51,14 @@ class position_store
     auto distinct_game_ids_by_zobrist(zobrist_hash hash) const -> result<std::vector<game_id>>;
 
   private:
+    friend class database_manager;
+
+    [[nodiscard]] auto lock_connection() const -> std::unique_lock<std::recursive_mutex>;
+
     duckdb_connection con_;
-    mutable std::mutex filtered_game_ids_mutex_;
+    // DuckDB connections are single-threaded. Imports and explorer reads share
+    // this connection, including the temporary filtered-game table.
+    mutable std::recursive_mutex connection_mutex_;
 };
 
 }  // namespace motif::db

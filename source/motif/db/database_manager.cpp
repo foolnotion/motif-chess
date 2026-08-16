@@ -570,6 +570,23 @@ auto database_manager::remove_game(game_id const game_key) -> result<void>
     return store_->remove(game_key);
 }
 
+auto database_manager::remove_user_game(game_id const game_key) -> result<void>
+{
+    if (!positions_ || !store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const provenance = store_->get_provenance(game_key);
+    if (!provenance) {
+        return tl::unexpected {provenance.error()};
+    }
+    if (provenance->source_type != "manual") {
+        return tl::unexpected {error_code::not_editable};
+    }
+
+    return remove_game(game_key);
+}
+
 auto database_manager::query_elo_distribution(zobrist_hash const hash, search_filter const& filter, int const bucket_width) const
     -> result<std::vector<elo_distribution_row>>
 {
@@ -635,6 +652,7 @@ auto database_manager::sort_positions() -> result<void>
     if (duck_con_ == nullptr || !positions_) {
         return tl::unexpected {error_code::io_failure};
     }
+    auto const connection_lock = positions_->lock_connection();
 
     duckdb_result tx_res {};
     if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
@@ -654,6 +672,10 @@ auto database_manager::sort_positions() -> result<void>
         rollback();
         return tl::unexpected {error_code::io_failure};
     }
+    if (auto rollup_res = positions_->rebuild_opening_stats_rollups(); !rollup_res) {
+        rollback();
+        return tl::unexpected {rollup_res.error()};
+    }
 
     duckdb_result commit_res {};
     if (duckdb_query(duck_con_, "COMMIT", &commit_res) == DuckDBError) {
@@ -672,6 +694,7 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
     if (duck_con_ == nullptr || !positions_) {
         return tl::unexpected {error_code::io_failure};
     }
+    auto const connection_lock = positions_->lock_connection();
 
     auto log = spdlog::get("motif.db");
     auto log_rss = [&](char const* const phase) -> void
@@ -787,6 +810,11 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
             return tl::unexpected {sort_res.error()};
         }
         log_rss("after_sort_by_zobrist");
+    }
+
+    if (auto rollup_res = positions_->rebuild_opening_stats_rollups(); !rollup_res) {
+        rollback();
+        return tl::unexpected {rollup_res.error()};
     }
 
     duckdb_result commit_res {};

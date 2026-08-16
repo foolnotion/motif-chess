@@ -77,6 +77,10 @@ class database_manager
     // Returns error_code::not_found if the game does not exist.
     auto remove_game(game_id game_key) -> result<void>;
 
+    // Delete a manually-added game from both stores. Imported games return
+    // error_code::not_editable without modifying either store.
+    auto remove_user_game(game_id game_key) -> result<void>;
+
     // Elo distribution per continuation from a given position.
     // When filter contains metadata criteria, first narrows game IDs via SQLite,
     // then delegates to position_store with the filtered set. Empty filter uses

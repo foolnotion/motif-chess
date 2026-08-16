@@ -743,12 +743,12 @@ TEST_CASE("opening_stats::query counts transpositions in total_games", "[motif-s
     CHECK(stats->continuations.front().frequency == 2);
 }
 
-TEST_CASE("opening_stats::query continuation frequency counts all paths to child", "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query separates direct frequency from transposition popularity", "[motif-search][opening_stats]")
 {
     // Game 1 arrives at the transposition position via 1.Nf3 Nc6 2.Nc3 Nf6 (parent = after Nf3 Nc6 Nc3).
     // Game 2 arrives via 1.Nc3 Nf6 2.Nf3 Nc6 (different parent).
-    // Querying from game 1's parent should report frequency == 2 for the Nf6 continuation,
-    // because the child position is reached by both games regardless of path.
+    // The direct edge was played once, while the child position is reached by
+    // both games through transposition.
     tmp_dir const tdir {"transposition_parent"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "transposition-parent-db");
@@ -780,8 +780,8 @@ TEST_CASE("opening_stats::query continuation frequency counts all paths to child
     auto const& cont = stats->continuations.front();
     CHECK(cont.san == "Nf6");
     CHECK(cont.result_hash == hash_child);
-    // Child is reached by 2 games (via transposition) — frequency must reflect that.
-    CHECK(cont.frequency == 2);
+    CHECK(cont.frequency == 1);
+    CHECK(cont.transposition_frequency == 2);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1288,6 +1288,7 @@ TEST_CASE("opening_stats::query filtered with transposition counts only games th
     CHECK(cont.result_hash == child_hash);
     // Only game1 is in filtered_ids (game2 never passes through parent_hash)
     CHECK(cont.frequency == 1);
+    CHECK(cont.transposition_frequency == 1);
 }
 
 // ─── Elo distribution (3b-3) ─────────────────────────────────────────────────
@@ -1544,11 +1545,12 @@ TEST_CASE("query_elo_distribution rejects zero bucket_width", "[motif-search][op
 
 TEST_CASE("query_elo_distribution rejects negative bucket_width", "[motif-search][opening_stats][elo_distribution]")
 {
+    constexpr auto invalid_bucket_width = -100;
     tmp_dir const tdir {"elo_dist_neg_width"};
     auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-neg-db");
     REQUIRE(manager.has_value());
 
-    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"e4", "e5"}), {}, -100);
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"e4", "e5"}), {}, invalid_bucket_width);
     REQUIRE_FALSE(dist.has_value());
     CHECK(dist.error() == motif::search::error_code::invalid_argument);
 }

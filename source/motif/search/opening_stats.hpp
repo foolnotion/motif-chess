@@ -22,7 +22,8 @@ struct continuation
 {
     std::string san;
     motif::db::zobrist_hash result_hash {};
-    std::uint32_t frequency {};
+    std::uint32_t frequency {};  // Games playing this direct continuation.
+    std::uint32_t transposition_frequency {};  // Games reaching result_hash by any move order.
     std::uint32_t white_wins {};
     std::uint32_t draws {};
     std::uint32_t black_wins {};

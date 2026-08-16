@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -9,6 +10,7 @@
 #include "motif/search/opening_stats.hpp"
 
 #include <gtl/phmap.hpp>
+#include <spdlog/spdlog.h>
 #include <tl/expected.hpp>
 
 #include "motif/chess/chess.hpp"
@@ -20,6 +22,11 @@ namespace
 {
 
 using context_map = gtl::flat_hash_map<motif::db::game_id, motif::db::game_context>;
+
+auto elapsed_us(std::chrono::steady_clock::time_point const start) -> std::int64_t
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+}
 
 auto find_root_board(std::vector<motif::db::opening_stat_agg_row> const& rows,
                      motif::db::zobrist_hash const zobrist_hash,
@@ -64,6 +71,7 @@ auto build_stats(motif::db::database_manager const& database,
                  std::vector<motif::db::opening_stat_agg_row> const& rows,
                  std::uint32_t const total_games) -> motif::search::result<motif::search::opening_stats::stats>
 {
+    auto const started = std::chrono::steady_clock::now();
     if (rows.empty()) {
         motif::search::opening_stats::stats out;
         out.total_games = total_games;
@@ -87,6 +95,7 @@ auto build_stats(motif::db::database_manager const& database,
         return tl::unexpected {motif::search::error_code::io_failure};
     }
     auto const& contexts = *contexts_res;
+    auto const contexts_loaded_at = std::chrono::steady_clock::now();
 
     auto position = motif::chess::board {};
     if (rows.front().root_ply > 0U) {
@@ -116,6 +125,7 @@ auto build_stats(motif::db::database_manager const& database,
             .san = san,
             .result_hash = row.cont_hash,
             .frequency = row.frequency,
+            .transposition_frequency = row.transposition_frequency,
             .white_wins = row.white_wins,
             .draws = row.draws,
             .black_wins = row.black_wins,
@@ -137,6 +147,15 @@ auto build_stats(motif::db::database_manager const& database,
             return left.san < right.san;
         });
 
+    if (auto const log = spdlog::get("motif.search"); log != nullptr) {
+        log->debug("opening_stats hash {} rows {} contexts {} SQLite contexts {} us presentation {} us",
+                   hash.value,
+                   rows.size(),
+                   contexts.size(),
+                   std::chrono::duration_cast<std::chrono::microseconds>(contexts_loaded_at - started).count(),
+                   elapsed_us(contexts_loaded_at));
+    }
+
     return output;
 }
 
@@ -147,6 +166,7 @@ namespace motif::search::opening_stats
 
 auto query(motif::db::database_manager const& database, motif::db::zobrist_hash const hash) -> result<stats>
 {
+    auto const started = std::chrono::steady_clock::now();
     auto total_count_res = database.positions().count_distinct_games_by_zobrist(hash);
     if (!total_count_res) {
         return tl::unexpected {error_code::io_failure};
@@ -154,10 +174,20 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
     if (*total_count_res == 0) {
         return stats {};
     }
+    auto const counted_at = std::chrono::steady_clock::now();
 
     auto rows_res = database.positions().query_opening_stats(hash);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const aggregated_at = std::chrono::steady_clock::now();
+    if (auto const log = spdlog::get("motif.search"); log != nullptr) {
+        log->debug("opening_stats hash {} games {} DuckDB count {} us aggregate {} us",
+                   hash.value,
+                   *total_count_res,
+                   std::chrono::duration_cast<std::chrono::microseconds>(counted_at - started).count(),
+                   std::chrono::duration_cast<std::chrono::microseconds>(aggregated_at - counted_at).count());
     }
 
     return build_stats(database, hash, *rows_res, static_cast<std::uint32_t>(*total_count_res));
