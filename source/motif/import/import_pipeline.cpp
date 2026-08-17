@@ -611,6 +611,17 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             if (auto sort_res = db_.sort_positions(); !sort_res) {
                 return tl::unexpected {error_code::io_failure};
             }
+        } else if (any_inline_flushed) {
+            if (auto rollup_res = db_.positions().rebuild_opening_stats_rollups(); !rollup_res) {
+                return tl::unexpected {error_code::io_failure};
+            }
+            // Not run inside a transaction here (unlike db_.sort_positions()),
+            // so an explicit checkpoint is needed for the rebuilt rollup
+            // table to survive a close()+reopen. See position_store.cpp's
+            // checkpoint() for why.
+            if (auto checkpoint_res = db_.positions().checkpoint(); !checkpoint_res) {
+                return tl::unexpected {error_code::io_failure};
+            }
         }
     } else if (config.rebuild_positions_after_import) {
         phase_.store(import_phase::rebuilding, std::memory_order_relaxed);
