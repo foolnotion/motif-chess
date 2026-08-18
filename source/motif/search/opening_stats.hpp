@@ -22,7 +22,10 @@ struct continuation
 {
     std::string san;
     motif::db::zobrist_hash result_hash {};
+    // Games that reached the child position by any move order.
     std::uint32_t frequency {};
+    // Games that selected this exact continuation from the queried parent.
+    std::uint32_t direct_frequency {};
     std::uint32_t white_wins {};
     std::uint32_t draws {};
     std::uint32_t black_wins {};

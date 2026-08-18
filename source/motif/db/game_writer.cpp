@@ -1,6 +1,8 @@
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,9 +80,25 @@ auto reset_stmt(sqlite3_stmt* stmt) noexcept -> void
     sqlite3_clear_bindings(stmt);
 }
 
+// FNV-1a 64-bit over the raw bytes bound to the moves column. Only needs to
+// be a good uniqueness key for ux_game_identity, not cryptographically
+// strong -- a collision is a false-positive duplicate rejection, not corruption.
+auto fnv1a_hash(std::span<std::uint8_t const> data) noexcept -> std::uint64_t
+{  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
+    constexpr auto offset_basis = std::uint64_t {0xcbf29ce484222325ULL};
+    constexpr auto prime = std::uint64_t {0x100000001b3ULL};
+
+    auto hash = offset_basis;
+    for (auto const byte : data) {
+        hash ^= byte;
+        hash *= prime;
+    }
+    return hash;
+}
+
 // Bind parameter positions for:
 //   INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,
-//                    source_type, source_label, review_status)
+//                    moves_hash, source_type, source_label, review_status)
 namespace game_ins_param
 {
 constexpr int white_id = 1;
@@ -90,9 +108,10 @@ constexpr int date = 4;
 constexpr int result = 5;
 constexpr int eco = 6;
 constexpr int moves = 7;
-constexpr int source_type = 8;
-constexpr int source_label = 9;
-constexpr int review_status = 10;
+constexpr int moves_hash = 8;
+constexpr int source_type = 9;
+constexpr int source_label = 10;
+constexpr int review_status = 11;
 }  // namespace game_ins_param
 
 }  // namespace
@@ -326,12 +345,16 @@ auto game_writer::impl::insert(game const& src_game) -> result<game_id>
 
     auto game_ins = prepare_cached_stmt(
         insert_game_stmt_,
-        "INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,"
+        "INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves, moves_hash,"
         " source_type, source_label, review_status)"
-        " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     if (!game_ins) {
         return tl::unexpected {game_ins.error()};
     }
+
+    auto const moves_hash = fnv1a_hash(
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        std::span {reinterpret_cast<std::uint8_t const*>(moves.data()), blob_bytes});
 
     sqlite3_bind_int64(*game_ins, game_ins_param::white_id, *white_id);
     sqlite3_bind_int64(*game_ins, game_ins_param::black_id, *black_id);
@@ -349,6 +372,7 @@ auto game_writer::impl::insert(game const& src_game) -> result<game_id>
     } else {
         sqlite3_bind_blob(*game_ins, game_ins_param::moves, moves.data(), static_cast<int>(blob_bytes), SQLITE_TRANSIENT);
     }
+    sqlite3_bind_int64(*game_ins, game_ins_param::moves_hash, static_cast<std::int64_t>(moves_hash));
     sqlite3_bind_text(*game_ins,
                       game_ins_param::source_type,
                       src_game.provenance.source_type.c_str(),

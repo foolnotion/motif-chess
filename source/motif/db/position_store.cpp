@@ -25,10 +25,25 @@ constexpr auto create_position = R"sql(
         zobrist_hash  UBIGINT   NOT NULL,
         game_id       UINTEGER  NOT NULL,
         ply           USMALLINT NOT NULL,
-        encoded_move  USMALLINT NOT NULL,
-        result        TINYINT   NOT NULL,
-        white_elo     SMALLINT,
-        black_elo     SMALLINT
+        encoded_move  USMALLINT NOT NULL
+    )
+)sql";
+
+// result/white_elo/black_elo are per-game facts, not per-position ones. Kept
+// out of `position` (one row per ply visited, ~44 rows/game on average) and
+// normalized here (one row per game) instead -- storing them inline in
+// `position` cost ~1.2 GiB of otherwise-redundant, uncompressible bytes on a
+// 3.36M-game bundle (that table is sorted by zobrist_hash, not by game_id,
+// so the redundant per-game values never cluster and DuckDB's compression
+// gets no benefit from the repetition). See
+// docs/handoffs/2026-08-17-opening-explorer-storage.md, Session 6.
+// language=sql
+constexpr auto create_game_result = R"sql(
+    CREATE TABLE IF NOT EXISTS game_result (
+        game_id    UINTEGER NOT NULL PRIMARY KEY,
+        result     TINYINT  NOT NULL,
+        white_elo  SMALLINT,
+        black_elo  SMALLINT
     )
 )sql";
 
@@ -45,7 +60,18 @@ constexpr auto sort_position_by_zobrist = R"sql(
     ALTER TABLE position_sorted RENAME TO position;
 )sql";
 
-// Column positions for SELECT game_id, ply, result, white_elo, black_elo FROM position
+// Rollup entries are only materialized for shallow root positions (see
+// create_opening_stats_rollups below); deeper queries fall back to the
+// dynamic path. Session 2 found queries beyond this depth have almost no
+// transposition (COUNT(DISTINCT root_hash) ~= COUNT(*) past shallow depth),
+// so materializing them buys little query-speed benefit for a large,
+// storage-dominating share of rollup rows (94.2% of rows were root_ply > 20
+// on the 3.36M-game bundle). Not yet validated against real opening-explorer
+// usage patterns -- see docs/handoffs/2026-08-17-opening-explorer-storage.md.
+constexpr auto opening_stats_max_root_ply = std::uint16_t {20};
+
+// Column positions for SELECT p.game_id, p.ply, gr.result, gr.white_elo, gr.black_elo
+// FROM position p JOIN game_result gr ON gr.game_id = p.game_id
 namespace by_zobrist_col
 {
 constexpr idx_t game_id = 0;
@@ -93,11 +119,81 @@ constexpr idx_t avg_white_elo = 7;
 constexpr idx_t avg_black_elo = 8;
 constexpr idx_t eco_min = 9;
 constexpr idx_t eco_max = 10;
-// present only in the filtered overload (query_opening_stats with game_ids)
+// Final aggregate projection column in dynamic and materialized queries.
 constexpr idx_t elo_weighted_score = 11;
+constexpr idx_t transposition_frequency = 12;
 }  // namespace opening_stats_col
 
 constexpr auto filtered_game_ids_table = "_filtered_game_ids";
+
+// Rebuilt from the dense position table. Incremental writes drop these tables
+// so queries fall back to the exact dynamic path until the next rebuild.
+constexpr auto drop_opening_stats_rollups = R"sql(
+    DROP TABLE IF EXISTS opening_continuation;
+    DROP TABLE IF EXISTS position_summary;
+)sql";
+
+// transposition_frequency (child_frequency below) is deliberately computed
+// from the *whole* position table, unbounded by opening_stats_max_root_ply:
+// it measures how common the child position is overall, independent of how
+// deep the root of this particular edge is.
+// language=sql
+constexpr auto create_opening_stats_rollups_template = R"sql(
+    CREATE TABLE opening_continuation AS
+    WITH child_frequency AS (
+        SELECT
+            zobrist_hash,
+            CAST(COUNT(*) AS UINTEGER) AS frequency
+        FROM (
+            SELECT DISTINCT zobrist_hash, game_id
+            FROM position
+        ) AS unique_games
+        GROUP BY zobrist_hash
+    ),
+    edge_deduped AS (
+        SELECT
+            p_root.zobrist_hash AS root_hash,
+            p_root.game_id,
+            p_cont.encoded_move,
+            p_cont.zobrist_hash AS child_hash,
+            MIN(p_root.ply) AS root_ply,
+            gr.result,
+            gr.white_elo,
+            gr.black_elo
+        FROM position p_root
+        JOIN position p_cont
+            ON p_cont.game_id = p_root.game_id
+           AND p_cont.ply = p_root.ply + 1
+        JOIN game_result gr ON gr.game_id = p_root.game_id
+        WHERE p_root.ply <= {0}
+        GROUP BY p_root.zobrist_hash, p_root.game_id, p_cont.encoded_move,
+                 p_cont.zobrist_hash, gr.result, gr.white_elo, gr.black_elo
+    )
+    SELECT
+        d.root_hash,
+        d.encoded_move,
+        d.child_hash,
+        CAST(MIN(d.root_ply) AS USMALLINT) AS root_ply,
+        CAST(COUNT(*) AS UINTEGER) AS frequency,
+        CAST(COUNT(CASE WHEN d.result > 0 THEN 1 END) AS UINTEGER) AS white_wins,
+        CAST(COUNT(CASE WHEN d.result = 0 THEN 1 END) AS UINTEGER) AS draws,
+        CAST(COUNT(CASE WHEN d.result < 0 THEN 1 END) AS UINTEGER) AS black_wins,
+        AVG(CAST(d.white_elo AS DOUBLE)) AS avg_white_elo,
+        AVG(CAST(d.black_elo AS DOUBLE)) AS avg_black_elo,
+        CAST(MIN(d.game_id) AS UINTEGER) AS eco_sample_min,
+        CAST(MAX(d.game_id) AS UINTEGER) AS eco_sample_max,
+        SUM(CASE WHEN d.white_elo IS NOT NULL AND d.black_elo IS NOT NULL
+                 THEN CAST(d.result AS DOUBLE) * (d.white_elo + d.black_elo) / 2.0
+                 ELSE NULL END)
+            / NULLIF(SUM(CASE WHEN d.white_elo IS NOT NULL AND d.black_elo IS NOT NULL
+                              THEN (d.white_elo + d.black_elo) / 2.0
+                              ELSE NULL END), 0) AS elo_weighted_score,
+        s.frequency AS transposition_frequency
+    FROM edge_deduped d
+    JOIN child_frequency s ON s.zobrist_hash = d.child_hash
+    GROUP BY d.root_hash, d.encoded_move, d.child_hash, s.frequency
+    ORDER BY d.root_hash;
+)sql";
 
 auto run_query(duckdb_connection con, char const* sql) -> motif::db::result<void>
 {
@@ -108,6 +204,88 @@ auto run_query(duckdb_connection con, char const* sql) -> motif::db::result<void
     }
     duckdb_destroy_result(&res);
     return {};
+}
+
+// One row per distinct game_id in `rows`, in the order it first appears.
+// position_row still carries result/white_elo/black_elo per instance (every
+// row of a game shares the same values, computed once by the import
+// pipeline) -- only insert_batch's storage split cares that these belong in
+// game_result, not position; callers are unaffected.
+//
+// Stages rows into a TEMP table via a duckdb_appender, then flushes them into
+// game_result with one set-based INSERT ... ON CONFLICT DO NOTHING, instead
+// of one prepared-statement round trip per game. The per-game upsert loop was
+// the dominant cost of position_store::insert_batch: on the 100k-game bundle
+// it took deferred SQLite-import-plus-rebuild from 8s to 192s. See
+// docs/handoffs/2026-08-17-opening-explorer-storage.md, Session 8.
+auto insert_game_results_for_batch(duckdb_connection con, std::span<motif::db::position_row const> rows) -> motif::db::result<void>
+{
+    // language=sql
+    constexpr auto create_staging = R"sql(
+        CREATE TEMP TABLE IF NOT EXISTS _game_result_staging (
+            game_id    UINTEGER NOT NULL,
+            result     TINYINT  NOT NULL,
+            white_elo  SMALLINT,
+            black_elo  SMALLINT
+        )
+    )sql";
+    // language=sql
+    constexpr auto clear_staging = R"sql(
+        DELETE FROM _game_result_staging
+    )sql";
+    // language=sql
+    constexpr auto flush_staging = R"sql(
+        INSERT INTO game_result (game_id, result, white_elo, black_elo)
+        SELECT game_id, result, white_elo, black_elo FROM _game_result_staging
+        ON CONFLICT (game_id) DO NOTHING
+    )sql";
+
+    if (auto create_res = run_query(con, create_staging); !create_res) {
+        return create_res;
+    }
+    if (auto clear_res = run_query(con, clear_staging); !clear_res) {
+        return clear_res;
+    }
+
+    duckdb_appender appender {};
+    if (duckdb_appender_create(con, nullptr, "_game_result_staging", &appender) == DuckDBError) {
+        duckdb_appender_destroy(&appender);
+        return tl::unexpected {motif::db::error_code::io_failure};
+    }
+
+    std::optional<motif::db::game_id> previous_game_id;
+    for (auto const& row : rows) {
+        if (previous_game_id.has_value() && *previous_game_id == row.game_id) {
+            continue;
+        }
+        previous_game_id = row.game_id;
+
+        duckdb_appender_begin_row(appender);
+        duckdb_append_uint32(appender, row.game_id.value);
+        duckdb_append_int8(appender, row.result);
+        if (row.white_elo.has_value()) {
+            duckdb_append_int16(appender, *row.white_elo);
+        } else {
+            duckdb_append_null(appender);
+        }
+        if (row.black_elo.has_value()) {
+            duckdb_append_int16(appender, *row.black_elo);
+        } else {
+            duckdb_append_null(appender);
+        }
+        if (duckdb_appender_end_row(appender) == DuckDBError) {
+            duckdb_appender_destroy(&appender);
+            return tl::unexpected {motif::db::error_code::io_failure};
+        }
+    }
+
+    auto const flush_ret = duckdb_appender_flush(appender);
+    duckdb_appender_destroy(&appender);
+    if (flush_ret == DuckDBError) {
+        return tl::unexpected {motif::db::error_code::io_failure};
+    }
+
+    return run_query(con, flush_staging);
 }
 
 auto populate_filtered_game_ids_table(duckdb_connection con, std::vector<motif::db::game_id> const& game_ids) -> motif::db::result<void>
@@ -172,6 +350,23 @@ struct result_guard
     auto operator=(result_guard&&) -> result_guard& = delete;
 };
 
+auto has_opening_stats_rollups(duckdb_connection con) -> motif::db::result<bool>
+{
+    // language=sql
+    constexpr auto sql = R"sql(
+        SELECT COUNT(*) > 0
+        FROM information_schema.tables
+        WHERE table_schema = 'main'
+          AND table_name = 'opening_continuation'
+    )sql";
+
+    result_guard guard {};
+    if (duckdb_query(con, sql, &guard.res) == DuckDBError) {
+        return tl::unexpected {motif::db::error_code::io_failure};
+    }
+    return duckdb_value_boolean(&guard.res, 0, 0);
+}
+
 [[nodiscard]] auto read_optional_int16(duckdb_result& res, idx_t col, idx_t row) -> std::optional<std::int16_t>
 {
     if (duckdb_value_is_null(&res, col, row)) {
@@ -211,10 +406,20 @@ auto position_store::operator=(position_store&& other) noexcept -> position_stor
     return *this;
 }
 
+auto position_store::lock_connection() const -> std::unique_lock<std::recursive_mutex>
+{
+    return std::unique_lock {connection_mutex_};
+}
+
 auto position_store::initialize_schema() -> result<void>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     result_guard guard {};
     if (duckdb_query(con_, create_position, &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    result_guard game_result_guard {};
+    if (duckdb_query(con_, create_game_result, &game_result_guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
     }
     return {};
@@ -222,6 +427,7 @@ auto position_store::initialize_schema() -> result<void>
 
 auto position_store::sort_by_zobrist() -> result<void>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     result_guard guard {};
     if (duckdb_query(con_, sort_position_by_zobrist, &guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
@@ -229,8 +435,43 @@ auto position_store::sort_by_zobrist() -> result<void>
     return {};
 }
 
+auto position_store::rebuild_opening_stats_rollups() -> result<void>
+{
+    auto const lock = std::scoped_lock {connection_mutex_};
+    if (auto drop_res = run_query(con_, drop_opening_stats_rollups); !drop_res) {
+        return drop_res;
+    }
+    auto const sql = fmt::format(create_opening_stats_rollups_template, opening_stats_max_root_ply);
+    return run_query(con_, sql.c_str());
+}
+
+auto position_store::checkpoint() -> result<void>
+{
+    // DuckDB refuses CHECKPOINT inside an active transaction, so this is a
+    // separate call rather than folded into rebuild_opening_stats_rollups()
+    // -- database_manager::sort_positions() and rebuild_position_store()
+    // both call that from inside an explicit BEGIN/COMMIT, and running
+    // CHECKPOINT there rolled the whole transaction back (reproduced:
+    // "import_pipeline: run imports games..." started failing outright).
+    // Only import_pipeline.cpp's un-transacted call to
+    // rebuild_opening_stats_rollups() (the "no sorting" inline path) needs
+    // this: without it, CREATE TABLE opening_continuation there was not
+    // reliably visible to a connection that reopens the file fresh
+    // (reproduced with database_manager::close() + a new duckdb_open() on
+    // the same path; confirmed fixed by this CHECKPOINT, 3/3 repeat runs).
+    auto const lock = std::scoped_lock {connection_mutex_};
+    return run_query(con_, "CHECKPOINT");
+}
+
 auto position_store::insert_batch(std::span<position_row const> rows) -> result<void>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
+    if (rows.empty()) {
+        return {};
+    }
+    if (auto drop_res = run_query(con_, drop_opening_stats_rollups); !drop_res) {
+        return drop_res;
+    }
     duckdb_appender appender {};
     if (duckdb_appender_create(con_, nullptr, "position", &appender) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
@@ -242,17 +483,6 @@ auto position_store::insert_batch(std::span<position_row const> rows) -> result<
         duckdb_append_uint32(appender, row.game_id.value);
         duckdb_append_uint16(appender, row.ply);
         duckdb_append_uint16(appender, row.encoded_move);
-        duckdb_append_int8(appender, row.result);
-        if (row.white_elo.has_value()) {
-            duckdb_append_int16(appender, *row.white_elo);
-        } else {
-            duckdb_append_null(appender);
-        }
-        if (row.black_elo.has_value()) {
-            duckdb_append_int16(appender, *row.black_elo);
-        } else {
-            duckdb_append_null(appender);
-        }
         if (duckdb_appender_end_row(appender) == DuckDBError) {
             duckdb_appender_destroy(&appender);
             return tl::unexpected {error_code::io_failure};
@@ -265,11 +495,12 @@ auto position_store::insert_batch(std::span<position_row const> rows) -> result<
         return tl::unexpected {error_code::io_failure};
     }
 
-    return {};
+    return insert_game_results_for_batch(con_, rows);
 }
 
 auto position_store::row_count() const -> result<std::int64_t>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     result_guard guard {};
     if (duckdb_query(con_, "SELECT count(*) FROM position", &guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
@@ -280,18 +511,21 @@ auto position_store::row_count() const -> result<std::int64_t>
 auto position_store::query_by_zobrist(zobrist_hash const hash, std::size_t const limit, std::size_t const offset) const
     -> result<std::vector<position_match>>
 {
-    std::ostringstream sql;
-    sql << "SELECT game_id, ply, result, white_elo, black_elo FROM position " "WHERE zobrist_hash = CAST(" << hash.value
-        << " AS UBIGINT) ORDER BY game_id, ply";
+    auto const lock = std::scoped_lock {connection_mutex_};
+    auto sql = fmt::format(
+        "SELECT p.game_id, p.ply, gr.result, gr.white_elo, gr.black_elo "
+        "FROM position p JOIN game_result gr ON gr.game_id = p.game_id "
+        "WHERE p.zobrist_hash = CAST({} AS UBIGINT) ORDER BY p.game_id, p.ply",
+        hash.value);
     if (limit > 0) {
-        sql << " LIMIT " << limit;
+        sql += fmt::format(" LIMIT {}", limit);
     }
     if (offset > 0) {
-        sql << " OFFSET " << offset;
+        sql += fmt::format(" OFFSET {}", offset);
     }
 
     result_guard guard {};
-    if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -316,26 +550,30 @@ auto position_store::query_by_zobrist(zobrist_hash const hash, std::size_t const
 auto position_store::query_tree_slice(zobrist_hash const root_hash, std::uint16_t const max_depth) const
     -> result<std::vector<tree_position_row>>
 {
-    std::ostringstream sql;
-    sql << "SELECT "
-           "p_root.game_id, "
-           "p_root.ply AS root_ply, "
-           "CAST(p_cont.ply - p_root.ply AS USMALLINT) AS depth, "
-           "p_cont.zobrist_hash AS child_hash, "
-           "p_cont.encoded_move, "
-           "p_cont.result, "
-           "p_cont.white_elo, "
-           "p_cont.black_elo "
-           "FROM position p_root "
-           "JOIN position p_cont "
-           "ON  p_root.game_id = p_cont.game_id "
-           "AND p_cont.ply > p_root.ply "
-           "AND p_cont.ply <= p_root.ply + "
-         << max_depth << " WHERE p_root.zobrist_hash = CAST(" << root_hash.value << " AS UBIGINT)"
-        << " ORDER BY p_root.game_id, p_cont.ply";
+    auto const lock = std::scoped_lock {connection_mutex_};
+    auto const sql = fmt::format(
+        "SELECT "
+        "p_root.game_id, "
+        "p_root.ply AS root_ply, "
+        "CAST(p_cont.ply - p_root.ply AS USMALLINT) AS depth, "
+        "p_cont.zobrist_hash AS child_hash, "
+        "p_cont.encoded_move, "
+        "gr.result, "
+        "gr.white_elo, "
+        "gr.black_elo "
+        "FROM position p_root "
+        "JOIN position p_cont "
+        "ON  p_root.game_id = p_cont.game_id "
+        "AND p_cont.ply > p_root.ply "
+        "AND p_cont.ply <= p_root.ply + {} "
+        "JOIN game_result gr ON gr.game_id = p_root.game_id "
+        "WHERE p_root.zobrist_hash = CAST({} AS UBIGINT) "
+        "ORDER BY p_root.game_id, p_cont.ply",
+        max_depth,
+        root_hash.value);
 
     result_guard guard {};
-    if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -362,72 +600,145 @@ auto position_store::query_tree_slice(zobrist_hash const root_hash, std::uint16_
 
 auto position_store::query_opening_stats(zobrist_hash const hash) const -> result<std::vector<opening_stat_agg_row>>
 {
-    std::ostringstream sql;
+    auto const lock = std::scoped_lock {connection_mutex_};
+    auto const rollups_res = has_opening_stats_rollups(con_);
+    if (!rollups_res) {
+        return tl::unexpected {rollups_res.error()};
+    }
+    if (*rollups_res) {
+        // opening_continuation only materializes roots with
+        // ply <= opening_stats_max_root_ply. An empty result here is
+        // ambiguous -- genuinely no continuations, or root deeper than the
+        // cap -- and in both cases the dynamic path below gives the correct
+        // ground truth, so fall through rather than returning early.
+        // language=sql
+        auto const sql = fmt::format(
+            R"sql(
+                SELECT
+                    encoded_move,
+                    child_hash,
+                    root_ply,
+                    frequency,
+                    white_wins,
+                    draws,
+                    black_wins,
+                    avg_white_elo,
+                    avg_black_elo,
+                    eco_sample_min,
+                    eco_sample_max,
+                    elo_weighted_score,
+                    transposition_frequency
+                FROM opening_continuation
+                WHERE root_hash = CAST({} AS UBIGINT)
+            )sql",
+            hash.value);
+
+        result_guard guard {};
+        if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+            return tl::unexpected {error_code::io_failure};
+        }
+
+        auto const nrows = static_cast<std::size_t>(duckdb_row_count(&guard.res));
+        auto rows = std::vector<opening_stat_agg_row> {};
+        rows.reserve(nrows);
+        for (std::size_t i = 0; i < nrows; ++i) {
+            auto const row = static_cast<idx_t>(i);
+            rows.push_back(opening_stat_agg_row {
+                .cont_encoded_move = duckdb_value_uint16(&guard.res, opening_stats_col::cont_encoded_move, row),
+                .cont_hash = zobrist_hash {duckdb_value_uint64(&guard.res, opening_stats_col::cont_hash, row)},
+                .root_ply = duckdb_value_uint16(&guard.res, opening_stats_col::root_ply, row),
+                .frequency = duckdb_value_uint32(&guard.res, opening_stats_col::frequency, row),
+                .transposition_frequency = duckdb_value_uint32(&guard.res, opening_stats_col::transposition_frequency, row),
+                .white_wins = duckdb_value_uint32(&guard.res, opening_stats_col::white_wins, row),
+                .draws = duckdb_value_uint32(&guard.res, opening_stats_col::draws, row),
+                .black_wins = duckdb_value_uint32(&guard.res, opening_stats_col::black_wins, row),
+                .avg_white_elo = read_optional_double(guard.res, opening_stats_col::avg_white_elo, row),
+                .avg_black_elo = read_optional_double(guard.res, opening_stats_col::avg_black_elo, row),
+                .eco_sample_min = game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_min, row)},
+                .eco_sample_max = game_id {duckdb_value_uint32(&guard.res, opening_stats_col::eco_max, row)},
+                .elo_weighted_score = read_optional_double(guard.res, opening_stats_col::elo_weighted_score, row),
+            });
+        }
+        if (!rows.empty()) {
+            return rows;
+        }
+    }
+
     // deduped: one row per (game, move, child) that visited the root position.
-    // child_agg: global stats for each child position across ALL games (not just
-    // those that came through this parent), so transpositions are counted.
+    // child_agg: global distinct-game count for each child position, retained as
+    // transposition_frequency while the primary statistics come from deduped.
     // eco_sample uses game_ids from deduped (P→Q path) for board reconstruction.
-    sql << "WITH deduped AS ("
-           "SELECT "
-           "p_root.game_id, "
-           "p_cont.encoded_move, "
-           "p_cont.zobrist_hash AS child_hash, "
-           "MIN(p_root.ply) AS root_ply, "
-           "p_root.result, "
-           "p_root.white_elo, "
-           "p_root.black_elo, "
-           "CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL "
-           "THEN CAST(p_root.result AS DOUBLE) * (p_root.white_elo + p_root.black_elo) / 2.0 "
-           "ELSE NULL END AS weighted_contrib, "
-           "CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL "
-           "THEN (p_root.white_elo + p_root.black_elo) / 2.0 "
-           "ELSE NULL END AS elo_weight "
-           "FROM position p_root "
-           "JOIN position p_cont "
-           "ON  p_cont.game_id = p_root.game_id "
-           "AND p_cont.ply = p_root.ply + 1 "
-         << "WHERE p_root.zobrist_hash = CAST(" << hash.value << " AS UBIGINT) "
-        << "GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash, "
-           "p_root.result, p_root.white_elo, p_root.black_elo"
-           "), "
-           "child_hashes AS ("
-           "SELECT DISTINCT child_hash FROM deduped"
-           "), "
-           "child_agg AS ("
-           "SELECT "
-           "uniq.zobrist_hash, "
-           "COUNT(*) AS frequency, "
-           "COUNT(CASE WHEN uniq.result > 0 THEN 1 END) AS white_wins, "
-           "COUNT(CASE WHEN uniq.result = 0 THEN 1 END) AS draws, "
-           "COUNT(CASE WHEN uniq.result < 0 THEN 1 END) AS black_wins, "
-           "AVG(CAST(uniq.white_elo AS DOUBLE)) AS avg_white_elo, "
-           "AVG(CAST(uniq.black_elo AS DOUBLE)) AS avg_black_elo "
-           "FROM ("
-           "SELECT DISTINCT p.zobrist_hash, p.game_id, p.result, p.white_elo, p.black_elo "
-           "FROM position p "
-           "JOIN child_hashes ON child_hashes.child_hash = p.zobrist_hash"
-           ") AS uniq "
-           "GROUP BY uniq.zobrist_hash"
-           ") "
-           "SELECT "
-           "d.encoded_move, "
-           "d.child_hash, "
-           "MIN(d.root_ply) AS root_ply, "
-           "MIN(ca.frequency) AS frequency, "
-           "MIN(ca.white_wins) AS white_wins, "
-           "MIN(ca.draws) AS draws, "
-           "MIN(ca.black_wins) AS black_wins, "
-           "MIN(ca.avg_white_elo) AS avg_white_elo, "
-           "MIN(ca.avg_black_elo) AS avg_black_elo, "
-           "MIN(d.game_id) AS eco_sample_min, "
-           "MAX(d.game_id) AS eco_sample_max, "
-           "SUM(d.weighted_contrib) / NULLIF(SUM(d.elo_weight), 0) AS elo_weighted_score "
-           "FROM deduped d "
-           "JOIN child_agg ca ON ca.zobrist_hash = d.child_hash "
-           "GROUP BY d.encoded_move, d.child_hash";
+    // result/white_elo/black_elo are per-game, joined in from game_result
+    // (see create_game_result) rather than read inline from position.
+    // language=sql
+    auto const sql = fmt::format(
+        R"sql(
+            WITH deduped AS (
+                SELECT
+                    p_root.game_id,
+                    p_cont.encoded_move,
+                    p_cont.zobrist_hash AS child_hash,
+                    MIN(p_root.ply) AS root_ply,
+                    gr.result,
+                    gr.white_elo,
+                    gr.black_elo,
+                    CASE WHEN gr.white_elo IS NOT NULL AND gr.black_elo IS NOT NULL
+                         THEN CAST(gr.result AS DOUBLE) * (gr.white_elo + gr.black_elo) / 2.0
+                         ELSE NULL END AS weighted_contrib,
+                    CASE WHEN gr.white_elo IS NOT NULL AND gr.black_elo IS NOT NULL
+                         THEN (gr.white_elo + gr.black_elo) / 2.0
+                         ELSE NULL END AS elo_weight
+                FROM position p_root
+                JOIN position p_cont
+                    ON p_cont.game_id = p_root.game_id
+                   AND p_cont.ply = p_root.ply + 1
+                JOIN game_result gr ON gr.game_id = p_root.game_id
+                WHERE p_root.zobrist_hash = CAST({0} AS UBIGINT)
+                GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash,
+                         gr.result, gr.white_elo, gr.black_elo
+            ),
+            child_hashes AS (
+                SELECT DISTINCT child_hash FROM deduped
+            ),
+            child_agg AS (
+                SELECT
+                    uniq.zobrist_hash,
+                    COUNT(*) AS frequency,
+                    COUNT(CASE WHEN uniq.result > 0 THEN 1 END) AS white_wins,
+                    COUNT(CASE WHEN uniq.result = 0 THEN 1 END) AS draws,
+                    COUNT(CASE WHEN uniq.result < 0 THEN 1 END) AS black_wins,
+                    AVG(CAST(uniq.white_elo AS DOUBLE)) AS avg_white_elo,
+                    AVG(CAST(uniq.black_elo AS DOUBLE)) AS avg_black_elo
+                FROM (
+                    SELECT DISTINCT p.zobrist_hash, p.game_id, gr.result, gr.white_elo, gr.black_elo
+                    FROM position p
+                    JOIN game_result gr ON gr.game_id = p.game_id
+                    JOIN child_hashes ON child_hashes.child_hash = p.zobrist_hash
+                ) AS uniq
+                GROUP BY uniq.zobrist_hash
+            )
+            SELECT
+                d.encoded_move,
+                d.child_hash,
+                MIN(d.root_ply) AS root_ply,
+                COUNT(*) AS frequency,
+                COUNT(CASE WHEN d.result > 0 THEN 1 END) AS white_wins,
+                COUNT(CASE WHEN d.result = 0 THEN 1 END) AS draws,
+                COUNT(CASE WHEN d.result < 0 THEN 1 END) AS black_wins,
+                AVG(CAST(d.white_elo AS DOUBLE)) AS avg_white_elo,
+                AVG(CAST(d.black_elo AS DOUBLE)) AS avg_black_elo,
+                MIN(d.game_id) AS eco_sample_min,
+                MAX(d.game_id) AS eco_sample_max,
+                SUM(d.weighted_contrib) / NULLIF(SUM(d.elo_weight), 0) AS elo_weighted_score,
+                MIN(ca.frequency) AS transposition_frequency
+            FROM deduped d
+            JOIN child_agg ca ON ca.zobrist_hash = d.child_hash
+            GROUP BY d.encoded_move, d.child_hash
+        )sql",
+        hash.value);
 
     result_guard guard {};
-    if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -442,6 +753,7 @@ auto position_store::query_opening_stats(zobrist_hash const hash) const -> resul
             .cont_hash = motif::db::zobrist_hash {duckdb_value_uint64(&guard.res, opening_stats_col::cont_hash, row)},
             .root_ply = duckdb_value_uint16(&guard.res, opening_stats_col::root_ply, row),
             .frequency = duckdb_value_uint32(&guard.res, opening_stats_col::frequency, row),
+            .transposition_frequency = duckdb_value_uint32(&guard.res, opening_stats_col::transposition_frequency, row),
             .white_wins = duckdb_value_uint32(&guard.res, opening_stats_col::white_wins, row),
             .draws = duckdb_value_uint32(&guard.res, opening_stats_col::draws, row),
             .black_wins = duckdb_value_uint32(&guard.res, opening_stats_col::black_wins, row),
@@ -458,6 +770,7 @@ auto position_store::query_opening_stats(zobrist_hash const hash) const -> resul
 
 auto position_store::sample_zobrist_hashes(std::size_t const limit, std::uint64_t const seed) const -> result<std::vector<zobrist_hash>>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     std::ostringstream sql;
     sql << "SELECT DISTINCT zobrist_hash FROM position USING SAMPLE reservoir(" << limit << " ROWS) REPEATABLE (" << seed << ")";
 
@@ -479,11 +792,19 @@ auto position_store::sample_zobrist_hashes(std::size_t const limit, std::uint64_
 
 auto position_store::delete_by_game_id(game_id const game_key) -> result<void>
 {
-    std::ostringstream sql;
-    sql << "DELETE FROM position WHERE game_id = CAST(" << game_key.value << " AS UINTEGER)";
-
+    auto const lock = std::scoped_lock {connection_mutex_};
+    if (auto drop_res = run_query(con_, drop_opening_stats_rollups); !drop_res) {
+        return drop_res;
+    }
+    auto const sql = fmt::format("DELETE FROM position WHERE game_id = CAST({} AS UINTEGER)", game_key.value);
     result_guard guard {};
-    if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const game_result_sql = fmt::format("DELETE FROM game_result WHERE game_id = CAST({} AS UINTEGER)", game_key.value);
+    result_guard game_result_guard {};
+    if (duckdb_query(con_, game_result_sql.c_str(), &game_result_guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
     }
     return {};
@@ -493,27 +814,33 @@ auto position_store::update_elo_for_game(game_id const game_key,
                                          std::optional<std::int16_t> const new_white_elo,
                                          std::optional<std::int16_t> const new_black_elo) -> result<void>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     if (!new_white_elo && !new_black_elo) {
         return {};
     }
 
-    std::ostringstream sql;
-    sql << "UPDATE position SET ";
+    if (auto drop_res = run_query(con_, drop_opening_stats_rollups); !drop_res) {
+        return drop_res;
+    }
+
+    // game_result now holds one row per game (not one per ply), so this is a
+    // single-row update instead of an update across every ply of the game.
+    std::string sql = "UPDATE game_result SET ";
     bool first = true;
     if (new_white_elo) {
-        sql << "white_elo = " << static_cast<int>(*new_white_elo);
+        sql += fmt::format("white_elo = {}", static_cast<int>(*new_white_elo));
         first = false;
     }
     if (new_black_elo) {
         if (!first) {
-            sql << ", ";
+            sql += ", ";
         }
-        sql << "black_elo = " << static_cast<int>(*new_black_elo);
+        sql += fmt::format("black_elo = {}", static_cast<int>(*new_black_elo));
     }
-    sql << " WHERE game_id = CAST(" << game_key.value << " AS UINTEGER)";
+    sql += fmt::format(" WHERE game_id = CAST({} AS UINTEGER)", game_key.value);
 
     result_guard guard {};
-    if (duckdb_query(con_, sql.str().c_str(), &guard.res) == DuckDBError) {
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
         return tl::unexpected {error_code::io_failure};
     }
     return {};
@@ -521,6 +848,7 @@ auto position_store::update_elo_for_game(game_id const game_key,
 
 auto position_store::count_by_zobrist(zobrist_hash const hash) const -> result<std::int64_t>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     std::ostringstream sql;
     sql << "SELECT COUNT(*) FROM position WHERE zobrist_hash = CAST(" << hash.value << " AS UBIGINT)";
 
@@ -533,6 +861,7 @@ auto position_store::count_by_zobrist(zobrist_hash const hash) const -> result<s
 
 auto position_store::count_distinct_games_by_zobrist(zobrist_hash const hash) const -> result<std::int64_t>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     std::ostringstream sql;
     sql << "SELECT COUNT(DISTINCT game_id) FROM position WHERE zobrist_hash = CAST(" << hash.value << " AS UBIGINT)";
 
@@ -545,6 +874,7 @@ auto position_store::count_distinct_games_by_zobrist(zobrist_hash const hash) co
 
 auto position_store::distinct_game_ids_by_zobrist(zobrist_hash const hash) const -> result<std::vector<game_id>>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     std::ostringstream sql;
     sql << "SELECT DISTINCT game_id FROM position WHERE zobrist_hash = CAST(" << hash.value << " AS UBIGINT) ORDER BY game_id";
 
@@ -570,7 +900,7 @@ auto position_store::count_distinct_games_by_zobrist(zobrist_hash const hash, st
         return std::int64_t {0};
     }
 
-    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    auto const lock = std::scoped_lock {connection_mutex_};
     if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
         return tl::unexpected {populate_res.error()};
     }
@@ -598,11 +928,13 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
         return std::vector<opening_stat_agg_row> {};
     }
 
-    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    auto const lock = std::scoped_lock {connection_mutex_};
     if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
         return tl::unexpected {populate_res.error()};
     }
 
+    // result/white_elo/black_elo are per-game, joined in from game_result
+    // rather than read inline from position (see create_game_result).
     // language=sql
     auto const sql = fmt::format(R"sql(
         WITH deduped AS (
@@ -611,23 +943,24 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
                 p_cont.encoded_move,
                 p_cont.zobrist_hash AS child_hash,
                 MIN(p_root.ply) AS root_ply,
-                p_root.result,
-                p_root.white_elo,
-                p_root.black_elo,
-                CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL
-                     THEN CAST(p_root.result AS DOUBLE) * (p_root.white_elo + p_root.black_elo) / 2.0
+                gr.result,
+                gr.white_elo,
+                gr.black_elo,
+                CASE WHEN gr.white_elo IS NOT NULL AND gr.black_elo IS NOT NULL
+                     THEN CAST(gr.result AS DOUBLE) * (gr.white_elo + gr.black_elo) / 2.0
                      ELSE NULL END AS weighted_contrib,
-                CASE WHEN p_root.white_elo IS NOT NULL AND p_root.black_elo IS NOT NULL
-                     THEN (p_root.white_elo + p_root.black_elo) / 2.0
+                CASE WHEN gr.white_elo IS NOT NULL AND gr.black_elo IS NOT NULL
+                     THEN (gr.white_elo + gr.black_elo) / 2.0
                      ELSE NULL END AS elo_weight
             FROM position p_root
             JOIN _filtered_game_ids fgi_root ON fgi_root.game_id = p_root.game_id
             JOIN position p_cont
             ON  p_cont.game_id = p_root.game_id
             AND p_cont.ply = p_root.ply + 1
+            JOIN game_result gr ON gr.game_id = p_root.game_id
             WHERE p_root.zobrist_hash = CAST({0} AS UBIGINT)
             GROUP BY p_root.game_id, p_cont.encoded_move, p_cont.zobrist_hash,
-                     p_root.result, p_root.white_elo, p_root.black_elo
+                     gr.result, gr.white_elo, gr.black_elo
         ),
         child_hashes AS (
             SELECT DISTINCT child_hash FROM deduped
@@ -642,9 +975,10 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
                 AVG(CAST(uniq.white_elo AS DOUBLE)) AS avg_white_elo,
                 AVG(CAST(uniq.black_elo AS DOUBLE)) AS avg_black_elo
             FROM (
-                SELECT DISTINCT p.zobrist_hash, p.game_id, p.result, p.white_elo, p.black_elo
+                SELECT DISTINCT p.zobrist_hash, p.game_id, gr.result, gr.white_elo, gr.black_elo
                 FROM position p
                 JOIN _filtered_game_ids fgi ON fgi.game_id = p.game_id
+                JOIN game_result gr ON gr.game_id = p.game_id
                 JOIN child_hashes ON child_hashes.child_hash = p.zobrist_hash
             ) AS uniq
             GROUP BY uniq.zobrist_hash
@@ -653,15 +987,16 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
             d.encoded_move,
             d.child_hash,
             MIN(d.root_ply) AS root_ply,
-            MIN(ca.frequency) AS frequency,
-            MIN(ca.white_wins) AS white_wins,
-            MIN(ca.draws) AS draws,
-            MIN(ca.black_wins) AS black_wins,
-            MIN(ca.avg_white_elo) AS avg_white_elo,
-            MIN(ca.avg_black_elo) AS avg_black_elo,
+            COUNT(*) AS frequency,
+            COUNT(CASE WHEN d.result > 0 THEN 1 END) AS white_wins,
+            COUNT(CASE WHEN d.result = 0 THEN 1 END) AS draws,
+            COUNT(CASE WHEN d.result < 0 THEN 1 END) AS black_wins,
+            AVG(CAST(d.white_elo AS DOUBLE)) AS avg_white_elo,
+            AVG(CAST(d.black_elo AS DOUBLE)) AS avg_black_elo,
             MIN(d.game_id) AS eco_sample_min,
             MAX(d.game_id) AS eco_sample_max,
-            SUM(d.weighted_contrib) / NULLIF(SUM(d.elo_weight), 0) AS elo_weighted_score
+            SUM(d.weighted_contrib) / NULLIF(SUM(d.elo_weight), 0) AS elo_weighted_score,
+            MIN(ca.frequency) AS transposition_frequency
         FROM deduped d
         JOIN child_agg ca ON ca.zobrist_hash = d.child_hash
         GROUP BY d.encoded_move, d.child_hash
@@ -684,6 +1019,7 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
             .cont_hash = motif::db::zobrist_hash {duckdb_value_uint64(&guard.res, opening_stats_col::cont_hash, row)},
             .root_ply = duckdb_value_uint16(&guard.res, opening_stats_col::root_ply, row),
             .frequency = duckdb_value_uint32(&guard.res, opening_stats_col::frequency, row),
+            .transposition_frequency = duckdb_value_uint32(&guard.res, opening_stats_col::transposition_frequency, row),
             .white_wins = duckdb_value_uint32(&guard.res, opening_stats_col::white_wins, row),
             .draws = duckdb_value_uint32(&guard.res, opening_stats_col::draws, row),
             .black_wins = duckdb_value_uint32(&guard.res, opening_stats_col::black_wins, row),
@@ -701,6 +1037,7 @@ auto position_store::query_opening_stats(zobrist_hash const hash, std::vector<ga
 auto position_store::query_elo_distribution(zobrist_hash const hash, int const bucket_width) const
     -> result<std::vector<elo_distribution_row>>
 {
+    auto const lock = std::scoped_lock {connection_mutex_};
     if (bucket_width <= 0) {
         return tl::unexpected {error_code::invalid_argument};
     }
@@ -711,16 +1048,17 @@ auto position_store::query_elo_distribution(zobrist_hash const hash, int const b
             SELECT
                 p_root.game_id,
                 p_cont.encoded_move,
-                p_root.result,
-                CAST(floor(CAST(p_root.white_elo + p_root.black_elo AS DOUBLE) / 2.0 / {1}) * {1} AS INTEGER) AS elo_bucket_floor
+                gr.result,
+                CAST(floor(CAST(gr.white_elo + gr.black_elo AS DOUBLE) / 2.0 / {1}) * {1} AS INTEGER) AS elo_bucket_floor
             FROM position p_root
             JOIN position p_cont
                 ON p_cont.game_id = p_root.game_id
                AND p_cont.ply = p_root.ply + 1
+            JOIN game_result gr ON gr.game_id = p_root.game_id
             WHERE p_root.zobrist_hash = CAST({0} AS UBIGINT)
-              AND p_root.white_elo IS NOT NULL
-              AND p_root.black_elo IS NOT NULL
-            GROUP BY p_root.game_id, p_cont.encoded_move, p_root.result, p_root.white_elo, p_root.black_elo
+              AND gr.white_elo IS NOT NULL
+              AND gr.black_elo IS NOT NULL
+            GROUP BY p_root.game_id, p_cont.encoded_move, gr.result, gr.white_elo, gr.black_elo
         ),
         move_buckets AS (
             SELECT
@@ -810,7 +1148,7 @@ auto position_store::query_elo_distribution(zobrist_hash const hash, std::vector
         return std::vector<elo_distribution_row> {};
     }
 
-    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    auto const lock = std::scoped_lock {connection_mutex_};
     if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
         return tl::unexpected {populate_res.error()};
     }
@@ -822,17 +1160,18 @@ auto position_store::query_elo_distribution(zobrist_hash const hash, std::vector
             SELECT
                 p_root.game_id,
                 p_cont.encoded_move,
-                p_root.result,
-                CAST(floor(CAST(p_root.white_elo + p_root.black_elo AS DOUBLE) / 2.0 / {1}) * {1} AS INTEGER) AS elo_bucket_floor
+                gr.result,
+                CAST(floor(CAST(gr.white_elo + gr.black_elo AS DOUBLE) / 2.0 / {1}) * {1} AS INTEGER) AS elo_bucket_floor
             FROM position p_root
             JOIN _filtered_game_ids fgi ON fgi.game_id = p_root.game_id
             JOIN position p_cont
                 ON p_cont.game_id = p_root.game_id
                AND p_cont.ply = p_root.ply + 1
+            JOIN game_result gr ON gr.game_id = p_root.game_id
             WHERE p_root.zobrist_hash = CAST({0} AS UBIGINT)
-              AND p_root.white_elo IS NOT NULL
-              AND p_root.black_elo IS NOT NULL
-            GROUP BY p_root.game_id, p_cont.encoded_move, p_root.result, p_root.white_elo, p_root.black_elo
+              AND gr.white_elo IS NOT NULL
+              AND gr.black_elo IS NOT NULL
+            GROUP BY p_root.game_id, p_cont.encoded_move, gr.result, gr.white_elo, gr.black_elo
         ),
         move_buckets AS (
             SELECT
@@ -920,7 +1259,7 @@ auto position_store::query_tree_slice(zobrist_hash const root_hash,
         return std::vector<tree_position_row> {};
     }
 
-    auto const lock = std::scoped_lock {filtered_game_ids_mutex_};
+    auto const lock = std::scoped_lock {connection_mutex_};
     if (auto populate_res = populate_filtered_game_ids_table(con_, game_ids); !populate_res) {
         return tl::unexpected {populate_res.error()};
     }
@@ -933,15 +1272,16 @@ auto position_store::query_tree_slice(zobrist_hash const root_hash,
                 CAST(p_cont.ply - p_root.ply AS USMALLINT) AS depth,
                 p_cont.zobrist_hash AS child_hash,
                 p_cont.encoded_move,
-                p_cont.result,
-                p_cont.white_elo,
-                p_cont.black_elo
+                gr.result,
+                gr.white_elo,
+                gr.black_elo
             FROM position p_root
             JOIN _filtered_game_ids fgi ON fgi.game_id = p_root.game_id
             JOIN position p_cont
             ON  p_root.game_id = p_cont.game_id
             AND p_cont.ply > p_root.ply
             AND p_cont.ply <= p_root.ply + {}
+            JOIN game_result gr ON gr.game_id = p_root.game_id
             WHERE p_root.zobrist_hash = CAST({} AS UBIGINT)
             ORDER BY p_root.game_id, p_cont.ply
         )sql",

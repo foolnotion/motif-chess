@@ -70,19 +70,23 @@ constexpr char const* ddl = R"sql(
         date          TEXT,
         result        TEXT NOT NULL,
         eco           TEXT,
-        moves         BLOB NOT NULL,
+        moves         BLOB    NOT NULL,
+        moves_hash    INTEGER NOT NULL,
         source_type   TEXT NOT NULL DEFAULT 'imported',
         source_label  TEXT,
         review_status TEXT NOT NULL DEFAULT 'new'
     );
 
+    -- Keyed on moves_hash rather than the raw moves blob: an identity index
+    -- on moves would store every move sequence a second time in the index
+    -- B-tree, doubling that column's disk cost for no benefit over a hash.
     CREATE UNIQUE INDEX IF NOT EXISTS ux_game_identity ON game(
         white_id,
         black_id,
         COALESCE(event_id, -1),
         COALESCE(date, ''),
         result,
-        moves
+        moves_hash
     );
 
     CREATE TABLE IF NOT EXISTS game_tag (
@@ -96,13 +100,6 @@ constexpr char const* ddl = R"sql(
         name       TEXT NOT NULL PRIMARY KEY,
         applied_at TEXT NOT NULL
     );
-)sql";
-
-// language=sql
-constexpr char const* migration_v1_to_v2 = R"sql(
-    ALTER TABLE game ADD COLUMN source_type   TEXT NOT NULL DEFAULT 'imported';
-    ALTER TABLE game ADD COLUMN source_label  TEXT;
-    ALTER TABLE game ADD COLUMN review_status TEXT NOT NULL DEFAULT 'new';
 )sql";
 
 }  // namespace
@@ -165,11 +162,11 @@ auto migrate(sqlite3* conn, std::uint32_t const from_version) -> result<void>
         return {};
     }
 
-    if (from_version < 2U) {
-        auto res = exec(conn, migration_v1_to_v2);
-        if (!res) {
-            return tl::unexpected {res.error()};
-        }
+    // v2 -> v3 added moves_hash, which needs a real hash evaluated per row --
+    // this exec()-only migration can't do that. Refuse rather than silently
+    // bump user_version; bundles at v2 or earlier must be rebuilt by reimporting.
+    if (from_version < 3U) {
+        return tl::unexpected {error_code::schema_mismatch};
     }
 
     auto const ver_sql = fmt::format("PRAGMA user_version = {};", current_version);

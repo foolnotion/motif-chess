@@ -747,8 +747,8 @@ TEST_CASE("opening_stats::query continuation frequency counts all paths to child
 {
     // Game 1 arrives at the transposition position via 1.Nf3 Nc6 2.Nc3 Nf6 (parent = after Nf3 Nc6 Nc3).
     // Game 2 arrives via 1.Nc3 Nf6 2.Nf3 Nc6 (different parent).
-    // Querying from game 1's parent should report frequency == 2 for the Nf6 continuation,
-    // because the child position is reached by both games regardless of path.
+    // Querying from game 1's parent reports the child frequency across both
+    // transposed paths while retaining one direct parent-edge occurrence.
     tmp_dir const tdir {"transposition_parent"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "transposition-parent-db");
@@ -780,8 +780,9 @@ TEST_CASE("opening_stats::query continuation frequency counts all paths to child
     auto const& cont = stats->continuations.front();
     CHECK(cont.san == "Nf6");
     CHECK(cont.result_hash == hash_child);
-    // Child is reached by 2 games (via transposition) — frequency must reflect that.
+    // Child is reached by 2 games (via transposition).
     CHECK(cont.frequency == 2);
+    CHECK(cont.direct_frequency == 1);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1544,11 +1545,12 @@ TEST_CASE("query_elo_distribution rejects zero bucket_width", "[motif-search][op
 
 TEST_CASE("query_elo_distribution rejects negative bucket_width", "[motif-search][opening_stats][elo_distribution]")
 {
+    constexpr auto negative_bucket_width = -100;
     tmp_dir const tdir {"elo_dist_neg_width"};
     auto manager = motif::db::database_manager::create(tdir.path, "elo-dist-neg-db");
     REQUIRE(manager.has_value());
 
-    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"e4", "e5"}), {}, -100);
+    auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"e4", "e5"}), {}, negative_bucket_width);
     REQUIRE_FALSE(dist.has_value());
     CHECK(dist.error() == motif::search::error_code::invalid_argument);
 }

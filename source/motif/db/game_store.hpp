@@ -38,7 +38,7 @@ class game_store
     // Create the five tables and supporting indexes.
     // Must be called once per connection before any other method.
     // Duplicate key: (white_id, black_id, coalesced event_id, coalesced date,
-    // result, moves).
+    // result, moves_hash).
     auto create_schema() -> result<void>;
 
     // Insert a game.  Returns the new game row id on success.
@@ -63,6 +63,9 @@ class game_store
     // Returns all IDs from game_ids that satisfy the metadata filter; no pagination cap.
     auto find_game_ids_with_filter(std::vector<game_id> const& game_ids, search_filter const& filter) const -> result<std::vector<game_id>>;
     auto count_games() const -> result<std::int64_t>;
+    // All game IDs, ascending, unfiltered. For full-corpus streaming
+    // consumers (index builders, rebuilds) -- not paginated like find_games.
+    auto all_game_ids() const -> result<std::vector<game_id>>;
 
     // Delete the game row and all associated game_tag rows.
     // Player and event rows are preserved.

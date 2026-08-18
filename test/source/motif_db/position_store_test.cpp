@@ -109,6 +109,24 @@ auto make_opening_rows() -> std::vector<motif::db::position_row>
     };
 }
 
+auto opening_rollups_exist(duckdb_connection con) -> bool
+{
+    duckdb_result result {};
+    auto const status = duckdb_query(
+        con,
+        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+        "WHERE table_schema = 'main' "
+        "AND table_name = 'opening_continuation'",
+        &result);
+    if (status == DuckDBError) {
+        duckdb_destroy_result(&result);
+        return false;
+    }
+    auto const exists = duckdb_value_boolean(&result, 0, 0);
+    duckdb_destroy_result(&result);
+    return exists;
+}
+
 }  // namespace
 
 TEST_CASE("position_store::initialize_schema creates table with zero rows", "[motif-db][position_store]")
@@ -215,19 +233,29 @@ TEST_CASE("position_store round-trip: insert then query columns directly", "[mot
 
     REQUIRE(fix.store.insert_batch(std::span {&row, 1}).has_value());
 
+    // result/white_elo/black_elo are per-game facts, normalized into
+    // game_result (see position_store.cpp's create_game_result) rather than
+    // stored inline on every position row.
     duckdb_result qres {};
-    char const* query = "SELECT zobrist_hash, game_id, ply, result," " white_elo, black_elo FROM position";
+    char const* query = "SELECT zobrist_hash, game_id, ply FROM position";
     REQUIRE(duckdb_query(fix.con, query, &qres) == DuckDBSuccess);
     REQUIRE(duckdb_row_count(&qres) == 1);
 
     CHECK(duckdb_value_uint64(&qres, 0, 0) == row.zobrist_hash.value);
     CHECK(duckdb_value_uint32(&qres, 1, 0) == row.game_id.value);
     CHECK(duckdb_value_uint16(&qres, 2, 0) == row.ply);
-    CHECK(static_cast<std::int8_t>(duckdb_value_int8(&qres, 3, 0)) == row.result);
-    CHECK(duckdb_value_int16(&qres, 4, 0) == *row.white_elo);
-    CHECK(duckdb_value_int16(&qres, 5, 0) == *row.black_elo);
-
     duckdb_destroy_result(&qres);
+
+    duckdb_result gres {};
+    char const* game_result_query = "SELECT result, white_elo, black_elo FROM game_result WHERE game_id = 7";
+    REQUIRE(duckdb_query(fix.con, game_result_query, &gres) == DuckDBSuccess);
+    REQUIRE(duckdb_row_count(&gres) == 1);
+
+    CHECK(static_cast<std::int8_t>(duckdb_value_int8(&gres, 0, 0)) == row.result);
+    CHECK(duckdb_value_int16(&gres, 1, 0) == *row.white_elo);
+    CHECK(duckdb_value_int16(&gres, 2, 0) == *row.black_elo);
+
+    duckdb_destroy_result(&gres);
 }
 
 TEST_CASE("position_store::count_distinct_games_by_zobrist filters by game ids", "[motif-db][position_store]")
@@ -264,6 +292,40 @@ TEST_CASE("position_store::query_opening_stats filtered computes elo_weighted_sc
     REQUIRE(stats->front().elo_weighted_score.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK_THAT(*stats->front().elo_weighted_score, Catch::Matchers::WithinAbs(1.0, score_tolerance));
+}
+
+TEST_CASE("position_store::rebuild_opening_stats_rollups stores direct and transposition counts", "[motif-db][position_store]")
+{
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+
+    auto const rows = make_opening_rows();
+    REQUIRE(fix.store.insert_batch(rows).has_value());
+    REQUIRE(fix.store.rebuild_opening_stats_rollups().has_value());
+
+    auto const stats = fix.store.query_opening_stats(motif::db::zobrist_hash {opening_root_hash});
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->size() == 2);
+    CHECK(stats->at(0).frequency == 1U);
+    CHECK(stats->at(0).transposition_frequency == 1U);
+    CHECK(stats->at(1).frequency == 1U);
+    CHECK(stats->at(1).transposition_frequency == 1U);
+}
+
+TEST_CASE("position_store mutations invalidate opening rollups", "[motif-db][position_store]")
+{
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+    REQUIRE(fix.store.insert_batch(make_opening_rows()).has_value());
+    REQUIRE(fix.store.rebuild_opening_stats_rollups().has_value());
+    REQUIRE(opening_rollups_exist(fix.con));
+
+    REQUIRE(fix.store.delete_by_game_id(motif::db::game_id {999U}).has_value());
+    CHECK_FALSE(opening_rollups_exist(fix.con));
+
+    REQUIRE(fix.store.rebuild_opening_stats_rollups().has_value());
+    REQUIRE(fix.store.update_elo_for_game(motif::db::game_id {999U}, 2500, std::nullopt).has_value());
+    CHECK_FALSE(opening_rollups_exist(fix.con));
 }
 
 TEST_CASE("position_store::query_tree_slice filtered returns only requested games", "[motif-db][position_store]")
