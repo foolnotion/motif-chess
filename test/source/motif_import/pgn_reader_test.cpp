@@ -118,6 +118,27 @@ TEST_CASE("pgn_reader: streams all games from two-game PGN", "[motif-import]")
     std::filesystem::remove(tmp);
 }
 
+TEST_CASE("pgn_reader: unescapes backslash-escaped quotes in tag values", "[motif-import]")
+{
+    constexpr std::string_view escaped_tag = R"pgn(
+[Event "Game1"]
+[White "Vladimir \"Bob\" Doe"]
+[Black "Bob"]
+[Result "1-0"]
+
+1. e4 e5 1-0
+)pgn";
+    auto tmp = write_temp_pgn(escaped_tag, "pgn_reader_escaped_tag.pgn");
+
+    motif::import::pgn_reader reader {tmp};
+
+    auto game = reader.next();
+    REQUIRE(game.has_value());
+    CHECK(find_tag(*game, "White") == R"(Vladimir "Bob" Doe)");
+
+    std::filesystem::remove(tmp);
+}
+
 TEST_CASE("pgn_reader: empty PGN returns eof on first call", "[motif-import]")
 {
     auto tmp = write_temp_pgn("", "pgn_reader_empty.pgn");
