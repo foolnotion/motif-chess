@@ -204,11 +204,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786353388,
-        "narHash": "sha256-rr82YcZ5byAhZsJwPQquEIHeHxKla/1xMKu3z9yKIMA=",
+        "lastModified": 1787001222,
+        "narHash": "sha256-v2/JCTglRaY0DbkKpUJEDi9h6CmrgVtQM+UUgsCHqgE=",
         "owner": "foolnotion",
         "repo": "pgnlib",
-        "rev": "420ee3687d3b81355c4b090cd11c11f9f0a6c9ad",
+        "rev": "885871355a450bf983baafff8377ee6334aa577e",
         "type": "github"
       },
       "original": {

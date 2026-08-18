@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 
+#include <pgnlib/import.hpp>  // NOLINT(misc-include-cleaner)
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 
 #include "motif/import/error.hpp"
@@ -40,9 +42,10 @@ class pgn_reader
 
     std::filesystem::path path_;
     std::ifstream file_;
-    std::size_t next_game_offset_ {0};
+    std::size_t base_offset_ {0};
+    std::optional<pgn::import_stream> stream_;
+    pgn::import_stream::iterator iterator_;
     std::size_t game_number_ {0};
-    bool has_next_game_ {false};
     bool pending_io_failure_ {false};
 };
 
