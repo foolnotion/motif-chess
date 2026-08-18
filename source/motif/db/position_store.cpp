@@ -211,18 +211,45 @@ auto run_query(duckdb_connection con, char const* sql) -> motif::db::result<void
 // row of a game shares the same values, computed once by the import
 // pipeline) -- only insert_batch's storage split cares that these belong in
 // game_result, not position; callers are unaffected.
+//
+// Stages rows into a TEMP table via a duckdb_appender, then flushes them into
+// game_result with one set-based INSERT ... ON CONFLICT DO NOTHING, instead
+// of one prepared-statement round trip per game. The per-game upsert loop was
+// the dominant cost of position_store::insert_batch: on the 100k-game bundle
+// it took deferred SQLite-import-plus-rebuild from 8s to 192s. See
+// docs/handoffs/2026-08-17-opening-explorer-storage.md, Session 8.
 auto insert_game_results_for_batch(duckdb_connection con, std::span<motif::db::position_row const> rows) -> motif::db::result<void>
 {
     // language=sql
-    constexpr auto upsert_game_result = R"sql(
+    constexpr auto create_staging = R"sql(
+        CREATE TEMP TABLE IF NOT EXISTS _game_result_staging (
+            game_id    UINTEGER NOT NULL,
+            result     TINYINT  NOT NULL,
+            white_elo  SMALLINT,
+            black_elo  SMALLINT
+        )
+    )sql";
+    // language=sql
+    constexpr auto clear_staging = R"sql(
+        DELETE FROM _game_result_staging
+    )sql";
+    // language=sql
+    constexpr auto flush_staging = R"sql(
         INSERT INTO game_result (game_id, result, white_elo, black_elo)
-        VALUES ($1, $2, $3, $4)
+        SELECT game_id, result, white_elo, black_elo FROM _game_result_staging
         ON CONFLICT (game_id) DO NOTHING
     )sql";
 
-    duckdb_prepared_statement stmt {};
-    if (duckdb_prepare(con, upsert_game_result, &stmt) == DuckDBError) {
-        duckdb_destroy_prepare(&stmt);
+    if (auto create_res = run_query(con, create_staging); !create_res) {
+        return create_res;
+    }
+    if (auto clear_res = run_query(con, clear_staging); !clear_res) {
+        return clear_res;
+    }
+
+    duckdb_appender appender {};
+    if (duckdb_appender_create(con, nullptr, "_game_result_staging", &appender) == DuckDBError) {
+        duckdb_appender_destroy(&appender);
         return tl::unexpected {motif::db::error_code::io_failure};
     }
 
@@ -233,26 +260,32 @@ auto insert_game_results_for_batch(duckdb_connection con, std::span<motif::db::p
         }
         previous_game_id = row.game_id;
 
-        auto const bind_ok = duckdb_bind_uint32(stmt, 1, row.game_id.value) != DuckDBError
-            && duckdb_bind_int8(stmt, 2, row.result) != DuckDBError
-            && (row.white_elo.has_value() ? duckdb_bind_int16(stmt, 3, *row.white_elo) : duckdb_bind_null(stmt, 3)) != DuckDBError
-            && (row.black_elo.has_value() ? duckdb_bind_int16(stmt, 4, *row.black_elo) : duckdb_bind_null(stmt, 4)) != DuckDBError;
-        if (!bind_ok) {
-            duckdb_destroy_prepare(&stmt);
-            return tl::unexpected {motif::db::error_code::io_failure};
+        duckdb_appender_begin_row(appender);
+        duckdb_append_uint32(appender, row.game_id.value);
+        duckdb_append_int8(appender, row.result);
+        if (row.white_elo.has_value()) {
+            duckdb_append_int16(appender, *row.white_elo);
+        } else {
+            duckdb_append_null(appender);
         }
-
-        duckdb_result res {};
-        auto const exec_state = duckdb_execute_prepared(stmt, &res);
-        duckdb_destroy_result(&res);
-        if (exec_state == DuckDBError) {
-            duckdb_destroy_prepare(&stmt);
+        if (row.black_elo.has_value()) {
+            duckdb_append_int16(appender, *row.black_elo);
+        } else {
+            duckdb_append_null(appender);
+        }
+        if (duckdb_appender_end_row(appender) == DuckDBError) {
+            duckdb_appender_destroy(&appender);
             return tl::unexpected {motif::db::error_code::io_failure};
         }
     }
 
-    duckdb_destroy_prepare(&stmt);
-    return {};
+    auto const flush_ret = duckdb_appender_flush(appender);
+    duckdb_appender_destroy(&appender);
+    if (flush_ret == DuckDBError) {
+        return tl::unexpected {motif::db::error_code::io_failure};
+    }
+
+    return run_query(con, flush_staging);
 }
 
 auto populate_filtered_game_ids_table(duckdb_connection con, std::vector<motif::db::game_id> const& game_ids) -> motif::db::result<void>
