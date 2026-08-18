@@ -38,7 +38,7 @@ class game_store
     // Create the five tables and supporting indexes.
     // Must be called once per connection before any other method.
     // Duplicate key: (white_id, black_id, coalesced event_id, coalesced date,
-    // result, moves).
+    // result, moves_hash).
     auto create_schema() -> result<void>;
 
     // Insert a game.  Returns the new game row id on success.

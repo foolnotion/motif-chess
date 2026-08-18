@@ -22,16 +22,10 @@ struct opening_tree_index_build_options
     std::uint16_t max_root_ply {opening_tree_index_default_max_root_ply};
 };
 
-// First-slice replacement for the `opening_continuation` DuckDB rollup: an
-// immutable, sorted-by-hash index built in one in-memory pass over a
-// game_store's games, answering unfiltered query_opening_stats(hash) lookups
-// without DuckDB. See docs/handoffs (redesign advisory) for why -- the SQL
-// rollup duplicates the fact table it's built from, and DuckDB's columnar
-// compression gets nothing from a table sorted by a random hash.
-//
-// Not yet bounded-memory (build() holds every node/edge in RAM) and not yet
-// wired into any live import/query path -- see the plan this shipped under
-// for the rest of the migration.
+// DuckDB-free replacement for the `opening_continuation` rollup: an
+// immutable, sorted-by-hash index built in one streaming pass over a
+// game_store's games, answering unfiltered query_opening_stats(hash)
+// lookups. Not yet wired into any live import/query path.
 class opening_tree_index
 {
   public:

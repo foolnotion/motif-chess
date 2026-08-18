@@ -80,12 +80,9 @@ auto reset_stmt(sqlite3_stmt* stmt) noexcept -> void
     sqlite3_clear_bindings(stmt);
 }
 
-// FNV-1a 64-bit over the same raw bytes bound to the moves column. Only
-// needs to be a good uniqueness key for ux_game_identity (which also keys on
-// white_id/black_id/event_id/date/result), not cryptographically strong --
-// a hash collision between two different move sequences for the same
-// players/event/date/result would be rejected as a false-positive duplicate,
-// not silently corrupt anything.
+// FNV-1a 64-bit over the raw bytes bound to the moves column. Only needs to
+// be a good uniqueness key for ux_game_identity, not cryptographically
+// strong -- a collision is a false-positive duplicate rejection, not corruption.
 auto fnv1a_hash(std::span<std::uint8_t const> data) noexcept -> std::uint64_t
 {  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
     constexpr auto offset_basis = std::uint64_t {0xcbf29ce484222325ULL};

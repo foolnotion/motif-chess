@@ -137,12 +137,9 @@ TEST_CASE("schema::migrate refuses a v1 database without mutating it first", "[m
     disk_db ddb {"migrate-v1-no-partial-mutation"};
     REQUIRE(ddb.conn != nullptr);
 
-    // v1's shape: no source_type/source_label/review_status columns (added
-    // in v1->v2) and no moves_hash (added in v2->v3). Regression coverage
-    // for a bug where migrate() ran the v1->v2 ALTER TABLE steps before
-    // reaching the v3 refusal, leaving a v1 database half-migrated (new
-    // columns present, user_version still 1) even though the whole
-    // migration was ultimately refused.
+    // v1's shape: no source_type/source_label/review_status, no moves_hash.
+    // Regression coverage for migrate() once running v1->v2's ALTER TABLE
+    // before the v3 refusal, leaving a half-migrated v1 database.
     // language=sql
     constexpr char const* v1_ddl = R"sql(
         CREATE TABLE player (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, elo INTEGER, title TEXT, country TEXT);
