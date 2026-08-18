@@ -3,13 +3,14 @@
 #include <fstream>
 #include <ios>
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "motif/import/pgn_reader.hpp"
 
-#include <pgnlib/pgnlib.hpp>  // NOLINT(misc-include-cleaner)
+#include <pgnlib/import.hpp>  // NOLINT(misc-include-cleaner)
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <spdlog/spdlog.h>
 #include <tl/expected.hpp>
@@ -23,13 +24,6 @@ namespace
 {
 
 constexpr std::string_view event_tag_prefix {"[Event \""};
-
-struct game_block
-{
-    std::string text;
-    std::size_t following_offset {0};
-    bool has_following_game {false};
-};
 
 auto read_raw_line(std::ifstream& file) -> std::string
 {
@@ -71,41 +65,20 @@ auto to_offset(std::streampos position) -> std::size_t
     return static_cast<std::size_t>(position);
 }
 
-auto read_game_block(std::ifstream& file, std::size_t start_offset) -> result<game_block>
+// pgn::import_stream leaves tag values as raw bytes with backslash escapes
+// undecoded (see pgnlib/import.hpp); unescape \" and \\ to match the
+// canonical values the old pgn::parse_string-based path produced.
+auto unescape_tag_value(std::string_view raw) -> std::string
 {
-    auto block = game_block {};
-
-    file.clear();
-    file.seekg(static_cast<std::streamoff>(start_offset), std::ios::beg);
-    if (!file) {
-        return tl::unexpected(error_code::io_failure);
-    }
-
-    auto in_brace_comment = false;
-    while (true) {
-        const auto line_start = file.tellg();
-        const auto line = read_raw_line(file);
-
-        if (line.empty()) {
-            if (file.bad()) {
-                return tl::unexpected(error_code::io_failure);
-            }
-            break;
+    std::string value;
+    value.reserve(raw.size());
+    for (std::size_t index = 0; index < raw.size(); ++index) {
+        if (raw[index] == '\\' && index + 1 < raw.size() && (raw[index + 1] == '"' || raw[index + 1] == '\\')) {
+            ++index;
         }
-
-        if (!block.text.empty() && !in_brace_comment && is_event_tag_line(line)) {
-            block.following_offset = to_offset(line_start);
-            block.has_following_game = true;
-            file.clear();
-            file.seekg(line_start, std::ios::beg);
-            return block;
-        }
-
-        block.text += line;
-        in_brace_comment = update_brace_comment_state(line, in_brace_comment);
+        value.push_back(raw[index]);
     }
-
-    return block;
+    return value;
 }
 
 }  // namespace
@@ -125,39 +98,47 @@ auto pgn_reader::next() -> result<pgn::game>
         return tl::unexpected(error_code::io_failure);
     }
 
-    if (!has_next_game_) {
+    if (!stream_.has_value() || iterator_ == stream_->end()) {
         return tl::unexpected(error_code::eof);
     }
 
-    const auto offset_before = next_game_offset_;
-    auto block_result = read_game_block(file_, next_game_offset_);
-    if (!block_result) {
-        has_next_game_ = false;
-        next_game_offset_ = 0;
-        return tl::unexpected(block_result.error());
-    }
-
-    has_next_game_ = block_result->has_following_game;
-    next_game_offset_ = block_result->following_offset;
+    auto const offset_before = base_offset_ + iterator_.byte_offset();
     ++game_number_;
 
-    auto game_result = pgn::parse_string(block_result->text);
-    if (!game_result || game_result->empty()) {
+    auto item = std::move(*iterator_);
+    if (!item) {
+        ++iterator_;
         auto log = spdlog::get("motif.import");
         if (log) {
             log->warn("pgn parse error at game {} (byte offset: {}): {}",
                       game_number_,
                       offset_before,
-                      !game_result && game_result.error() == pgn::parse_error::file_not_found ? "file not found" : "syntax error");
+                      item.error() == pgn::parse_error::file_not_found ? "file not found" : "syntax error");
         }
-        if (!game_result && game_result.error() == pgn::parse_error::file_not_found) {
+        if (item.error() == pgn::parse_error::file_not_found) {
             return tl::unexpected(error_code::io_failure);
         }
         return tl::unexpected(error_code::parse_error);
     }
 
-    auto games = std::move(game_result).value();
-    return std::move(games.front());
+    auto game = pgn::game {};
+    game.result = item->result;
+    game.tags.reserve(item->tags.size());
+    for (auto const& tag : item->tags) {
+        game.tags.push_back(pgn::tag {.key = std::string {tag.key}, .value = unescape_tag_value(tag.value)});
+    }
+    game.moves.reserve(item->moves.size());
+    for (auto const& move : item->moves) {
+        game.moves.push_back(pgn::move_node {
+            .number = move.number,
+            .san = std::string {move.san},
+            .comment = {},
+            .nags = {},
+            .variations = {},
+        });
+    }
+    ++iterator_;
+    return game;
 }
 
 auto pgn_reader::seek_to_offset(std::size_t byte_offset) -> result<void>
@@ -173,17 +154,18 @@ auto pgn_reader::game_number() const noexcept -> std::size_t
 
 auto pgn_reader::byte_offset() const noexcept -> std::size_t
 {
-    if (!has_next_game_) {
+    if (!stream_.has_value() || iterator_ == stream_->end()) {
         return 0;
     }
-    return next_game_offset_;
+    return base_offset_ + iterator_.byte_offset();
 }
 
 auto pgn_reader::reset_to_offset(std::size_t byte_offset) -> result<void>
 {
     game_number_ = 0;
-    has_next_game_ = false;
-    next_game_offset_ = 0;
+    stream_.reset();
+    iterator_ = pgn::import_stream::iterator {};
+    base_offset_ = 0;
 
     file_.close();
     file_ = std::ifstream(path_, std::ios::binary);
@@ -207,10 +189,11 @@ auto pgn_reader::reset_to_offset(std::size_t byte_offset) -> result<void>
         }
 
         if (!in_brace_comment && to_offset(line_start) >= byte_offset && is_event_tag_line(line)) {
-            next_game_offset_ = to_offset(line_start);
-            has_next_game_ = true;
+            base_offset_ = to_offset(line_start);
             file_.clear();
             file_.seekg(line_start, std::ios::beg);
+            stream_.emplace(file_);
+            iterator_ = stream_->begin();
             return {};
         }
 

@@ -204,17 +204,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1786353388,
-        "narHash": "sha256-rr82YcZ5byAhZsJwPQquEIHeHxKla/1xMKu3z9yKIMA=",
+        "lastModified": 1787050081,
+        "narHash": "sha256-3VNt1cCzyvTJbRk9rHc/pXKgUOOMsVbK09lOp0JZJZc=",
         "owner": "foolnotion",
         "repo": "pgnlib",
-        "rev": "420ee3687d3b81355c4b090cd11c11f9f0a6c9ad",
+        "rev": "f069c1b2a26a2402056d1c78e80fa0bffaaff36a",
         "type": "github"
       },
       "original": {
         "owner": "foolnotion",
         "repo": "pgnlib",
-        "rev": "420ee3687d3b81355c4b090cd11c11f9f0a6c9ad",
+        "rev": "f069c1b2a26a2402056d1c78e80fa0bffaaff36a",
         "type": "github"
       }
     },
