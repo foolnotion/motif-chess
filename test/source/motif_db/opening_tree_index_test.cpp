@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -321,4 +323,102 @@ TEST_CASE("opening_tree_index::query_opening_stats matches the DuckDB rollup on 
 
     compare_stats_for_hash(*manager, *opened, hash_after_sans({}));
     compare_stats_for_hash(*manager, *opened, hash_after_sans({"e4", "e5"}));
+}
+
+namespace
+{
+
+constexpr auto byte_mask = std::uint32_t {0xFFU};
+constexpr auto bits_per_byte = std::uint32_t {8U};
+constexpr auto bits_per_u32 = std::uint32_t {32U};
+constexpr auto bits_per_u64 = std::uint32_t {64U};
+
+void write_u16_le(std::ofstream& out, std::uint16_t const value)
+{
+    out.put(static_cast<char>(value & byte_mask));
+    out.put(static_cast<char>((static_cast<std::uint32_t>(value) >> bits_per_byte) & byte_mask));
+}
+
+void write_u32_le(std::ofstream& out, std::uint32_t const value)
+{
+    for (std::uint32_t shift = 0; shift < bits_per_u32; shift += bits_per_byte) {
+        out.put(static_cast<char>((value >> shift) & byte_mask));
+    }
+}
+
+void write_u64_le(std::ofstream& out, std::uint64_t const value)
+{
+    for (std::uint32_t shift = 0; shift < bits_per_u64; shift += bits_per_byte) {
+        out.put(static_cast<char>((value >> shift) & byte_mask));
+    }
+}
+
+constexpr auto test_format_version = std::uint32_t {2};
+constexpr auto test_max_root_ply = std::uint16_t {20};
+constexpr auto arbitrary_hash_a = std::uint64_t {0xAAAAAAAAAAAAAAAAULL};
+constexpr auto arbitrary_hash_b = std::uint64_t {0xBBBBBBBBBBBBBBBBULL};
+constexpr auto arbitrary_encoded_move = std::uint16_t {0x1234};
+constexpr auto varint_continuation_byte = static_cast<char>(0xFF);
+constexpr auto malformed_varint_prefix_bytes = 9;
+constexpr auto single_continuation_varint_byte = static_cast<char>(0x01);
+constexpr auto overflowing_varint_final_byte = static_cast<char>(0x02);
+
+}  // namespace
+
+TEST_CASE("opening_tree_index::open rejects a corrupt node_count instead of throwing", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"corrupt-node-count"};
+    auto const index_path = tdir.path / "corrupt.idx";
+
+    {
+        std::ofstream out {index_path, std::ios::binary | std::ios::trunc};
+        REQUIRE(out.good());
+        out << "MOTIFOT1";  // magic
+        write_u32_le(out, test_format_version);
+        write_u16_le(out, test_max_root_ply);
+        // node_count: an absurd value that would previously be handed
+        // straight to vector::reserve() before any node bytes are read.
+        write_u64_le(out, std::numeric_limits<std::uint64_t>::max());
+        // No node bytes follow -- the file is truncated relative to what
+        // node_count claims.
+    }
+
+    auto opened = motif::db::opening_tree_index::open(index_path);
+    REQUIRE_FALSE(opened.has_value());
+    CHECK(opened.error() == motif::db::error_code::io_failure);
+}
+
+TEST_CASE("opening_tree_index::open rejects a malformed overflowing varint instead of truncating it", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"corrupt-varint"};
+    auto const index_path = tdir.path / "corrupt.idx";
+
+    {
+        std::ofstream out {index_path, std::ios::binary | std::ios::trunc};
+        REQUIRE(out.good());
+        out << "MOTIFOT1";
+        write_u32_le(out, test_format_version);
+        write_u16_le(out, test_max_root_ply);
+        write_u64_le(out, 1);  // node_count: one node
+
+        write_u64_le(out, arbitrary_hash_a);  // node hash
+        out.put(single_continuation_varint_byte);  // continuation_count varint: 1
+
+        write_u16_le(out, arbitrary_encoded_move);
+        write_u64_le(out, arbitrary_hash_b);  // child_hash
+
+        // root_ply as a malformed 10-byte varint: nine continuation bytes
+        // with all payload bits set, then a 10th byte whose payload has bit
+        // 1 set -- only bit 0 fits in a 64-bit value at this shift, so this
+        // encodes a value that overflows u64 and must be rejected rather
+        // than silently truncated.
+        for (int i = 0; i < malformed_varint_prefix_bytes; ++i) {
+            out.put(varint_continuation_byte);
+        }
+        out.put(overflowing_varint_final_byte);
+    }
+
+    auto opened = motif::db::opening_tree_index::open(index_path);
+    REQUIRE_FALSE(opened.has_value());
+    CHECK(opened.error() == motif::db::error_code::io_failure);
 }
