@@ -108,6 +108,7 @@ struct opening_continuation_response
     std::string san;
     std::string result_hash;
     std::uint32_t frequency {};
+    std::uint32_t direct_frequency {};
     std::uint32_t white_wins {};
     std::uint32_t draws {};
     std::uint32_t black_wins {};
@@ -415,6 +416,7 @@ auto to_game_response(motif::db::game_id const game_id, motif::db::game const& s
         .san = source.san,
         .result_hash = fmt::format("{}", static_cast<std::uint64_t>(source.result_hash)),
         .frequency = source.frequency,
+        .direct_frequency = source.direct_frequency,
         .white_wins = source.white_wins,
         .draws = source.draws,
         .black_wins = source.black_wins,
@@ -756,7 +758,8 @@ void server::impl::prune_completed()
     }
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+// NOLINTBEGIN(readability-function-size,google-readability-function-size,hicpp-function-size,readability-function-cognitive-complexity) --
+// route registration stays co-located so endpoint ownership and middleware ordering are auditable.
 void server::impl::setup_routes()
 {
     svr.Get("/health",
@@ -1926,6 +1929,8 @@ void server::impl::setup_routes()
                    res.status = http_ok;
                });
 }
+
+// NOLINTEND(readability-function-size,google-readability-function-size,hicpp-function-size,readability-function-cognitive-complexity)
 
 server::server(motif::db::database_manager& database)
     : impl_ {std::make_unique<impl>(database)}
