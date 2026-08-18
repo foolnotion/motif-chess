@@ -9,7 +9,7 @@
     chesslib.url = "github:foolnotion/chesslib";
     chesslib.inputs.nixpkgs.follows = "nixpkgs";
     chesslib.inputs.foolnotion.follows = "foolnotion";
-    pgnlib.url = "github:foolnotion/pgnlib/feat/import-stream";
+    pgnlib.url = "github:foolnotion/pgnlib/f069c1b2a26a2402056d1c78e80fa0bffaaff36a";
     pgnlib.inputs.nixpkgs.follows = "nixpkgs";
     pgnlib.inputs.foolnotion.follows = "foolnotion";
     ucilib.url = "github:foolnotion/ucilib";
