@@ -65,6 +65,22 @@ auto to_offset(std::streampos position) -> std::size_t
     return static_cast<std::size_t>(position);
 }
 
+// pgn::import_stream leaves tag values as raw bytes with backslash escapes
+// undecoded (see pgnlib/import.hpp); unescape \" and \\ to match the
+// canonical values the old pgn::parse_string-based path produced.
+auto unescape_tag_value(std::string_view raw) -> std::string
+{
+    std::string value;
+    value.reserve(raw.size());
+    for (std::size_t index = 0; index < raw.size(); ++index) {
+        if (raw[index] == '\\' && index + 1 < raw.size() && (raw[index + 1] == '"' || raw[index + 1] == '\\')) {
+            ++index;
+        }
+        value.push_back(raw[index]);
+    }
+    return value;
+}
+
 }  // namespace
 
 pgn_reader::pgn_reader(std::filesystem::path path)
@@ -109,7 +125,7 @@ auto pgn_reader::next() -> result<pgn::game>
     game.result = item->result;
     game.tags.reserve(item->tags.size());
     for (auto const& tag : item->tags) {
-        game.tags.push_back(pgn::tag {.key = std::string {tag.key}, .value = std::string {tag.value}});
+        game.tags.push_back(pgn::tag {.key = std::string {tag.key}, .value = unescape_tag_value(tag.value)});
     }
     game.moves.reserve(item->moves.size());
     for (auto const& move : item->moves) {
