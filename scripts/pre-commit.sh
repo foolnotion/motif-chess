@@ -11,8 +11,22 @@ if [ -z "$staged_cpp_files" ]; then
     exit 0
 fi
 
-echo "Running clang-format on staged files..."
-echo "$staged_cpp_files" | xargs clang-format -i
+# `git clang-format --staged` only reformats lines that differ between the
+# index and HEAD, and -- critically -- refuses (exit 2) if any of those
+# files also have unstaged changes, rather than silently reformatting them
+# too. That's the property a plain `clang-format -i` + `git add` lacks: it
+# reformats the whole working-tree file regardless of git state, and
+# re-staging afterward silently sweeps any unrelated unstaged edits in that
+# file into this commit. Exit code 1 from git-clang-format means "changes
+# were applied", not an error -- only treat 2+ as fatal.
+echo "Running clang-format on staged changes..."
+set +e
+git clang-format --staged --quiet
+clang_format_status=$?
+set -e
+if [ "$clang_format_status" -gt 1 ]; then
+    exit "$clang_format_status"
+fi
 
 echo "Running clang-tidy on staged files..."
 if [ ! -f "$build_dir/compile_commands.json" ]; then
@@ -26,7 +40,9 @@ for f in $staged_cpp_files; do
     fi
 done
 
-# Re-stage any files that clang-format modified
+# Safe now: git-clang-format already verified none of these files have
+# unstaged changes (it would have refused above otherwise), so re-staging
+# the whole file only picks up its own formatting edit.
 echo "$staged_cpp_files" | xargs git add
 
 echo "Pre-commit checks passed."
