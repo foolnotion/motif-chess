@@ -1,10 +1,6 @@
-// Spike: measure the throughput of the exact replay primitive a
-// DuckDB-free storage redesign would depend on — decode a packed
-// encoded_move, apply it, and read the incrementally maintained Zobrist
-// hash — as opposed to SAN parsing, which is not on that path.
-//
-// Gated like the other [performance] tests: only meaningful in a release,
-// non-sanitized build, and only runs against a real corpus.
+// Spike: throughput of the replay primitive a DuckDB-free redesign depends
+// on -- decode + apply_encoded_move + read the incremental Zobrist hash,
+// not SAN parsing. Release-only, like the other [performance] tests.
 
 #include <chrono>
 #include <cstdint>
