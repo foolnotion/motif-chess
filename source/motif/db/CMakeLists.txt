@@ -11,6 +11,7 @@ add_library(motif_db STATIC
     schema.cpp
     manifest.cpp
     database_manager.cpp
+    position_prefix_postings.cpp
     position_store.cpp
 )
 

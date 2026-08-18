@@ -23,6 +23,13 @@ target_link_libraries(motif_db_test PRIVATE motif_db Catch2::Catch2WithMain)
 target_compile_features(motif_db_test PRIVATE cxx_std_23)
 catch_discover_tests(motif_db_test)
 
+add_executable(motif_prefix_postings_test
+    source/motif_db/position_prefix_postings_test.cpp
+)
+target_link_libraries(motif_prefix_postings_test PRIVATE motif_db Catch2::Catch2WithMain)
+target_compile_features(motif_prefix_postings_test PRIVATE cxx_std_23)
+catch_discover_tests(motif_prefix_postings_test)
+
 add_executable(motif_import_test
     source/motif_import/placeholder_test.cpp
     source/motif_import/logger_test.cpp
