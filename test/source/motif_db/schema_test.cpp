@@ -132,6 +132,55 @@ TEST_CASE("schema::migrate refuses a v2 database rather than silently bumping th
     CHECK(*ver == 2U);
 }
 
+TEST_CASE("schema::migrate refuses a v1 database without mutating it first", "[motif-db][schema]")
+{
+    disk_db ddb {"migrate-v1-no-partial-mutation"};
+    REQUIRE(ddb.conn != nullptr);
+
+    // v1's shape: no source_type/source_label/review_status columns (added
+    // in v1->v2) and no moves_hash (added in v2->v3). Regression coverage
+    // for a bug where migrate() ran the v1->v2 ALTER TABLE steps before
+    // reaching the v3 refusal, leaving a v1 database half-migrated (new
+    // columns present, user_version still 1) even though the whole
+    // migration was ultimately refused.
+    // language=sql
+    constexpr char const* v1_ddl = R"sql(
+        CREATE TABLE player (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, elo INTEGER, title TEXT, country TEXT);
+        CREATE TABLE event (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, site TEXT, date TEXT);
+        CREATE TABLE tag (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+        CREATE TABLE game (
+            id INTEGER PRIMARY KEY, white_id INTEGER NOT NULL REFERENCES player(id),
+            black_id INTEGER NOT NULL REFERENCES player(id), event_id INTEGER REFERENCES event(id),
+            date TEXT, result TEXT NOT NULL, eco TEXT, moves BLOB NOT NULL
+        );
+        CREATE UNIQUE INDEX ux_game_identity ON game(white_id, black_id, COALESCE(event_id, -1), COALESCE(date, ''), result, moves);
+        CREATE TABLE game_tag (game_id INTEGER NOT NULL REFERENCES game(id) ON DELETE CASCADE, tag_id INTEGER NOT NULL REFERENCES tag(id), value TEXT NOT NULL, PRIMARY KEY (game_id, tag_id));
+        CREATE TABLE schema_migrations (name TEXT NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+        PRAGMA user_version = 1;
+    )sql";
+    REQUIRE(sqlite3_exec(ddb.conn, v1_ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    auto migrate_res = motif::db::schema::migrate(ddb.conn, 1U);
+    REQUIRE_FALSE(migrate_res.has_value());
+    CHECK(migrate_res.error() == motif::db::error_code::schema_mismatch);
+
+    auto ver = motif::db::schema::version(ddb.conn);
+    REQUIRE(ver.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(*ver == 1U);
+
+    // The v1->v2 columns must not have been added by the refused attempt.
+    auto* stmt = static_cast<sqlite3_stmt*>(nullptr);
+    REQUIRE(sqlite3_prepare_v2(ddb.conn, "SELECT source_type FROM game LIMIT 0", -1, &stmt, nullptr) != SQLITE_OK);
+    sqlite3_finalize(stmt);
+
+    // A second attempt must fail the same way, not degrade into a generic
+    // io_failure from a duplicate-column ALTER TABLE re-run.
+    auto second_migrate_res = motif::db::schema::migrate(ddb.conn, 1U);
+    REQUIRE_FALSE(second_migrate_res.has_value());
+    CHECK(second_migrate_res.error() == motif::db::error_code::schema_mismatch);
+}
+
 TEST_CASE("schema::initialize on :memory: succeeds (WAL falls back to memory mode)", "[motif-db][schema]")
 {
     sqlite3* conn = open_memory();

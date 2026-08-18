@@ -102,13 +102,6 @@ constexpr char const* ddl = R"sql(
     );
 )sql";
 
-// language=sql
-constexpr char const* migration_v1_to_v2 = R"sql(
-    ALTER TABLE game ADD COLUMN source_type   TEXT NOT NULL DEFAULT 'imported';
-    ALTER TABLE game ADD COLUMN source_label  TEXT;
-    ALTER TABLE game ADD COLUMN review_status TEXT NOT NULL DEFAULT 'new';
-)sql";
-
 }  // namespace
 
 auto initialize(sqlite3* conn) -> result<void>
@@ -167,13 +160,6 @@ auto migrate(sqlite3* conn, std::uint32_t const from_version) -> result<void>
     }
     if (from_version == current_version) {
         return {};
-    }
-
-    if (from_version < 2U) {
-        auto res = exec(conn, migration_v1_to_v2);
-        if (!res) {
-            return tl::unexpected {res.error()};
-        }
     }
 
     // v2 -> v3 added moves_hash, computed per row from each existing game's

@@ -113,6 +113,12 @@ auto read_varint(std::ifstream& input, std::uint64_t& value) -> bool
     constexpr auto payload_mask = std::uint8_t {0x7F};
     constexpr auto payload_bits = 7U;
     constexpr auto max_shift = 63U;
+    // At shift 63, only bit 0 of a 7-bit payload fits inside a 64-bit
+    // value; the rest would silently shift out. Reject a 10th byte that
+    // sets any of those bits instead of dropping them -- otherwise a
+    // corrupted/overflowing varint decodes to a wrapped value instead of
+    // failing, and the caller has no way to tell the two apart.
+    constexpr auto max_shift_payload_limit = std::uint8_t {0x01};
 
     value = 0;
     auto shift = 0U;
@@ -125,7 +131,11 @@ auto read_varint(std::ifstream& input, std::uint64_t& value) -> bool
             return false;
         }
         auto const payload = static_cast<std::uint8_t>(byte);
-        value |= static_cast<std::uint64_t>(payload & payload_mask) << shift;
+        auto const payload_bits_value = static_cast<std::uint8_t>(payload & payload_mask);
+        if (shift == max_shift && payload_bits_value > max_shift_payload_limit) {
+            return false;
+        }
+        value |= static_cast<std::uint64_t>(payload_bits_value) << shift;
         if ((payload & continuation_bit) == 0U) {
             return true;
         }
@@ -253,6 +263,24 @@ class hash_visit_counter
     {
     }
 
+    // Best-effort cleanup of any spill runs left behind by an error return
+    // from spill_current_buffer()/finalize() -- the success path in
+    // finalize() already removes and clears run_paths_, so this is a no-op
+    // there; it only matters on the error paths, which otherwise leaked
+    // these files indefinitely.
+    ~hash_visit_counter()
+    {
+        for (auto const& run_path : run_paths_) {
+            std::error_code remove_err;
+            std::filesystem::remove(run_path, remove_err);
+        }
+    }
+
+    hash_visit_counter(hash_visit_counter const&) = delete;
+    auto operator=(hash_visit_counter const&) -> hash_visit_counter& = delete;
+    hash_visit_counter(hash_visit_counter&&) = delete;
+    auto operator=(hash_visit_counter&&) -> hash_visit_counter& = delete;
+
     auto visit(std::uint64_t const hash) -> result<void>
     {
         buffer_.push_back(hash);
@@ -265,8 +293,15 @@ class hash_visit_counter
     // Sorted ascending by hash. Omits hashes with a total count below
     // keep_min_count -- callers must treat "not present" as count 1 (the
     // implicit case for a hash visited by exactly one game, which is the
-    // overwhelming majority of positions past shallow depth).
-    [[nodiscard]] auto finalize(std::uint32_t keep_min_count) -> result<std::vector<std::pair<std::uint64_t, std::uint32_t>>>;
+    // overwhelming majority of positions past shallow depth). Also omits
+    // any hash not in `needed_hashes`, even if it clears keep_min_count --
+    // this is what actually bounds peak memory by the shallow index being
+    // built rather than by every repeated position anywhere in the corpus
+    // (a hot ply-60+ endgame reached by many games would otherwise sit in
+    // the output despite never being looked up, since write_node() only
+    // ever queries child hashes of a ply-capped edge).
+    [[nodiscard]] auto finalize(std::uint32_t keep_min_count, gtl::flat_hash_set<std::uint64_t> const& needed_hashes)
+        -> result<std::vector<std::pair<std::uint64_t, std::uint32_t>>>;
 
   private:
     [[nodiscard]] auto spill_current_buffer() -> result<void>;
@@ -340,7 +375,8 @@ auto advance_run_cursor(hash_count_run_cursor& cursor) -> result<bool>
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- k-way merge w/ per-step checks, mirrors position_prefix_postings.cpp
-auto hash_visit_counter::finalize(std::uint32_t const keep_min_count) -> result<std::vector<std::pair<std::uint64_t, std::uint32_t>>>
+auto hash_visit_counter::finalize(std::uint32_t const keep_min_count, gtl::flat_hash_set<std::uint64_t> const& needed_hashes)
+    -> result<std::vector<std::pair<std::uint64_t, std::uint32_t>>>
 {
     if (auto spill_res = spill_current_buffer(); !spill_res) {
         return tl::unexpected {spill_res.error()};
@@ -378,7 +414,7 @@ auto hash_visit_counter::finalize(std::uint32_t const keep_min_count) -> result<
 
     auto flush_current = [&]() -> void
     {
-        if (has_current && current_sum >= keep_min_count) {
+        if (has_current && current_sum >= keep_min_count && needed_hashes.contains(current_hash)) {
             merged.emplace_back(current_hash, current_sum);
         }
     };
@@ -618,7 +654,13 @@ auto opening_tree_index::build(game_store& store, std::filesystem::path const& p
         }
     }
 
-    auto child_counts = visits.finalize(keep_min_count);
+    gtl::flat_hash_set<std::uint64_t> needed_child_hashes;
+    needed_child_hashes.reserve(state.edges.size());
+    for (auto const& entry : state.edges) {
+        needed_child_hashes.insert(entry.first.child_hash);
+    }
+
+    auto child_counts = visits.finalize(keep_min_count, needed_child_hashes);
     if (!child_counts) {
         return tl::unexpected {child_counts.error()};
     }
@@ -649,8 +691,14 @@ auto opening_tree_index::open(std::filesystem::path const& path) -> result<openi
     }
 
     opening_tree_index index;
-    index.node_hashes_.reserve(node_count);
-    index.node_offsets_.reserve(node_count + 1);
+    // Deliberately no reserve() here: node_count is an untrusted 64-bit
+    // value read straight from the file header. Reserving against it would
+    // let a corrupt/truncated file throw std::length_error/bad_alloc out of
+    // this tl::expected-returning API before the truncation check in the
+    // loop below ever runs. Growing via push_back costs some reallocation
+    // on a genuinely large, valid file; that's the right trade against an
+    // exception escaping the error contract every other check in this
+    // function honors.
     index.node_offsets_.push_back(0);
 
     for (std::uint64_t node_index = 0; node_index < node_count; ++node_index) {
