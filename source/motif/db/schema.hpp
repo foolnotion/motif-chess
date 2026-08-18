@@ -11,7 +11,11 @@ namespace motif::db::schema
 
 // Current schema version embedded in PRAGMA user_version.
 // v1 → v2: added source_type, source_label, review_status columns to game.
-inline constexpr std::uint32_t current_version = 2;
+// v2 → v3: added moves_hash; ux_game_identity now keys on it instead of the
+// raw moves blob, so a move sequence is no longer stored twice on disk (once
+// in the row, once in the index). Not migratable in place -- see
+// schema::migrate -- bundles at v2 or earlier must be rebuilt by reimporting.
+inline constexpr std::uint32_t current_version = 3;
 
 // Create all tables, indexes, and set WAL mode, foreign_keys ON, and
 // PRAGMA user_version. Idempotent: uses CREATE TABLE IF NOT EXISTS throughout;
