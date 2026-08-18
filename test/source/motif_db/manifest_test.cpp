@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "motif/db/error.hpp"
+#include "motif/db/schema.hpp"
 
 namespace
 {
@@ -65,7 +66,7 @@ TEST_CASE("manifest: make_manifest populates all fields with non-empty values", 
 {
     auto const manifest = motif::db::make_manifest("test-db");
     CHECK(manifest.name == "test-db");
-    CHECK(manifest.schema_version == 2);
+    CHECK(manifest.schema_version == motif::db::schema::current_version);
     CHECK(manifest.game_count == 0);
     CHECK_FALSE(manifest.created_at.empty());
 }

@@ -18,10 +18,18 @@ add_executable(motif_db_test
     source/motif_db/manifest_test.cpp
     source/motif_db/database_manager_test.cpp
     source/motif_db/position_store_test.cpp
+    source/motif_db/opening_tree_index_test.cpp
 )
 target_link_libraries(motif_db_test PRIVATE motif_db Catch2::Catch2WithMain)
 target_compile_features(motif_db_test PRIVATE cxx_std_23)
 catch_discover_tests(motif_db_test)
+
+add_executable(motif_prefix_postings_test
+    source/motif_db/position_prefix_postings_test.cpp
+)
+target_link_libraries(motif_prefix_postings_test PRIVATE motif_db Catch2::Catch2WithMain)
+target_compile_features(motif_prefix_postings_test PRIVATE cxx_std_23)
+catch_discover_tests(motif_prefix_postings_test)
 
 add_executable(motif_import_test
     source/motif_import/placeholder_test.cpp
@@ -30,6 +38,8 @@ add_executable(motif_import_test
     source/motif_import/import_worker_test.cpp
     source/motif_import/checkpoint_test.cpp
     source/motif_import/import_pipeline_test.cpp
+    source/motif_import/replay_throughput_test.cpp
+    source/motif_import/opening_tree_index_perf_test.cpp
 )
 target_link_libraries(motif_import_test PRIVATE motif_import Catch2::Catch2WithMain)
 target_compile_features(motif_import_test PRIVATE cxx_std_23)

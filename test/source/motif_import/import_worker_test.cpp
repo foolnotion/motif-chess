@@ -152,11 +152,13 @@ auto load_position_rows(std::filesystem::path const& path) -> std::vector<stored
 {
     duck_reader const reader {path};
     duckdb_result query_result {};
-    if (duckdb_query(reader.con,
-                     "SELECT zobrist_hash, game_id, ply, result, white_elo, " "black_" "elo FROM " "position " "ORDER BY " "ply",
-                     &query_result)
-        != DuckDBSuccess)
-    {
+    // result/white_elo/black_elo are per-game, normalized into game_result
+    // rather than stored inline on every position row.
+    // language=sql
+    constexpr auto load_positions_sql =
+        "SELECT p.zobrist_hash, p.game_id, p.ply, gr.result, gr.white_elo, gr.black_elo "
+        "FROM position p JOIN game_result gr ON gr.game_id = p.game_id ORDER BY p.ply";
+    if (duckdb_query(reader.con, load_positions_sql, &query_result) != DuckDBSuccess) {
         throw std::runtime_error {"failed to load stored positions"};
     }
 

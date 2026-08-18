@@ -428,7 +428,8 @@ auto game_store::create_schema() -> result<void>
             date          TEXT,
             result        TEXT NOT NULL,
             eco           TEXT,
-            moves         BLOB NOT NULL,
+            moves         BLOB    NOT NULL,
+            moves_hash    INTEGER NOT NULL,
             source_type   TEXT NOT NULL DEFAULT 'imported',
             source_label  TEXT,
             review_status TEXT NOT NULL DEFAULT 'new'
@@ -440,7 +441,7 @@ auto game_store::create_schema() -> result<void>
             COALESCE(event_id, -1),
             COALESCE(date, ''),
             result,
-            moves
+            moves_hash
         );
 
         CREATE TABLE IF NOT EXISTS game_tag (
@@ -790,6 +791,27 @@ auto game_store::count_games() const -> result<std::int64_t>
         return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
     return sqlite3_column_int64(stmt->get(), 0);
+}
+
+auto game_store::all_game_ids() const -> result<std::vector<game_id>>
+{
+    // language=sql
+    static constexpr char const* sql = R"sql(SELECT id FROM game ORDER BY id)sql";
+    auto stmt = prepare(db_, sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+
+    std::vector<game_id> ids;
+    int step_rc = SQLITE_ROW;
+    while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
+        ids.push_back(game_id {static_cast<std::uint32_t>(sqlite3_column_int(stmt->get(), 0))});
+    }
+    if (step_rc != SQLITE_DONE) {
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+    }
+
+    return ids;
 }
 
 auto game_store::find_games(search_filter const& filter) const -> result<game_list_result>
