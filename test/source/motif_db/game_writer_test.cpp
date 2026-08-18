@@ -101,6 +101,28 @@ TEST_CASE("game_writer: duplicate insert returns duplicate", "[motif_db][game_wr
     CHECK(dup_res.error() == motif::db::error_code::duplicate);
 }
 
+TEST_CASE("game_writer: same players/date/result but different moves are not treated as duplicates", "[motif_db][game_writer]")
+{
+    db_fixture fix;
+
+    auto first = make_game();
+    REQUIRE(fix.writer.insert(first).has_value());
+
+    // Same identity fields (players, date, result) as `first`, but a
+    // different move sequence -- ux_game_identity now keys on moves_hash
+    // rather than the raw moves blob, so this must still succeed. A bug that
+    // made moves_hash ignore its input (e.g. always hashing an empty span)
+    // would make this collide with `first` and wrongly return `duplicate`.
+    auto second = make_game();
+    second.moves = {move_c, move_b, move_a};
+    auto const second_res = fix.writer.insert(second);
+    REQUIRE(second_res.has_value());
+
+    auto const get_res = fix.store.get(*second_res);
+    REQUIRE(get_res.has_value());
+    CHECK(get_res->moves == second.moves);
+}
+
 TEST_CASE("game_writer: batched transaction commits multiple inserts", "[motif_db][game_writer]")
 {
     db_fixture fix;
