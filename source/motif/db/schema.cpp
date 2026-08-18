@@ -162,12 +162,9 @@ auto migrate(sqlite3* conn, std::uint32_t const from_version) -> result<void>
         return {};
     }
 
-    // v2 -> v3 added moves_hash, computed per row from each existing game's
-    // moves bytes. Backfilling it needs a real hash function evaluated per
-    // row, which this exec()-only migration path (plain SQL, no custom
-    // SQLite functions registered) can't do. Refuse rather than silently
-    // bump user_version and leave rows without a usable moves_hash --
-    // bundles at v2 or earlier must be rebuilt by reimporting.
+    // v2 -> v3 added moves_hash, which needs a real hash evaluated per row --
+    // this exec()-only migration can't do that. Refuse rather than silently
+    // bump user_version; bundles at v2 or earlier must be rebuilt by reimporting.
     if (from_version < 3U) {
         return tl::unexpected {error_code::schema_mismatch};
     }

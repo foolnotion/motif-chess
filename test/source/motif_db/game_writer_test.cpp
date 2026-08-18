@@ -108,11 +108,8 @@ TEST_CASE("game_writer: same players/date/result but different moves are not tre
     auto first = make_game();
     REQUIRE(fix.writer.insert(first).has_value());
 
-    // Same identity fields (players, date, result) as `first`, but a
-    // different move sequence -- ux_game_identity now keys on moves_hash
-    // rather than the raw moves blob, so this must still succeed. A bug that
-    // made moves_hash ignore its input (e.g. always hashing an empty span)
-    // would make this collide with `first` and wrongly return `duplicate`.
+    // Same identity fields as `first`, different moves -- a moves_hash bug
+    // that ignored its input would collide and wrongly return `duplicate`.
     auto second = make_game();
     second.moves = {move_c, move_b, move_a};
     auto const second_res = fix.writer.insert(second);

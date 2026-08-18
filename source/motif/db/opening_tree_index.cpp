@@ -28,10 +28,8 @@ namespace
 {
 
 constexpr auto magic = std::array<char, 8> {'M', 'O', 'T', 'I', 'F', 'O', 'T', '1'};
-// v1 -> v2: continuation-record counter/sum fields switched from fixed-width
-// integers to LEB128 varints (see write_varint/read_varint) -- most edges
-// have small counts, so this is a meaningful size win on a real corpus, not
-// just a format bump for its own sake.
+// v1 -> v2: continuation-record fields switched from fixed-width to
+// LEB128 varints (write_varint/read_varint) -- most edges have small counts.
 constexpr auto format_version = std::uint32_t {2};
 constexpr auto byte_bits = std::size_t {8};
 constexpr auto byte_mask = std::uint64_t {0xff};
@@ -82,12 +80,8 @@ auto read_f64(std::ifstream& input, double& value) -> bool
 }
 
 // LEB128-style unsigned varint: 7 payload bits/byte, high bit = "more
-// bytes follow". Most continuation-record fields (frequency, win/draw/loss
-// counts, elo sums) follow a power-law distribution across a real corpus --
-// a handful of popular opening moves have huge counts, the overwhelming
-// majority of edges have small ones -- so this costs 1 byte for the common
-// case and only grows for the rare high-frequency edges, instead of paying
-// a fixed 4 or 8 bytes for every edge regardless of its actual value.
+// bytes follow". Cheap for the common case since opening frequencies are
+// power-law distributed (a few huge counts, most edges small).
 auto write_varint(std::ofstream& output, std::uint64_t value) -> bool
 {
     constexpr auto continuation_bit = std::uint8_t {0x80};
@@ -113,11 +107,8 @@ auto read_varint(std::ifstream& input, std::uint64_t& value) -> bool
     constexpr auto payload_mask = std::uint8_t {0x7F};
     constexpr auto payload_bits = 7U;
     constexpr auto max_shift = 63U;
-    // At shift 63, only bit 0 of a 7-bit payload fits inside a 64-bit
-    // value; the rest would silently shift out. Reject a 10th byte that
-    // sets any of those bits instead of dropping them -- otherwise a
-    // corrupted/overflowing varint decodes to a wrapped value instead of
-    // failing, and the caller has no way to tell the two apart.
+    // At shift 63 only bit 0 of a payload fits in a u64; reject a 10th byte
+    // that sets any other bit instead of silently shifting it out.
     constexpr auto max_shift_payload_limit = std::uint8_t {0x01};
 
     value = 0;
@@ -244,16 +235,11 @@ auto average_elo(std::int64_t const sum, std::uint32_t const count) -> std::opti
     return static_cast<double>(sum) / static_cast<double>(count);
 }
 
-// Bounded-memory external-merge counter: counts how many distinct times each
-// hash is `visit()`-ed (callers are responsible for calling it at most once
-// per game per hash, so the count is "distinct games that visited this
-// hash"). This is the piece that must not scale with corpus size in memory:
-// transposition_frequency's scope is every ply of every game, unlike the
-// ply-capped edge map below, so a flat in-memory map here would grow with
-// total corpus positions rather than with the (much smaller) shallow index
-// being built. Generalizes the spill/k-way-merge shape of
-// position_prefix_postings.cpp's finalize_external_merge to a counting
-// merge instead of a dedup merge.
+// Bounded-memory external-merge counter: counts distinct-game visits per
+// hash (callers call visit() at most once per game per hash). Unlike the
+// ply-capped edge map below, transposition_frequency spans every ply of
+// every game, so this can't be a flat in-memory map. Generalizes
+// position_prefix_postings.cpp's spill/k-way-merge to counting, not dedup.
 class hash_visit_counter
 {
   public:
@@ -263,11 +249,9 @@ class hash_visit_counter
     {
     }
 
-    // Best-effort cleanup of any spill runs left behind by an error return
-    // from spill_current_buffer()/finalize() -- the success path in
-    // finalize() already removes and clears run_paths_, so this is a no-op
-    // there; it only matters on the error paths, which otherwise leaked
-    // these files indefinitely.
+    // Best-effort cleanup of spill runs left behind by an error return from
+    // spill_current_buffer()/finalize() -- a no-op on the success path,
+    // which already removes and clears run_paths_.
     ~hash_visit_counter()
     {
         for (auto const& run_path : run_paths_) {
@@ -290,16 +274,10 @@ class hash_visit_counter
         return spill_current_buffer();
     }
 
-    // Sorted ascending by hash. Omits hashes with a total count below
-    // keep_min_count -- callers must treat "not present" as count 1 (the
-    // implicit case for a hash visited by exactly one game, which is the
-    // overwhelming majority of positions past shallow depth). Also omits
-    // any hash not in `needed_hashes`, even if it clears keep_min_count --
-    // this is what actually bounds peak memory by the shallow index being
-    // built rather than by every repeated position anywhere in the corpus
-    // (a hot ply-60+ endgame reached by many games would otherwise sit in
-    // the output despite never being looked up, since write_node() only
-    // ever queries child hashes of a ply-capped edge).
+    // Sorted ascending by hash. Omits hashes below keep_min_count (callers
+    // treat "not present" as count 1) and any hash not in `needed_hashes` --
+    // the latter is what actually bounds peak memory by the index being
+    // built rather than by every repeated position in the corpus.
     [[nodiscard]] auto finalize(std::uint32_t keep_min_count, gtl::flat_hash_set<std::uint64_t> const& needed_hashes)
         -> result<std::vector<std::pair<std::uint64_t, std::uint32_t>>>;
 
@@ -466,12 +444,11 @@ auto transposition_frequency_for(std::uint64_t const child_hash, std::vector<std
     return 1;
 }
 
-// Everything build() accumulates across the whole corpus, threaded through
-// the per-game and per-write helper functions below. child_freq lives
-// outside this struct (in a hash_visit_counter) because it must stay
-// bounded-memory; edges/edges_by_root are bounded by the ply cap instead and
-// are the actual output being built, so keeping them in memory is
-// unavoidable regardless of build strategy.
+// Everything build() accumulates across the whole corpus. The uncapped
+// transposition counter lives outside this struct, in a hash_visit_counter,
+// because it must stay bounded-memory; edges/edges_by_root are bounded by
+// the ply cap and are the actual output being built, so keeping them in
+// memory is unavoidable regardless of build strategy.
 struct build_state
 {
     gtl::flat_hash_map<edge_key, edge_agg, edge_key_hash> edges;
@@ -480,11 +457,10 @@ struct build_state
     gtl::flat_hash_map<std::uint64_t, std::vector<edge_key>> edges_by_root;
 };
 
-// Replays one game, updating `state` and `visits` in place. Two
-// aggregations happen over the same replay at two different depth scopes:
-// `visits` (transposition_frequency) is uncapped, `state.edges` is capped at
-// max_root_ply. See position_store.cpp's create_opening_stats_rollups_template
-// comment for why that asymmetry exists in the DuckDB rollup this mirrors.
+// Replays one game into `state` and `visits`: `visits`
+// (transposition_frequency) is uncapped, `state.edges` is capped at
+// max_root_ply -- see position_store.cpp's create_opening_stats_rollups_template
+// for why that asymmetry exists in the DuckDB rollup this mirrors.
 auto accumulate_game(motif::db::game const& current_game,
                      game_id const game_key,
                      std::uint16_t const max_root_ply,
@@ -691,14 +667,8 @@ auto opening_tree_index::open(std::filesystem::path const& path) -> result<openi
     }
 
     opening_tree_index index;
-    // Deliberately no reserve() here: node_count is an untrusted 64-bit
-    // value read straight from the file header. Reserving against it would
-    // let a corrupt/truncated file throw std::length_error/bad_alloc out of
-    // this tl::expected-returning API before the truncation check in the
-    // loop below ever runs. Growing via push_back costs some reallocation
-    // on a genuinely large, valid file; that's the right trade against an
-    // exception escaping the error contract every other check in this
-    // function honors.
+    // No reserve(): node_count is untrusted, straight from the file header --
+    // reserving against it could throw before the truncation check below runs.
     index.node_offsets_.push_back(0);
 
     for (std::uint64_t node_index = 0; node_index < node_count; ++node_index) {

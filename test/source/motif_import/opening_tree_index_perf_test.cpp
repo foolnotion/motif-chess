@@ -1,10 +1,6 @@
-// Validates opening_tree_index::build()'s bounded-memory claim against a
-// real corpus: imports games through the normal pipeline (SQLite only, no
-// DuckDB rebuild -- irrelevant to this index), then builds the index and
-// reports elapsed time, peak RSS, and output file size. Not a hard
-// regression gate (no prior baseline exists to compare against -- this is
-// the first version of the bounded-memory build) -- informational, like
-// replay_throughput_test.cpp.
+// Validates opening_tree_index::build()'s bounded-memory claim on a real
+// corpus: imports (SQLite only, no DuckDB), builds the index, reports
+// elapsed time, peak RSS, and output size. Informational, not a hard gate.
 
 #include <algorithm>
 #include <chrono>
