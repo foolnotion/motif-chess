@@ -253,10 +253,53 @@ Exit gate: shallow aggregate equivalence and cold/warm latency measurements.
 
 ### Phase 5: DuckDB Removal
 
-- Remove DuckDB storage, rebuild, and query code only after prior gates pass.
-- Update CMake, Nix, and vcpkg together.
-- Define migration for bundles with `positions.duckdb`; never discard user
-  data before replacement indexes exist.
+Status: complete. DuckDB has been removed from runtime code, tests, CMake,
+Nix, and vcpkg. Exact postings are the sole durable position index.
+
+Done:
+
+- `database_manager::create()` no longer creates `positions.duckdb`. It
+  publishes a trivial empty (0-game) postings generation immediately instead,
+  so a bundle with no imports yet never falls back to DuckDB just because
+  nothing has been imported.
+- `database_manager::open()` rebuilds missing, stale, or corrupt postings
+  directly from canonical SQLite. Repair failure fails closed without
+  publishing partial bytes. A valid bundle with a leftover
+  `positions.duckdb` ignores that file and leaves it untouched.
+- Every query and mutation path (`query_position_matches`,
+  `position_game_ids`, `query_elo_distribution`,
+  `query_unfiltered_opening_stats`, `query_filtered_opening_stats`,
+  `query_tree_slice`, `find_games`, `patch_game_metadata`, `remove_game`)
+  uses postings and canonical replay, and fails closed (`error_code::io_failure`)
+  rather than serving stale or absent derived data.
+- One-release migration window: `open()` makes a single best-effort attempt
+  to build and publish postings for a legacy bundle, using the same
+  staged-build/validate/atomic-publish path as every other postings rebuild.
+  Migration replays canonical SQLite and never reads or deletes a leftover
+  `positions.duckdb`. On failure, `open()` fails closed without changing the
+  published manifest; the attempt is safe to retry.
+- `create_scratch()` uses the same on-disk `create()` path as a persistent
+  bundle (games.db, manifest.json, and derived-index files) staged in a
+  private temporary directory that is removed on close, rather than an
+  in-memory SQLite connection.
+- `database_workspace::recent_with_status()` no longer requires
+  `positions.duckdb` to mark a bundle available.
+- Clean close clears the legacy dirty marker when checksum-verified postings
+  cover canonical SQLite.
+- Import and manual-game mutation paths update canonical SQLite and mark
+  postings stale immediately
+  (`prepare_canonical_mutation()`), consistent with this plan's "Manual
+  Mutations" policy, and every position-query path fails closed until an
+  explicit rebuild -- there is no live replay-on-demand fallback yet for a
+  postings-only bundle after a manual mutation.
+
+Deferred follow-up work:
+- A live replay-on-demand fallback for manual mutations on a postings-only
+  bundle (today: fail closed until an explicit rebuild), if that gap proves
+  too disruptive in practice.
+- Moving `open()`'s migration attempt off the synchronous open path for very
+  large legacy bundles, if it proves too slow in practice (no large-corpus
+  measurement was taken for this change).
 
 ## Benchmark Gates
 

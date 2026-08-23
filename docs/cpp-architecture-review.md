@@ -4,6 +4,13 @@
 **Reviewer**: AI-assisted review from a modern C++ perspective (C++23, Clang 21)
 **Scope**: Full codebase — all modules, build system, tests
 
+**Historical snapshot**: this review predates the DuckDB removal. `position_store`
+and `duckdb_connection`, referenced throughout as current architecture, no longer
+exist — SQLite is canonical and immutable `positions.postings.N` files are the
+sole durable position index (see `docs/architecture-overview.md` and
+`plans/duckdb-free-query-index.md`). Findings below are kept verbatim as a
+point-in-time record; do not use them to reason about the current storage layer.
+
 ---
 
 ## Strategic Context
