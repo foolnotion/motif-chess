@@ -75,7 +75,9 @@ constexpr char const* ddl = R"sql(
         identity_collision INTEGER NOT NULL DEFAULT 0,
         source_type   TEXT NOT NULL DEFAULT 'imported',
         source_label  TEXT,
-        review_status TEXT NOT NULL DEFAULT 'new'
+        review_status TEXT NOT NULL DEFAULT 'new',
+        white_elo     INTEGER,
+        black_elo     INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS game_tag (
@@ -180,9 +182,10 @@ auto migrate(sqlite3* /*conn*/, std::uint32_t const from_version) -> result<void
     }
 
     // Every version bump so far has needed either a real per-row hash
-    // (v2 -> v3) or the new collision-safe move_hash/identity_collision pair
-    // (v3 -> v4), neither of which an exec()-only migration can produce.
-    // Refuse rather than silently bump user_version; bundles below
+    // (v2 -> v3), the new collision-safe move_hash/identity_collision pair
+    // (v3 -> v4), or a per-game elo backfill that the old schema has no
+    // source data for (v4 -> v5), none of which an exec()-only migration can
+    // produce. Refuse rather than silently bump user_version; bundles below
     // current_version must be rebuilt by reimporting.
     return tl::unexpected {error_code::schema_mismatch};
 }

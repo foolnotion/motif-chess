@@ -4,17 +4,19 @@
 #include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
-#include <iostream>
 #include <optional>
 #include <ratio>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "motif/search/position_search.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <chesslib/board/board.hpp>
+#include <chesslib/board/move_codec.hpp>
 #include <chesslib/util/san.hpp>
+#include <fmt/base.h>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
@@ -56,6 +58,37 @@ auto hash_after_sans(std::initializer_list<char const*> sans) -> motif::db::zobr
         maker.make();
     }
     return motif::db::zobrist_hash {board.hash()};
+}
+
+auto encode_moves(std::initializer_list<char const*> sans) -> std::vector<std::uint16_t>
+{
+    auto board = chesslib::board {};
+    auto moves = std::vector<std::uint16_t> {};
+    moves.reserve(sans.size());
+    for (char const* const san : sans) {
+        auto move = chesslib::san::from_string(board, san);
+        REQUIRE(move.has_value());
+        moves.push_back(chesslib::codec::encode(*move));
+        chesslib::move_maker maker {board, *move};
+        maker.make();
+    }
+    return moves;
+}
+
+auto make_game(std::initializer_list<char const*> sans,
+               std::string_view result,
+               std::optional<std::int32_t> white_elo,
+               std::optional<std::int32_t> black_elo) -> motif::db::game
+{
+    return {.white = {.name = "White", .elo = white_elo, .title = std::nullopt, .country = std::nullopt},
+            .black = {.name = "Black", .elo = black_elo, .title = std::nullopt, .country = std::nullopt},
+            .event_details = std::nullopt,
+            .date = std::nullopt,
+            .result = std::string {result},
+            .eco = std::nullopt,
+            .moves = encode_moves(sans),
+            .extra_tags = {},
+            .provenance = {}};
 }
 
 constexpr auto us_per_ms = 1000.0;
@@ -171,20 +204,29 @@ void run_position_search_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
+    auto sample_hashes = test_helpers::sample_zobrist_hashes(*manager, perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
     auto const result = measure_query_latencies(*manager, *sample_hashes, "position_search sorted by zobrist");
 
-    std::cout << "\n=== " << result.variant_name << " ===\n"
-              << "  queries:      " << result.num_queries << "\n"
-              << "  total:        " << result.total_ms << " ms\n"
-              << "  p50:          " << result.p50_us << " us\n"
-              << "  p99:          " << result.p99_us << " us\n"
-              << "  min:          " << result.min_us << " us\n"
-              << "  max:          " << result.max_us << " us\n"
-              << "  total rows:   " << result.total_rows_returned << "\n";
+    fmt::print(stdout,
+               "\n=== {} ===\n"
+               "  queries:      {}\n"
+               "  total:        {} ms\n"
+               "  p50:          {} us\n"
+               "  p99:          {} us\n"
+               "  min:          {} us\n"
+               "  max:          {} us\n"
+               "  total rows:   {}\n",
+               result.variant_name,
+               result.num_queries,
+               result.total_ms,
+               result.p50_us,
+               result.p99_us,
+               result.min_us,
+               result.max_us,
+               result.total_rows_returned);
 
     CHECK(result.p99_us < perf_p99_limit_us);
 
@@ -196,36 +238,21 @@ void run_position_search_perf_test()
 
 TEST_CASE("position_search::find returns matching position rows", "[motif-search][position_search]")
 {
-    tmp_dir const tdir {"find_hits"};
-
-    auto manager = motif::db::database_manager::create(tdir.path, "search-db");
+    auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const first_id = manager->store().insert(make_game({"e4", "e5"}, "1-0", 2700, 2650));
+    REQUIRE(first_id.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const second_id = manager->store().insert(make_game({"e4", "e5"}, "1/2-1/2", 2500, std::nullopt));
+    REQUIRE(second_id.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(manager->store().insert(make_game({"d4"}, "0-1", 2400, 2450)).has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(manager->rebuild_position_postings().has_value());
+
     auto const target_hash = hash_after_sans({"e4", "e5"});
-
-    std::vector<motif::db::position_row> const rows {
-        {.zobrist_hash = target_hash,
-         .game_id = motif::db::game_id {11},
-         .ply = 2,
-         .result = 1,
-         .white_elo = std::int16_t {2700},
-         .black_elo = std::int16_t {2650}},
-        {.zobrist_hash = target_hash,
-         .game_id = motif::db::game_id {42},
-         .ply = 2,
-         .result = 0,
-         .white_elo = std::int16_t {2500},
-         .black_elo = std::nullopt},
-        {.zobrist_hash = hash_after_sans({"d4"}),
-         .game_id = motif::db::game_id {99},
-         .ply = 1,
-         .result = -1,
-         .white_elo = std::int16_t {2400},
-         .black_elo = std::int16_t {2450}},
-    };
-
-    REQUIRE(manager->positions().insert_batch(rows).has_value());
-
     auto found = motif::search::position_search::find(*manager, target_hash);
     REQUIRE(found.has_value());
     REQUIRE(found->size() == 2);
@@ -235,13 +262,13 @@ TEST_CASE("position_search::find returns matching position rows", "[motif-search
     auto const& first = (*found)[0];
     auto const& second = (*found)[1];
 
-    CHECK(first.game_id == motif::db::game_id {11});
+    CHECK(first.game_id == *first_id);
     CHECK(first.ply == 2);
     CHECK(first.result == 1);
     CHECK(first.white_elo == std::optional<std::int16_t> {2700});
     CHECK(first.black_elo == std::optional<std::int16_t> {2650});
 
-    CHECK(second.game_id == motif::db::game_id {42});
+    CHECK(second.game_id == *second_id);
     CHECK(second.ply == 2);
     CHECK(second.result == 0);
     CHECK(second.white_elo == std::optional<std::int16_t> {2500});
@@ -250,20 +277,13 @@ TEST_CASE("position_search::find returns matching position rows", "[motif-search
 
 TEST_CASE("position_search::find returns empty result for missing hash", "[motif-search][position_search]")
 {
-    tmp_dir const tdir {"find_miss"};
-
-    auto manager = motif::db::database_manager::create(tdir.path, "search-db");
+    auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
 
-    std::vector<motif::db::position_row> const rows {
-        {.zobrist_hash = hash_after_sans({"e4"}),
-         .game_id = motif::db::game_id {7},
-         .ply = 1,
-         .result = 1,
-         .white_elo = std::int16_t {2200},
-         .black_elo = std::int16_t {2100}},
-    };
-    REQUIRE(manager->positions().insert_batch(rows).has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(manager->store().insert(make_game({"e4"}, "1-0", 2200, 2100)).has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(manager->rebuild_position_postings().has_value());
 
     auto found = motif::search::position_search::find(*manager, hash_after_sans({"c4", "e5", "Nc3"}));
     REQUIRE(found.has_value());

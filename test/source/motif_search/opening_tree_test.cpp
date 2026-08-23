@@ -136,7 +136,7 @@ void insert_games_and_rebuild(motif::db::database_manager& manager, std::initial
         REQUIRE(inserted.has_value());
     }
 
-    auto rebuilt = manager.rebuild_position_store();
+    auto rebuilt = manager.rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 }
 
@@ -789,7 +789,7 @@ TEST_CASE("opening_tree::open performance on sorted position store", "[performan
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
+    auto sample_hashes = test_helpers::sample_zobrist_hashes(*manager, perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 

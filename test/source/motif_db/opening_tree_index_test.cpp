@@ -21,6 +21,7 @@
 #include <chesslib/util/san.hpp>
 
 #include "motif/db/database_manager.hpp"
+#include "motif/db/game_store.hpp"
 #include "motif/db/types.hpp"
 
 namespace
@@ -109,9 +110,8 @@ auto make_game(game_spec const& spec) -> motif::db::game
     };
 }
 
-// Sorts a row vector by cont_encoded_move so two independently-produced
-// result sets (DuckDB vs. the index) can be compared regardless of query
-// order.
+// Sorts fixture and result rows by cont_encoded_move so query order is not
+// part of the contract under test.
 void sort_by_move(std::vector<motif::db::opening_stat_agg_row>& rows)
 {
     std::ranges::sort(rows, {}, &motif::db::opening_stat_agg_row::cont_encoded_move);
@@ -187,26 +187,25 @@ void check_dedup_edge(motif::db::opening_stat_agg_row const& edge,
 
 // NOLINTEND(bugprone-easily-swappable-parameters, readability-function-cognitive-complexity)
 
-void compare_stats_for_hash(motif::db::database_manager const& manager,
-                            motif::db::opening_tree_index const& index,
-                            motif::db::zobrist_hash hash)
+void check_stats_for_hash(motif::db::opening_tree_index const& index,
+                          motif::db::zobrist_hash hash,
+                          std::vector<motif::db::opening_stat_agg_row> expected)
 {
-    auto duckdb_rows = manager.positions().query_opening_stats(hash);
-    REQUIRE(duckdb_rows.has_value());
-    auto index_rows = index.query_opening_stats(hash);
-    REQUIRE(index_rows.has_value());
-
-    sort_by_move(*duckdb_rows);
-    sort_by_move(*index_rows);
-
-    REQUIRE(duckdb_rows->size() == index_rows->size());
-    for (std::size_t i = 0; i < duckdb_rows->size(); ++i) {
-        check_rows_equal((*duckdb_rows)[i], (*index_rows)[i]);
+    auto actual = index.query_opening_stats(hash);
+    REQUIRE(actual.has_value());
+    sort_by_move(expected);
+    sort_by_move(*actual);
+    REQUIRE(expected.size() == actual->size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        check_rows_equal(expected[i], (*actual)[i]);
     }
 }
 
 }  // namespace
 
+// Expected aggregate literals are the independent oracle contract; naming each
+// value would obscure the field-by-field fixtures.
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate the reported complexity of test bodies.
 TEST_CASE("opening_tree_index::build dedupes a within-game repeated edge and aggregates across games", "[motif-db][opening_tree_index]")
 {
@@ -300,7 +299,7 @@ TEST_CASE("opening_tree_index::open is stable across repeated reads of the same 
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate the reported complexity of test bodies.
-TEST_CASE("opening_tree_index::query_opening_stats matches the DuckDB rollup on a real import", "[motif-db][opening_tree_index]")
+TEST_CASE("opening_tree_index::query_opening_stats matches deterministic aggregate fixtures", "[motif-db][opening_tree_index]")
 {
     tmp_dir const tdir {"equivalence"};
 
@@ -323,18 +322,436 @@ TEST_CASE("opening_tree_index::query_opening_stats matches the DuckDB rollup on 
         REQUIRE(inserted.has_value());
     }
 
-    auto rebuilt = manager->rebuild_position_store();
-    REQUIRE(rebuilt.has_value());
-
     auto const index_path = tdir.path / "opening_tree.idx";
     auto build_res = motif::db::opening_tree_index::build(manager->store(), index_path);
     REQUIRE(build_res.has_value());
     auto opened = motif::db::opening_tree_index::open(index_path);
     REQUIRE(opened.has_value());
 
-    compare_stats_for_hash(*manager, *opened, hash_after_sans({}));
-    compare_stats_for_hash(*manager, *opened, hash_after_sans({"e4", "e5"}));
+    auto const e4_move = encode_moves({"e4"}).back();
+    auto const nf3_move = encode_moves({"e4", "e5", "Nf3"}).back();
+    auto const nc3_move = encode_moves({"e4", "e5", "Nc3"}).back();
+    check_stats_for_hash(*opened,
+                         hash_after_sans({}),
+                         {{.cont_encoded_move = e4_move,
+                           .cont_hash = hash_after_sans({"e4"}),
+                           .root_ply = 0,
+                           .frequency = 3,
+                           .transposition_frequency = 3,
+                           .white_wins = 1,
+                           .draws = 1,
+                           .black_wins = 1,
+                           .avg_white_elo = 2400.0,
+                           .avg_black_elo = 2300.0,
+                           .eco_sample_min = motif::db::game_id {1},
+                           .eco_sample_max = motif::db::game_id {3},
+                           .elo_weighted_score = 1.0}});
+    check_stats_for_hash(*opened,
+                         hash_after_sans({"e4", "e5"}),
+                         {{.cont_encoded_move = nf3_move,
+                           .cont_hash = hash_after_sans({"e4", "e5", "Nf3"}),
+                           .root_ply = 2,
+                           .frequency = 2,
+                           .transposition_frequency = 2,
+                           .white_wins = 1,
+                           .draws = 1,
+                           .black_wins = 0,
+                           .avg_white_elo = 2400.0,
+                           .avg_black_elo = 2400.0,
+                           .eco_sample_min = motif::db::game_id {1},
+                           .eco_sample_max = motif::db::game_id {2},
+                           .elo_weighted_score = 1.0},
+                          {.cont_encoded_move = nc3_move,
+                           .cont_hash = hash_after_sans({"e4", "e5", "Nc3"}),
+                           .root_ply = 2,
+                           .frequency = 1,
+                           .transposition_frequency = 1,
+                           .white_wins = 0,
+                           .draws = 0,
+                           .black_wins = 1,
+                           .avg_white_elo = std::nullopt,
+                           .avg_black_elo = 2200.0,
+                           .eco_sample_min = motif::db::game_id {3},
+                           .eco_sample_max = motif::db::game_id {3},
+                           .elo_weighted_score = std::nullopt}});
 }
+
+TEST_CASE("opening_tree_index::build preserves aggregates across external spill runs", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"external-spill"};
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+
+    for (auto const& spec : {game_spec {.sans = {"e4", "e5", "Nf3"}, .result = "1-0", .white_elo = 2500, .black_elo = 2400},
+                             game_spec {.sans = {"e4", "c5", "Nf3"}, .result = "0-1", .white_elo = 2300, .black_elo = 2200},
+                             game_spec {.sans = {"d4", "d5", "c4"}, .result = "1/2-1/2", .white_elo = 2100, .black_elo = 2000},
+                             game_spec {.sans = {"e4", "e5", "Nc3"}, .result = "1-0", .white_elo = 2400, .black_elo = 2300}})
+    {
+        REQUIRE(manager->store().insert(make_game(spec)).has_value());
+    }
+    auto const index_path = tdir.path / "opening_tree.idx";
+    auto const options = motif::db::opening_tree_index::build_options {.max_root_ply = 20U, .spill_threshold = 2U};
+    REQUIRE(motif::db::opening_tree_index::build(manager->store(), index_path, options).has_value());
+    auto index = motif::db::opening_tree_index::open(index_path);
+    REQUIRE(index.has_value());
+
+    check_stats_for_hash(*index,
+                         hash_after_sans({}),
+                         {{.cont_encoded_move = encode_moves({"e4"}).back(),
+                           .cont_hash = hash_after_sans({"e4"}),
+                           .root_ply = 0,
+                           .frequency = 3,
+                           .transposition_frequency = 3,
+                           .white_wins = 2,
+                           .draws = 0,
+                           .black_wins = 1,
+                           .avg_white_elo = 2400.0,
+                           .avg_black_elo = 2300.0,
+                           .eco_sample_min = motif::db::game_id {1},
+                           .eco_sample_max = motif::db::game_id {4},
+                           .elo_weighted_score = 2550.0 / 7050.0},
+                          {.cont_encoded_move = encode_moves({"d4"}).back(),
+                           .cont_hash = hash_after_sans({"d4"}),
+                           .root_ply = 0,
+                           .frequency = 1,
+                           .transposition_frequency = 1,
+                           .white_wins = 0,
+                           .draws = 1,
+                           .black_wins = 0,
+                           .avg_white_elo = 2100.0,
+                           .avg_black_elo = 2000.0,
+                           .eco_sample_min = motif::db::game_id {3},
+                           .eco_sample_max = motif::db::game_id {3},
+                           .elo_weighted_score = 0.0}});
+    check_stats_for_hash(*index,
+                         hash_after_sans({"e4"}),
+                         {{.cont_encoded_move = encode_moves({"e4", "e5"}).back(),
+                           .cont_hash = hash_after_sans({"e4", "e5"}),
+                           .root_ply = 1,
+                           .frequency = 2,
+                           .transposition_frequency = 2,
+                           .white_wins = 2,
+                           .draws = 0,
+                           .black_wins = 0,
+                           .avg_white_elo = 2450.0,
+                           .avg_black_elo = 2350.0,
+                           .eco_sample_min = motif::db::game_id {1},
+                           .eco_sample_max = motif::db::game_id {4},
+                           .elo_weighted_score = 1.0},
+                          {.cont_encoded_move = encode_moves({"e4", "c5"}).back(),
+                           .cont_hash = hash_after_sans({"e4", "c5"}),
+                           .root_ply = 1,
+                           .frequency = 1,
+                           .transposition_frequency = 1,
+                           .white_wins = 0,
+                           .draws = 0,
+                           .black_wins = 1,
+                           .avg_white_elo = 2300.0,
+                           .avg_black_elo = 2200.0,
+                           .eco_sample_min = motif::db::game_id {2},
+                           .eco_sample_max = motif::db::game_id {2},
+                           .elo_weighted_score = -1.0}});
+    check_stats_for_hash(*index,
+                         hash_after_sans({"d4"}),
+                         {{.cont_encoded_move = encode_moves({"d4", "d5"}).back(),
+                           .cont_hash = hash_after_sans({"d4", "d5"}),
+                           .root_ply = 1,
+                           .frequency = 1,
+                           .transposition_frequency = 1,
+                           .white_wins = 0,
+                           .draws = 1,
+                           .black_wins = 0,
+                           .avg_white_elo = 2100.0,
+                           .avg_black_elo = 2000.0,
+                           .eco_sample_min = motif::db::game_id {3},
+                           .eco_sample_max = motif::db::game_id {3},
+                           .elo_weighted_score = 0.0}});
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate the reported complexity of test bodies.
+TEST_CASE("database_manager::rebuild_opening_tree_index reuses exact postings child counts", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"postings-child-counts"};
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "postings-child-counts");
+    REQUIRE(manager.has_value());
+
+    REQUIRE(manager->store().insert(make_game({.sans = {"Nf3"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->store()
+                .insert(make_game({.sans = {"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900}))
+                .has_value());
+    REQUIRE(manager->rebuild_position_postings().has_value());
+
+    auto metrics = motif::db::opening_tree_index_build_metrics {};
+    REQUIRE(manager->rebuild_opening_tree_index(&metrics).has_value());
+    CHECK(metrics.child_counts_external);
+    CHECK(metrics.child_visit_count == 0U);
+    CHECK(metrics.child_spill_run_count == 0U);
+
+    REQUIRE(manager->manifest().opening_tree_index.has_value());
+    auto manager_index = motif::db::opening_tree_index::open(
+        manager->dir() / manager->manifest().opening_tree_index.value_or(motif::db::derived_index_manifest_entry {}).filename);
+    REQUIRE(manager_index.has_value());
+
+    check_stats_for_hash(*manager_index,
+                         hash_after_sans({}),
+                         {{.cont_encoded_move = encode_moves({"Nf3"}).back(),
+                           .cont_hash = hash_after_sans({"Nf3"}),
+                           .root_ply = 0,
+                           .frequency = 2,
+                           .transposition_frequency = 2,
+                           .white_wins = 1,
+                           .draws = 0,
+                           .black_wins = 1,
+                           .avg_white_elo = 2100.0,
+                           .avg_black_elo = 2000.0,
+                           .eco_sample_min = motif::db::game_id {1},
+                           .eco_sample_max = motif::db::game_id {2},
+                           .elo_weighted_score = 200.0 / 4100.0}});
+}
+
+TEST_CASE("database_manager::rebuild_opening_tree_index rejects a postings game-count mismatch", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"stale-postings"};
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "stale-postings");
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->rebuild_position_postings().has_value());
+
+    REQUIRE(manager->store().insert(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    auto const rebuilt = manager->rebuild_opening_tree_index();
+    REQUIRE_FALSE(rebuilt.has_value());
+    CHECK(rebuilt.error() == motif::db::error_code::invalid_argument);
+    CHECK_FALSE(manager->manifest().opening_tree_index.has_value());
+}
+
+TEST_CASE("database_manager::rebuild_opening_tree_index rejects postings invalidated before a canonical mutation",
+          "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"invalidated-postings"};
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "invalidated-postings");
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->rebuild_position_postings().has_value());
+
+    REQUIRE(manager->prepare_canonical_mutation().has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    CHECK_FALSE(manager->manifest().position_postings.has_value());
+    auto const rebuilt = manager->rebuild_opening_tree_index();
+    REQUIRE_FALSE(rebuilt.has_value());
+    CHECK(rebuilt.error() == motif::db::error_code::invalid_argument);
+}
+
+TEST_CASE("opening_tree_index::build rejects an external child-count stream missing a referenced hash", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"missing-external-child"};
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+
+    auto stream = motif::db::opening_tree_child_count_stream {
+        [](motif::db::opening_tree_child_count_visitor const& visitor) -> motif::db::result<void>
+        { return visitor(hash_after_sans({}), 1U); }};
+    auto const built =
+        motif::db::opening_tree_index::build(manager->store(), tdir.path / "missing-child.idx", {}, nullptr, std::move(stream));
+    REQUIRE_FALSE(built.has_value());
+    CHECK(built.error() == motif::db::error_code::io_failure);
+}
+
+TEST_CASE("opening_tree_index::build rejects a nonascending external child-count stream", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"nonascending-external-counts"};
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+
+    auto stream = motif::db::opening_tree_child_count_stream {
+        [](motif::db::opening_tree_child_count_visitor const& visitor) -> motif::db::result<void>
+        {
+            if (auto first = visitor(motif::db::zobrist_hash {2U}, 1U); !first) {
+                return first;
+            }
+            return visitor(motif::db::zobrist_hash {1U}, 1U);
+        }};
+    auto const built =
+        motif::db::opening_tree_index::build(manager->store(), tdir.path / "nonascending.idx", {}, nullptr, std::move(stream));
+    REQUIRE_FALSE(built.has_value());
+    CHECK(built.error() == motif::db::error_code::io_failure);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertions and the deliberately malformed stream inflate this test.
+TEST_CASE("opening_tree_index::build rejects an external child count below direct edge frequency", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"external-count-too-small"};
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+
+    auto const start_hash = hash_after_sans({});
+    auto const e4_hash = hash_after_sans({"e4"});
+    auto stream = motif::db::opening_tree_child_count_stream {
+        [start_hash, e4_hash](motif::db::opening_tree_child_count_visitor const& visitor) -> motif::db::result<void>
+        {
+            auto const first_hash = std::min(start_hash, e4_hash);
+            auto const second_hash = std::max(start_hash, e4_hash);
+            if (auto first = visitor(first_hash, first_hash == e4_hash ? 1U : 2U); !first) {
+                return first;
+            }
+            return visitor(second_hash, second_hash == e4_hash ? 1U : 2U);
+        }};
+    auto const built =
+        motif::db::opening_tree_index::build(manager->store(), tdir.path / "count-too-small.idx", {}, nullptr, std::move(stream));
+    REQUIRE_FALSE(built.has_value());
+    CHECK(built.error() == motif::db::error_code::io_failure);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertions and the callback loop inflate this test.
+TEST_CASE("opening_tree_index::build resolves external child counts through the disk fallback", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"external-count-disk-fallback"};
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"e4", "e5"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+
+    auto hashes = std::vector<motif::db::zobrist_hash> {hash_after_sans({}), hash_after_sans({"e4"}), hash_after_sans({"e4", "e5"})};
+    std::ranges::sort(hashes);
+    auto stream = motif::db::opening_tree_child_count_stream {
+        [hashes](motif::db::opening_tree_child_count_visitor const& visitor) -> motif::db::result<void>
+        {
+            for (auto const hash : hashes) {
+                if (auto result = visitor(hash, 1U); !result) {
+                    return result;
+                }
+            }
+            return {};
+        }};
+    auto const options = motif::db::opening_tree_index::build_options {
+        .max_root_ply = 20U,
+        .spill_threshold = motif::db::opening_tree_index_default_spill_threshold,
+        .child_frequency_memory_limit_bytes = 0U,
+    };
+    auto metrics = motif::db::opening_tree_index_build_metrics {};
+    auto const built =
+        motif::db::opening_tree_index::build(manager->store(), tdir.path / "disk-fallback.idx", options, &metrics, std::move(stream));
+    REQUIRE(built.has_value());
+    CHECK(metrics.child_counts_external);
+    CHECK(metrics.child_frequency_lookup_count > 0U);
+    CHECK(metrics.child_frequency_loaded_count == 0U);
+}
+
+TEST_CASE("opening_tree_index_builder latches an accumulate failure", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"latched-accumulate-failure"};
+    auto const index_path = tdir.path / "missing" / "opening_tree.idx";
+    auto const options = motif::db::opening_tree_index::build_options {.max_root_ply = 20U, .spill_threshold = 1U};
+    auto builder = motif::db::opening_tree_index_builder {index_path, options};
+    auto const game = motif::db::replay_game_record {
+        .id = motif::db::game_id {1U},
+        .result = "1-0",
+        .white_elo = 2200,
+        .black_elo = 2100,
+        .moves = encode_moves({"e4"}),
+    };
+
+    auto const first = builder.accumulate(game);
+    REQUIRE_FALSE(first.has_value());
+    auto const second = builder.accumulate(game);
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error() == first.error().code);
+    auto const finalized = builder.finalize();
+    REQUIRE_FALSE(finalized.has_value());
+    CHECK(finalized.error() == first.error().code);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate the reported complexity of test bodies.
+TEST_CASE("opening_tree_index marks the starting position complete and aggregates edges taken after max_root_ply",
+          "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"full-coverage-start"};
+
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+
+    // Six repetitions of a fully-reversible knight shuffle (24 plies) return
+    // to the exact starting position, then "e4" is played as the 25th
+    // half-move -- root_ply 24, past the default max_root_ply of 20. A
+    // build that still caps the starting position's edges at max_root_ply
+    // would never see this "e4" edge.
+    auto const shuffle_and_break_out =
+        make_game({.sans = {"Nf3", "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8", "Nf3",
+                            "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8", "e4"},
+                   .result = "1-0",
+                   .white_elo = 2200,
+                   .black_elo = 2100});
+    REQUIRE(manager->store().insert(shuffle_and_break_out).has_value());
+
+    // A second, ordinary game reaching H = 1.Nf3 at root_ply 0, so the
+    // starting position also has a normal shallow edge to compare against.
+    REQUIRE(manager->store().insert(make_game({.sans = {"Nf3"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+
+    // Sanity: the shuffle really does return to the start position after 24
+    // plies, so the "e4" move played next really is root_ply 24. If this
+    // fails, the test's premise is broken, not the code under test.
+    REQUIRE(hash_after_sans({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8",
+                             "Nf3", "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8", "Nf3", "Nc6", "Ng1", "Nb8"})
+            == hash_after_sans({}));
+
+    auto const index_path = tdir.path / "opening_tree.idx";
+    REQUIRE(motif::db::opening_tree_index::build(manager->store(), index_path).has_value());
+    auto opened = motif::db::opening_tree_index::open(index_path);
+    REQUIRE(opened.has_value());
+
+    auto const start_hash = hash_after_sans({});
+    auto const deep_hash = hash_after_sans({"Nf3"});
+
+    CHECK(opened->is_complete(start_hash));
+    // A node other than the canonical starting position must not be marked
+    // complete -- only the starting position gets full-depth aggregation.
+    CHECK_FALSE(opened->is_complete(deep_hash));
+
+    REQUIRE(opened->game_count(start_hash).has_value());
+    CHECK(*opened->game_count(start_hash) == 2);
+
+    auto stats = opened->query_opening_stats(start_hash);
+    REQUIRE(stats.has_value());
+    REQUIRE(stats->size() == 2);
+
+    auto const e4_hash = hash_after_sans({"e4"});
+    auto const e4_it = std::ranges::find(*stats, e4_hash, &motif::db::opening_stat_agg_row::cont_hash);
+    REQUIRE(e4_it != stats->end());
+    CHECK(e4_it->root_ply == 24);
+    CHECK(e4_it->frequency == 1);
+
+    check_stats_for_hash(*opened,
+                         start_hash,
+                         {{.cont_encoded_move = encode_moves({"Nf3"}).back(),
+                           .cont_hash = deep_hash,
+                           .root_ply = 0,
+                           .frequency = 2,
+                           .transposition_frequency = 2,
+                           .white_wins = 1,
+                           .draws = 0,
+                           .black_wins = 1,
+                           .avg_white_elo = 2100.0,
+                           .avg_black_elo = 2000.0,
+                           .eco_sample_min = motif::db::game_id {1},
+                           .eco_sample_max = motif::db::game_id {2},
+                           .elo_weighted_score = 200.0 / 4100.0},
+                          {.cont_encoded_move = encode_moves({"e4"}).back(),
+                           .cont_hash = e4_hash,
+                           .root_ply = 24,
+                           .frequency = 1,
+                           .transposition_frequency = 1,
+                           .white_wins = 1,
+                           .draws = 0,
+                           .black_wins = 0,
+                           .avg_white_elo = 2200.0,
+                           .avg_black_elo = 2100.0,
+                           .eco_sample_min = motif::db::game_id {1},
+                           .eco_sample_max = motif::db::game_id {1},
+                           .elo_weighted_score = 1.0}});
+}
+
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 namespace
 {
@@ -364,7 +781,7 @@ void write_u64_le(std::ofstream& out, std::uint64_t const value)
     }
 }
 
-constexpr auto test_format_version = std::uint32_t {3};
+constexpr auto test_format_version = std::uint32_t {5};
 constexpr auto test_max_root_ply = std::uint16_t {20};
 constexpr auto arbitrary_hash_a = std::uint64_t {0xAAAAAAAAAAAAAAAAULL};
 constexpr auto arbitrary_hash_b = std::uint64_t {0xBBBBBBBBBBBBBBBBULL};
@@ -387,6 +804,7 @@ TEST_CASE("opening_tree_index::open rejects a corrupt node_count instead of thro
         out << "MOTIFOT1";  // magic
         write_u32_le(out, test_format_version);
         write_u16_le(out, test_max_root_ply);
+        write_u64_le(out, 1);  // source_game_count
         // node_count: an absurd value that would previously be handed
         // straight to vector::reserve() before any node bytes are read.
         write_u64_le(out, std::numeric_limits<std::uint64_t>::max());
@@ -410,11 +828,13 @@ TEST_CASE("opening_tree_index::open rejects a malformed overflowing varint inste
         out << "MOTIFOT1";
         write_u32_le(out, test_format_version);
         write_u16_le(out, test_max_root_ply);
+        write_u64_le(out, 1);  // source_game_count
         write_u64_le(out, 1);  // node_count: one node
 
         write_u64_le(out, arbitrary_hash_a);  // node hash
         out.put(single_continuation_varint_byte);  // game_count varint: 1
         out.put(single_continuation_varint_byte);  // continuation_count varint: 1
+        out.put(static_cast<char>(0x00));  // complete varint: false
 
         write_u16_le(out, arbitrary_encoded_move);
         write_u64_le(out, arbitrary_hash_b);  // child_hash
@@ -433,4 +853,63 @@ TEST_CASE("opening_tree_index::open rejects a malformed overflowing varint inste
     auto opened = motif::db::opening_tree_index::open(index_path);
     REQUIRE_FALSE(opened.has_value());
     CHECK(opened.error() == motif::db::error_code::io_failure);
+}
+
+TEST_CASE("opening_tree_index::open rejects a complete flag on a non-starting node", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"invalid-complete-node"};
+    auto const index_path = tdir.path / "invalid-complete.idx";
+
+    {
+        std::ofstream out {index_path, std::ios::binary | std::ios::trunc};
+        REQUIRE(out.good());
+        out << "MOTIFOT1";
+        write_u32_le(out, test_format_version);
+        write_u16_le(out, test_max_root_ply);
+        write_u64_le(out, 1);  // source_game_count
+        write_u64_le(out, 1);  // node_count
+        write_u64_le(out, arbitrary_hash_a);
+        out.put(single_continuation_varint_byte);  // game_count: 1
+        out.put(static_cast<char>(0x00));  // continuation_count: 0
+        out.put(single_continuation_varint_byte);  // complete: true
+    }
+
+    auto opened = motif::db::opening_tree_index::open(index_path);
+    REQUIRE_FALSE(opened.has_value());
+    CHECK(opened.error() == motif::db::error_code::io_failure);
+}
+
+TEST_CASE("opening_tree_index::open rejects trailing bytes after a valid index", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"trailing-data"};
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2000, .black_elo = 1900})).has_value());
+
+    auto const index_path = tdir.path / "opening_tree.idx";
+    REQUIRE(motif::db::opening_tree_index::build(manager->store(), index_path).has_value());
+    {
+        std::ofstream output {index_path, std::ios::binary | std::ios::app};
+        REQUIRE(output.good());
+        output.put('\0');
+    }
+
+    auto const opened = motif::db::opening_tree_index::open(index_path);
+    REQUIRE_FALSE(opened.has_value());
+    CHECK(opened.error() == motif::db::error_code::io_failure);
+}
+
+TEST_CASE("opening_tree_index::build writes without continuation staging files", "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"continuation-staging"};
+    auto manager = motif::db::database_manager::create_scratch();
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->store()
+                .insert(make_game({.sans = {"e4", "e5", "Nf3"}, .result = "1-0", .white_elo = 2000, .black_elo = 1900}))
+                .has_value());
+
+    auto const index_path = tdir.path / "opening_tree.idx";
+    REQUIRE(motif::db::opening_tree_index::build(manager->store(), index_path).has_value());
+    CHECK(std::filesystem::exists(index_path));
+    CHECK_FALSE(std::filesystem::exists(index_path.string() + ".continuations.tmp"));
 }

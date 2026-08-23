@@ -17,7 +17,7 @@ add_executable(motif_db_test
     source/motif_db/schema_test.cpp
     source/motif_db/manifest_test.cpp
     source/motif_db/database_manager_test.cpp
-    source/motif_db/position_store_test.cpp
+    source/motif_db/position_postings_test.cpp
     source/motif_db/opening_tree_index_test.cpp
 )
 target_link_libraries(motif_db_test PRIVATE motif_db Catch2::Catch2WithMain)
@@ -41,7 +41,7 @@ add_executable(motif_import_test
     source/motif_import/replay_throughput_test.cpp
     source/motif_import/opening_tree_index_perf_test.cpp
 )
-target_link_libraries(motif_import_test PRIVATE motif_import Catch2::Catch2WithMain)
+target_link_libraries(motif_import_test PRIVATE motif_import motif_search Catch2::Catch2WithMain)
 target_compile_features(motif_import_test PRIVATE cxx_std_23)
 target_include_directories(motif_import_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
 target_compile_definitions(

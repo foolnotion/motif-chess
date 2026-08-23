@@ -104,6 +104,8 @@ constexpr int source_type = 8;
 constexpr int source_label = 9;
 constexpr int review_status = 10;
 constexpr int move_hash = 11;
+constexpr int white_elo = 12;
+constexpr int black_elo = 13;
 }  // namespace game_ins_param
 
 // Single atomic statement replacing the former SELECT-then-INSERT pair: the
@@ -116,13 +118,15 @@ constexpr int move_hash = 11;
 // language=sql
 constexpr auto insert_game_sql = R"sql(
     INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,
-                     source_type, source_label, review_status, move_hash, identity_collision)
+                     source_type, source_label, review_status, move_hash, identity_collision,
+                     white_elo, black_elo)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
            COALESCE((SELECT MAX(identity_collision) + 1 FROM game
                      WHERE white_id = ?1 AND black_id = ?2
                        AND COALESCE(event_id, -1) = COALESCE(?3, -1)
                        AND COALESCE(date, '') = COALESCE(?4, '')
-                       AND result = ?5 AND move_hash = ?11), 0)
+                       AND result = ?5 AND move_hash = ?11), 0),
+           ?12, ?13
     WHERE NOT EXISTS (
         SELECT 1 FROM game
         WHERE white_id = ?1 AND black_id = ?2
@@ -138,8 +142,9 @@ constexpr auto insert_game_sql = R"sql(
 // language=sql
 constexpr auto insert_game_raw_sql = R"sql(
     INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,
-                     source_type, source_label, review_status, move_hash, identity_collision)
-    VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)
+                     source_type, source_label, review_status, move_hash, identity_collision,
+                     white_elo, black_elo)
+    VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13)
 )sql";
 
 // Deletes exact duplicates among raw-inserted rows: same identity fields, move_hash, and
@@ -490,6 +495,8 @@ auto game_writer::impl::insert(game const& src_game) -> result<game_id>
                       static_cast<int>(src_game.provenance.review_status.size()),
                       SQLITE_TRANSIENT);
     sqlite3_bind_blob(*game_ins, game_ins_param::move_hash, &move_hash, static_cast<int>(sizeof(move_hash)), SQLITE_TRANSIENT);
+    bind_optional_int(*game_ins, game_ins_param::white_elo, src_game.white.elo);
+    bind_optional_int(*game_ins, game_ins_param::black_elo, src_game.black.elo);
 
     int const ins_rc = sqlite3_step(*game_ins);
     if (ins_rc != SQLITE_DONE) {
@@ -608,6 +615,8 @@ auto game_writer::impl::insert_raw(game const& src_game) -> result<game_id>
                       static_cast<int>(src_game.provenance.review_status.size()),
                       SQLITE_TRANSIENT);
     sqlite3_bind_blob(*game_ins, game_ins_param::move_hash, &move_hash, static_cast<int>(sizeof(move_hash)), SQLITE_TRANSIENT);
+    bind_optional_int(*game_ins, game_ins_param::white_elo, src_game.white.elo);
+    bind_optional_int(*game_ins, game_ins_param::black_elo, src_game.black.elo);
 
     if (sqlite3_step(*game_ins) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};

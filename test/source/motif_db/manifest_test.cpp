@@ -1,4 +1,6 @@
 #include <filesystem>
+#include <fstream>
+#include <optional>
 #include <string>
 
 #include "motif/db/manifest.hpp"
@@ -37,6 +39,9 @@ TEST_CASE("manifest: glaze round-trip preserves all fields", "[motif-db][manifes
         .schema_version = 1,
         .game_count = 42,
         .created_at = "2026-04-18T12:00:00Z",
+        .source_generation = 0,
+        .position_postings = std::nullopt,
+        .opening_tree_index = std::nullopt,
     };
 
     tmp_file const tmp {"roundtrip"};
@@ -78,6 +83,9 @@ TEST_CASE("manifest: round-trip with zero game_count and empty extra fields", "[
         .schema_version = 1,
         .game_count = 0,
         .created_at = "2026-01-01T00:00:00Z",
+        .source_generation = 0,
+        .position_postings = std::nullopt,
+        .opening_tree_index = std::nullopt,
     };
 
     tmp_file const tmp {"zeros"};
@@ -93,4 +101,20 @@ TEST_CASE("manifest: round-trip with zero game_count and empty extra fields", "[
     CHECK(loaded.schema_version == original.schema_version);
     CHECK(loaded.game_count == original.game_count);
     CHECK(loaded.created_at == original.created_at);
+}
+
+TEST_CASE("manifest: rejects derived artifact paths outside the bundle", "[motif-db][manifest]")
+{
+    tmp_file const tmp {"path-traversal"};
+    std::ofstream output {tmp.path};
+    REQUIRE(output.is_open());
+    output << R"json({"name":"bad","schema_version":5,"game_count":1,"created_at":"2026-01-01T00:00:00Z",
+              "position_index_dirty":false,"source_generation":1,"derived_index_build_seq":1,
+              "position_postings":{"filename":"../victim","source_generation":1,"game_count":1,"file_size":1,"checksum":1},
+              "opening_tree_index":null})json";
+    output.close();
+
+    auto const manifest = motif::db::read_manifest(tmp.path);
+    REQUIRE_FALSE(manifest.has_value());
+    CHECK(manifest.error() == motif::db::error_code::schema_mismatch);
 }
