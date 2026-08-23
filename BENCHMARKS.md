@@ -260,3 +260,234 @@ The compact index is still a prototype replacement only for unfiltered,
 shallow opening-explorer queries. DuckDB remains required for position search,
 filtered explorer queries, Elo distributions, and full-depth traversal. The
 index build is intentionally not wired into the normal import path.
+
+---
+
+## 2026-08-22 — Compact Position Postings and Opening Explorer
+
+**Machine:** Linux, 32-core, Clang 21, `build/perf-release`. Corpus:
+`bench/data/twic-1m.pgn`. The DuckDB, postings, and postings-plus-tree imports
+ran serially in one process. Results are one detailed run after three earlier
+postings-format validation runs established a 67.409-67.962 s range.
+
+### Total Import
+
+| Path | Attempted | Committed | Total | Peak RSS | Derived artifacts |
+|---|---:|---:|---:|---:|---:|
+| SQLite + DuckDB | 1,001,090 | 991,278 | 60,116 ms | 9,475 MiB | 2,039 MiB DuckDB |
+| SQLite + exact postings | 1,001,090 | 991,278 | 68,323 ms | 1,238 MiB | 1,206 MiB postings |
+| SQLite + postings + shallow tree | 1,001,090 | 991,278 | 126,282 ms | 1,452 MiB | 1,206 MiB postings + 242 MiB tree |
+
+The exact-postings path is the current DuckDB-free position-query import. The
+tree remains opt-in, so 68.323 s is the current default derived-index total when
+DuckDB rebuilding is disabled. Building both indexes adds 57.959 s.
+
+### Import Components
+
+| Path | Ingest | Dedup | Derived wall | Accounted builder phases | Validation/publication and other remainder |
+|---|---:|---:|---:|---:|---:|
+| DuckDB | 14,650 ms | 8,953 ms | 35,261 ms | replay 18,000 + sort 8,886 + rollup 8,375 ms | 1,250 ms |
+| Exact postings | 14,590 ms | 8,976 ms | 44,755 ms | 38,369 ms | 6,386 ms |
+| Postings + tree | 14,478 ms | 8,882 ms | 102,921 ms | postings 38,369 + tree 60,356 ms | 4,196 ms |
+
+Builder-local postings phases were 12,070 ms replay, 6,796 ms spill, 16,980 ms
+merge, 76 ms metadata write, 345 ms directory write, and 2,102 ms final write.
+The build indexed 88,221,427 occurrences across 68,907,007 hashes in 85 spill
+runs. The output comprised 420,327,977 posting bytes, 9,912,780 metadata bytes,
+828,439,768 compressed-directory bytes, and 5,921,696 sparse-directory bytes.
+
+Builder-local tree phases were 22,947 ms replay, 916 ms root merge, 6,150 ms
+edge merge, 11,978 ms child-frequency merge, about 6,264 ms child-frequency
+loading, and 12,101 ms final index write.
+
+### Opening Explorer
+
+The raw immutable tree reader sampled 41,822 positions through ply 20:
+
+| API | Queries | Mean | p50 | p99 | Max |
+|---|---:|---:|---:|---:|---:|
+| `opening_tree_index::query_opening_stats` | 41,822 | 5.36 us | 4.77 us | 10.50 us | 37.78 us |
+
+The public `opening_stats::query` API sampled 512 unique non-starting shallow
+positions twice:
+
+| Pass | Mean | p50 | p99 | Max |
+|---|---:|---:|---:|---:|
+| First | 1,209.25 us | 963.95 us | 3,021.06 us | 85,460.71 us |
+| Warm | 1,193.23 us | 937.89 us | 3,039.12 us | 84,501.05 us |
+
+The starting-position public query took 3,233.676 ms on the first call and
+3,191.127 ms warm p50. This is not tree-reader latency. The public API first
+calls `position_game_ids()` to determine `total_games`, which decodes the
+starting position's approximately one-million-game posting block before using
+the shallow aggregate. Repeated calls remain equally slow because this path has
+no result cache. The next explorer optimization should use the postings
+directory's `distinct_game_count` summary for unfiltered `total_games`, avoiding
+posting-block decode entirely.
+
+### Complete Starting-Position Root Follow-up
+
+The summary-count change removed one redundant posting decode but did not fix
+the starting position: repetitions can return to that position after ply 20,
+so the manager correctly rejected the shallow aggregate and used full replay.
+Opening-tree format v5 now marks the starting node complete and aggregates its
+edges at every ply. Two serialized 1M Release runs measured:
+
+| Metric | Run 1 | Run 2 |
+|---|---:|---:|
+| Starting position first | 1.066 ms | 1.084 ms |
+| Starting position warm p50 | 0.898 ms | 0.926 ms |
+| Non-starting warm p50 | 0.881 ms | 0.888 ms |
+| Non-starting warm p99 | 1.439 ms | 1.430 ms |
+| Postings + tree total import | 128.421 s | 128.276 s |
+| Tree builder-local time | 61.847 s | 61.716 s |
+| Tree artifact | 246 MiB | 246 MiB |
+
+Compared with the preceding 3.1-3.2 second starting-position measurements, the
+complete root improves warm latency by roughly 3,400x. The tree costs about 4
+MiB more storage and approximately one additional second of builder-local work.
+
+### Follow-up — Unfiltered `total_games` via postings summary
+
+`opening_stats::query`'s unfiltered path now calls `database_manager::position_summary()`
+first and uses its `distinct_game_count` for `total_games` whenever a valid,
+non-stale postings generation covers the queried hash; it decodes the hash's
+posting block only through the pre-existing fallback (`position_game_ids()`),
+which still runs when postings are absent, stale, or do not index the hash.
+This removes the full posting-block decode from the previously measured
+3.2 s starting-position path in `source/motif/search/opening_stats.cpp`. The
+1M-corpus benchmark above was not re-run to produce a new number for this
+entry; correctness and dispatch are covered by
+`test/source/motif_search/opening_stats_test.cpp` (`[postings]` tag) and the
+existing `database_manager::position_summary` valid/stale/absent coverage in
+`test/source/motif_db/position_postings_test.cpp`.
+
+### Follow-up — Reuse postings counts during tree construction
+
+The manager-backed tree build now consumes the postings index's sorted
+`distinct_game_count` summary stream for child transposition frequencies. It
+does not construct the tree's independent full-depth visit counter; standalone
+tree builds retain that path as an oracle. Two serialized 1M Release runs
+measured:
+
+| Metric | Previous | Run 1 | Run 2 |
+|---|---:|---:|---:|
+| Postings + tree import | 128.276-128.421 s | 109.225 s | 109.060 s |
+| Tree accounted phases | about 55.5 s corrected baseline | 37.035 s | 37.242 s |
+| Tree replay | about 23.0 s | 11.590 s | 11.747 s |
+| Child count materialize/load | about 18.2 s merge + load | 6.396 s | 6.352 s |
+| Child spill runs | 84 | 0 | 0 |
+| Tree artifact | 246 MiB | 246 MiB | 246 MiB |
+| Process peak RSS | 1,452 MiB detailed baseline | 1,427 MiB | 1,514 MiB |
+
+The tree's accounted phases improve by about 33%; full postings-plus-tree
+import is about 15% faster. The corrected phase totals subtract child-frequency
+loading from the old `index_write_elapsed`, which previously included and
+therefore double-counted that work. Raw and public query latency remained
+within the preceding range. The counts are semantically identical: postings
+group occurrences by game and hash, while the standalone tree counter
+deduplicates each hash once per game. Build-time validation rejects missing
+counts and counts below a direct edge's distinct-game frequency.
+
+### Follow-up — Buffered final tree encoding
+
+The final tree encoder now accumulates fixed-width and varint bytes into a 64
+KiB block before writing. The binary format and reader are unchanged. Three
+serialized 1M Release runs measured a combined load-plus-write phase of
+10.981-11.081 seconds. With corrected non-overlapping metrics, the detailed run
+reported 6.282 seconds loading child frequencies and 4.799 seconds encoding and
+writing the tree. The preceding unbuffered runs imply 5.692-5.745 seconds of
+serialization after subtracting their 6.352-6.396 second loads, so buffering
+improves the targeted phase by about 16%.
+
+The complete corrected tree phase total was 36.390 seconds, versus
+37.035-37.242 seconds before buffering. End-to-end postings-plus-tree import
+was 108.591-108.860 seconds, compared with 109.060-109.225 seconds before; this
+small total improvement is close to run variance. Artifact size remained 246
+MiB and query latency remained in the preceding range. `index_write_elapsed`
+remains inclusive of child lookup/loading so it has the same meaning in the
+preload and low-memory binary-search paths; serialization is derived only for
+the preload benchmark by subtracting `child_frequency_load_elapsed`.
+
+### Follow-up — Per-game tree scratch reuse
+
+The tree builder now retains per-game edge/root hash-container capacity across
+games. Two initial serialized 1M runs measured replay at 10.929-11.074 seconds,
+down from the buffered-writer baseline of 11.836-11.942 seconds (6.5-8.5%).
+Later runs alongside directory instrumentation measured 11.003-11.218 seconds.
+The builder also latches an accumulation failure so partial spill/counter state
+cannot be reused or finalized.
+
+### Follow-up — Position-postings directory v6
+
+Exact v5 instrumentation attributed the 828,439,768-byte directory to:
+
+| Field | Bytes |
+|---|---:|
+| Hash deltas | 403,486,860 |
+| Posting-offset deltas | 68,697,012 |
+| Posting lengths | 68,966,408 |
+| Occurrence counts | 68,919,729 |
+| Distinct-game counts | 68,919,693 |
+| Minimum plies | 72,266,086 |
+| Maximum plies | 72,338,956 |
+
+Format v6 removes the derivable offset deltas, stores 40-bit hash-delta lows
+with sparse high-part exceptions, and omits occurrence counts when they equal
+distinct-game counts. Three serialized 1M runs produced the same exact section
+sizes:
+
+| Metric | v5 | v6 | Change |
+|---|---:|---:|---:|
+| Directory | 828,439,768 B | 649,481,128 B | -21.6% |
+| Full postings artifact | 1,206 MiB | 1,035 MiB | -14.2% |
+| Peak temporary estimate | 2,368 MiB | 2,198 MiB | -170 MiB |
+| Postings-only import | about 68-70 s | 67.614-68.346 s | modest improvement |
+| Postings + tree import | about 108.6-109.9 s | 107.028-107.471 s | modest improvement |
+
+The v6 directory contains 4,845,024 bytes of block headers, 17,226,752 bytes
+of bitmaps, 344,317,077 bytes of hash encoding, 68,966,408 bytes of posting
+lengths, 601,132 bytes of occurrence exceptions, 68,919,693 bytes of
+distinct-game counts, and 144,605,042 bytes of ply bounds. Query semantics,
+one-block directory lookup, sorted summary streaming, the 420,327,977-byte
+posting payload, and the 9,912,780-byte game-metadata section are unchanged.
+
+### Follow-up - Exact postings as the import default
+
+The production inventory confirmed that exact and filtered position search,
+opening statistics, Elo distributions, and deep bounded traversal can all use
+the published postings generation. Stale or absent postings fail closed unless
+the DuckDB table is known to be synchronized, while explicit DuckDB builds and
+existing DuckDB-only bundles retain their fallback behavior.
+
+`import_config {}` now builds exact postings without first rebuilding DuckDB.
+
+Three isolated fresh-process Release runs on `bench/data/twic-1m.pgn` measured:
+
+| Run | Attempted | Committed | Ingest | DuckDB replay/sort/rollup | Total | Attempted throughput |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 1,001,090 | 991,278 | 14.566 s | 0 / 0 / 0 ms | 81.359 s | 12,305 games/s |
+| 2 | 1,001,090 | 991,278 | 14.632 s | 0 / 0 / 0 ms | 81.520 s | 12,280 games/s |
+| 3 | 1,001,090 | 991,278 | 14.635 s | 0 / 0 / 0 ms | 81.728 s | 12,249 games/s |
+
+The isolated median is 81.520 seconds, 20.6% faster than the old literal
+default's 102.734 seconds. A same-session serialized comparison measured DuckDB
+at 59.847 seconds, postings at 66.959 seconds with 1,110 MiB peak RSS, and
+postings plus the opening tree at 105.280 seconds. Its postings builder spent
+12.174 seconds replaying, 6.882 seconds spilling, 16.857 seconds merging, and
+2.105 seconds in metadata, directory, and final writes; the derived-path
+remainder was 5.343 seconds.
+
+The 14.561-second gap between the isolated median and the comparison's postings
+case is larger than normal variance and appears sensitive to process context or
+run order. It is not yet attributed. Use the isolated median as the production
+default result; use the comparison only for contemporaneous path and peak-RSS
+comparisons.
+
+### Release-boundary dependency removal
+
+DuckDB was subsequently removed from source, CMake, Nix, and vcpkg. The change
+does not alter the postings format or the measurements above. Legacy bundles
+without valid postings rebuild them from canonical SQLite and leave any old
+`positions.duckdb` file untouched. Scratch and oracle tests now exercise the
+same SQLite-plus-postings architecture as persistent bundles.
