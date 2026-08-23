@@ -4,8 +4,8 @@ Read `CONVENTIONS.md` (project root) before writing any code. It covers:
 
 - **Upstream ownership** — chess libs and foolnotion overlay belong to Bogdan; surface packaging
   problems, never work around them with CMake hacks.
-- **DuckDB C API only** — `<duckdb.h>` exclusively; the C++ API (`duckdb::DuckDB`, `duckdb::Connection`)
-  is incompatible with Clang 21 and banned.
+- **No DuckDB dependency** — SQLite is canonical; position queries use immutable postings and
+  opening-tree sidecars.
 - **`game_store::insert` duplicate policy** — always returns `error_code::duplicate` on conflict;
   callers skip-and-log, never treat as fatal.
 - **Naming** — `lower_snake_case` everywhere; no `k_` prefix; `CamelCase` for template params only.
