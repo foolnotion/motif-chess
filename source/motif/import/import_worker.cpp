@@ -17,7 +17,6 @@
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
-#include "motif/db/position_store.hpp"
 #include "motif/db/types.hpp"
 #include "motif/import/error.hpp"
 #include "motif/import/pgn_helpers.hpp"
@@ -102,6 +101,7 @@ import_worker::import_worker(motif::db::database_manager& database) noexcept
 
 auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
 {
+    auto const generation_lock = db_.lock_generation();
     if (pgn_game.moves.empty()) {
         return tl::unexpected {error_code::empty_game};
     }
@@ -112,28 +112,11 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
 
     auto db_game = extract_game(pgn_game);
 
-    auto const& tags = pgn_game.tags;
-    auto const white_elo = parse_elo(find_tag(tags, "WhiteElo"));
-    auto const black_elo = parse_elo(find_tag(tags, "BlackElo"));
-    auto const result_int = pgn_result_to_int8(pgn_game.result);
-
     // Process all moves before any DB write — any SAN failure aborts entire
     // game
     auto board = motif::chess::board {};
     std::vector<std::uint16_t> encoded_moves;
-    std::vector<motif::db::position_row> position_rows;
     encoded_moves.reserve(pgn_game.moves.size());
-    position_rows.reserve(pgn_game.moves.size() + 1);
-
-    // Starting position row (ply = 0) so root-hash queries find data
-    position_rows.push_back(motif::db::position_row {
-        .zobrist_hash = motif::db::zobrist_hash {board.hash()},
-        .game_id = motif::db::game_id {},
-        .ply = 0,
-        .result = result_int,
-        .white_elo = white_elo,
-        .black_elo = black_elo,
-    });
 
     for (auto const& node : pgn_game.moves) {
         auto move_res = motif::chess::apply_san(board, node.san);
@@ -141,19 +124,13 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
             return tl::unexpected {error_code::parse_error};
         }
         encoded_moves.push_back(*move_res);
-
-        position_rows.push_back(motif::db::position_row {
-            .zobrist_hash = motif::db::zobrist_hash {board.hash()},
-            .game_id = motif::db::game_id {},
-            .ply = static_cast<std::uint16_t>(encoded_moves.size()),
-            .encoded_move = *move_res,
-            .result = result_int,
-            .white_elo = white_elo,
-            .black_elo = black_elo,
-        });
     }
 
     db_game.moves = std::move(encoded_moves);
+
+    if (auto stale_res = db_.prepare_canonical_mutation(); !stale_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
 
     // Insert into SQLite game store
     auto insert_res = db_.writer().insert(db_game);
@@ -165,20 +142,9 @@ auto import_worker::process(pgn::game const& pgn_game) -> result<process_result>
     }
     auto const game_id = *insert_res;
 
-    for (auto& row : position_rows) {
-        row.game_id = game_id;
-    }
-
-    if (!position_rows.empty()) {
-        auto batch_res = db_.positions().insert_batch(position_rows);
-        if (!batch_res) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
-
     return process_result {
         .game_id = game_id,
-        .positions_inserted = position_rows.size(),
+        .positions_inserted = db_game.moves.size() + 1,
     };
 }
 

@@ -16,7 +16,14 @@ namespace motif::db::schema
 // v3 → v4: replaced moves_hash with a collision-safe move_hash + identity_collision
 // pair (see schema.cpp's migrate() for why v3-or-earlier bundles aren't migrated
 // in place).
-inline constexpr std::uint32_t current_version = 4;
+// v4 → v5: added white_elo/black_elo columns to game, holding the rating each
+// side actually had in that specific game. Previously elo lived only on the
+// shared player row keyed by name, so patching one game's elo (or importing a
+// second game for a name already in the DB) silently left every other game
+// for that name unaffected/unupdated -- elo is per-game data, not a player
+// attribute. Bundles below v5 have no per-game elo to backfill and must be
+// rebuilt by reimporting (see migrate() below).
+inline constexpr std::uint32_t current_version = 5;
 
 // Create all tables, indexes, and set WAL mode, foreign_keys ON, and
 // PRAGMA user_version. Idempotent: uses CREATE TABLE IF NOT EXISTS throughout;

@@ -60,8 +60,8 @@ auto reset_stmt(sqlite3_stmt* stmt) noexcept -> void
 }
 
 // Column positions in the JOIN query used by get():
-//   w.name, w.elo, w.title, w.country,             (0-3)
-//   b.name, b.elo, b.title, b.country,             (4-7)
+//   w.name, g.white_elo, w.title, w.country,       (0-3)
+//   b.name, g.black_elo, b.title, b.country,       (4-7)
 //   e.name, e.site, e.date,                        (8-10)
 //   g.date, g.result, g.eco, g.moves,              (11-14)
 //   g.source_type, g.source_label, g.review_status (15-17)
@@ -439,7 +439,9 @@ auto game_store::create_schema() -> result<void>
             identity_collision INTEGER NOT NULL DEFAULT 0,
             source_type   TEXT NOT NULL DEFAULT 'imported',
             source_label  TEXT,
-            review_status TEXT NOT NULL DEFAULT 'new'
+            review_status TEXT NOT NULL DEFAULT 'new',
+            white_elo     INTEGER,
+            black_elo     INTEGER
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS game_identity_lookup ON game(
@@ -611,8 +613,8 @@ auto game_store::get(game_id const game_key) const -> result<game>
     // language=sql
     static constexpr char const* sql = R"sql(
         SELECT
-            w.name, w.elo, w.title, w.country,
-            b.name, b.elo, b.title, b.country,
+            w.name, g.white_elo, w.title, w.country,
+            b.name, g.black_elo, b.title, b.country,
             e.name, e.site, e.date,
             g.date, g.result, g.eco, g.moves,
             g.source_type, g.source_label, g.review_status
@@ -829,10 +831,8 @@ auto game_store::for_each_replay_game(std::function<result<void>(replay_game_rec
 {
     // language=sql
     constexpr auto replay_games_sql = R"sql(
-        SELECT g.id, g.result, w.elo, b.elo, g.moves
+        SELECT g.id, g.result, g.white_elo, g.black_elo, g.moves
         FROM game AS g
-        JOIN player AS w ON w.id = g.white_id
-        JOIN player AS b ON b.id = g.black_id
         ORDER BY g.id
     )sql";
     auto stmt = prepare(db_, replay_games_sql);
@@ -908,8 +908,8 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
                      END))
           AND (? IS NULL OR g.result = ?)
           AND (? IS NULL OR g.eco LIKE ? || '%')
-          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
-          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+          AND (? IS NULL OR (g.white_elo >= ? AND g.black_elo >= ?))
+          AND (? IS NULL OR (g.white_elo <= ? AND g.black_elo <= ?))
     )sql";
 
     auto count_stmt = prepare(db_, count_sql);
@@ -943,8 +943,8 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
             COALESCE(g.source_type, 'imported'),
             g.source_label,
             COALESCE(g.review_status, 'new'),
-            w.elo,
-            b.elo
+            g.white_elo,
+            g.black_elo
         FROM game g
         JOIN player w ON w.id = g.white_id
         JOIN player b ON b.id = g.black_id
@@ -958,8 +958,8 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
                      END))
           AND (? IS NULL OR g.result = ?)
           AND (? IS NULL OR g.eco LIKE ? || '%')
-          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
-          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+          AND (? IS NULL OR (g.white_elo >= ? AND g.black_elo >= ?))
+          AND (? IS NULL OR (g.white_elo <= ? AND g.black_elo <= ?))
         ORDER BY g.id ASC
         LIMIT ? OFFSET ?
     )sql";
@@ -1035,8 +1035,8 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
                      END))
           AND (? IS NULL OR g.result = ?)
           AND (? IS NULL OR g.eco LIKE ? || '%')
-          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
-          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+          AND (? IS NULL OR (g.white_elo >= ? AND g.black_elo >= ?))
+          AND (? IS NULL OR (g.white_elo <= ? AND g.black_elo <= ?))
     )sql";
 
     auto count_stmt = prepare(db_, count_sql);
@@ -1070,8 +1070,8 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
             COALESCE(g.source_type, 'imported'),
             g.source_label,
             COALESCE(g.review_status, 'new'),
-            w.elo,
-            b.elo
+            g.white_elo,
+            g.black_elo
         FROM game g
         JOIN _position_game_ids pgi ON pgi.id = g.id
         JOIN player w ON w.id = g.white_id
@@ -1086,8 +1086,8 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
                      END))
           AND (? IS NULL OR g.result = ?)
           AND (? IS NULL OR g.eco LIKE ? || '%')
-          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
-          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+          AND (? IS NULL OR (g.white_elo >= ? AND g.black_elo >= ?))
+          AND (? IS NULL OR (g.white_elo <= ? AND g.black_elo <= ?))
         ORDER BY g.id ASC
         LIMIT ? OFFSET ?
     )sql";
@@ -1153,8 +1153,8 @@ auto game_store::find_game_ids_with_filter(std::vector<game_id> const& game_ids,
                      END))
           AND (? IS NULL OR g.result = ?)
           AND (? IS NULL OR g.eco LIKE ? || '%')
-          AND (? IS NULL OR (w.elo >= ? AND b.elo >= ?))
-          AND (? IS NULL OR (w.elo <= ? AND b.elo <= ?))
+          AND (? IS NULL OR (g.white_elo >= ? AND g.black_elo >= ?))
+          AND (? IS NULL OR (g.white_elo <= ? AND g.black_elo <= ?))
         ORDER BY g.id ASC
     )sql";
 
@@ -1246,37 +1246,57 @@ auto game_store::update_text_field(game_id const game_key, std::string_view colu
     return {};
 }
 
-// Update player rows via find-or-insert/repoint semantics to avoid
-// mutating shared player rows used by other games.
+// Elo is stored per-game (game.white_elo/black_elo), not on the shared
+// player row, so patching it is a plain UPDATE on this game's own row --
+// no risk of mutating another game's rating for the same player name.
+// name_patch is a separate concern: it repoints white_id/black_id to a
+// find-or-inserted player row via find_or_insert_player(), leaving every
+// other game's player reference untouched (player.name is UNIQUE, so a
+// renamed player either reuses an existing row with that name or gets a
+// fresh one).
+// NOLINTBEGIN(bugprone-easily-swappable-parameters) -- id_col and elo_col identify the paired columns for one side.
 auto game_store::patch_player(game_id const game_key,
                               std::string_view id_col,
+                              std::string_view elo_col,
                               player const& current,
                               std::optional<std::string> const& name_patch,
                               std::optional<std::int32_t> const& elo_patch) -> result<void>
 {
-    auto updated = current;
-    if (name_patch) {
-        updated.name = *name_patch;
-    }
     if (elo_patch) {
-        updated.elo = elo_patch;
+        auto const sql = "UPDATE game SET " + std::string(elo_col) + " = ? WHERE id = ?";
+        auto upd = prepare(db_, sql.c_str());
+        if (!upd) {
+            return tl::unexpected {upd.error()};
+        }
+        sqlite3_bind_int(upd->get(), 1, *elo_patch);
+        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
+        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+            return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+        }
     }
-    auto id_res = find_or_insert_player(updated);
-    if (!id_res) {
-        return tl::unexpected {id_res.error()};
-    }
-    auto const sql = "UPDATE game SET " + std::string(id_col) + " = ? WHERE id = ?";
-    auto upd = prepare(db_, sql.c_str());
-    if (!upd) {
-        return tl::unexpected {upd.error()};
-    }
-    sqlite3_bind_int64(upd->get(), 1, *id_res);
-    sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
-    if (sqlite3_step(upd->get()) != SQLITE_DONE) {
-        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+
+    if (name_patch) {
+        auto updated = current;
+        updated.name = *name_patch;
+        auto id_res = find_or_insert_player(updated);
+        if (!id_res) {
+            return tl::unexpected {id_res.error()};
+        }
+        auto const sql = "UPDATE game SET " + std::string(id_col) + " = ? WHERE id = ?";
+        auto upd = prepare(db_, sql.c_str());
+        if (!upd) {
+            return tl::unexpected {upd.error()};
+        }
+        sqlite3_bind_int64(upd->get(), 1, *id_res);
+        sqlite3_bind_int64(upd->get(), 2, static_cast<std::int64_t>(game_key.value));
+        if (sqlite3_step(upd->get()) != SQLITE_DONE) {
+            return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+        }
     }
     return {};
 }
+
+// NOLINTEND(bugprone-easily-swappable-parameters)
 
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
 auto game_store::patch_event(game_id const game_key,
@@ -1362,12 +1382,12 @@ auto game_store::patch_metadata(game_id const game_key, game_patch const& patch)
             return tl::unexpected {cur.error()};
         }
         if (patch.white_name || patch.white_elo) {
-            if (auto res = patch_player(game_key, "white_id", cur->white, patch.white_name, patch.white_elo); !res) {
+            if (auto res = patch_player(game_key, "white_id", "white_elo", cur->white, patch.white_name, patch.white_elo); !res) {
                 return res;
             }
         }
         if (patch.black_name || patch.black_elo) {
-            if (auto res = patch_player(game_key, "black_id", cur->black, patch.black_name, patch.black_elo); !res) {
+            if (auto res = patch_player(game_key, "black_id", "black_elo", cur->black, patch.black_name, patch.black_elo); !res) {
                 return res;
             }
         }

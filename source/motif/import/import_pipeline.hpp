@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 
 #include "motif/db/database_manager.hpp"
 #include "motif/import/error.hpp"
@@ -30,8 +31,12 @@ struct import_config
 
     std::size_t num_workers {default_worker_count()};
     std::size_t num_lines {num_workers * default_lines_per_worker};
-    bool rebuild_positions_after_import {true};
-    bool sort_positions_by_zobrist_after_rebuild {true};
+    // Enabled by default because postings are the durable exact-position
+    // index.
+    bool build_position_postings_after_import {true};
+    // Disabled by default until the serialized large-corpus benchmark clears
+    // the import regression gate.
+    bool build_opening_tree_index_after_import {false};
     std::size_t batch_size {default_batch_size};
 };
 
@@ -45,14 +50,12 @@ struct import_summary
     // check) and removes exact duplicates in one pass afterward; included in
     // `skipped`.
     std::size_t duplicates_removed {};
-    // Includes PGN parsing, game writes, and inline position generation/writes.
+    // Includes PGN parsing and game writes.
     std::chrono::milliseconds ingest_elapsed {};
     // Nonzero only for a fresh import (see duplicates_removed).
     std::chrono::milliseconds dedup_elapsed {};
-    // Nonzero only when positions are rebuilt from the persisted game store.
-    std::chrono::milliseconds position_replay_elapsed {};
-    std::chrono::milliseconds sort_elapsed {};
-    std::chrono::milliseconds rollup_elapsed {};
+    std::optional<motif::db::position_postings_build_metrics> position_postings_metrics;
+    std::optional<motif::db::opening_tree_index_build_metrics> opening_tree_index_metrics;
     std::chrono::milliseconds elapsed {};
 };
 
@@ -61,7 +64,7 @@ enum class import_phase : std::uint8_t
     idle,  // before the pipeline starts
     ingesting,  // reading and inserting games into SQLite
     deduplicating,  // fresh imports only: removing exact duplicates from raw ingest
-    rebuilding,  // rebuilding and sorting the DuckDB position store
+    rebuilding,  // rebuilding derived position indexes
 };
 
 struct import_progress

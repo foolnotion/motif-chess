@@ -84,9 +84,9 @@ struct game_context
 };
 
 // One row per distinct continuation from a given position, with counts and
-// averages pre-aggregated in DuckDB. eco_sample_{min,max} are two candidate
-// game_ids for ECO attribution (the game with the lowest and highest id
-// among all games playing this continuation).
+// averages pre-aggregated from exact position postings. eco_sample_{min,max}
+// are two candidate game_ids for ECO attribution (the game with the lowest
+// and highest id among all games playing this continuation).
 struct opening_stat_agg_row
 {
     std::uint16_t cont_encoded_move {};

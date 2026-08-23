@@ -1,30 +1,44 @@
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "motif/db/database_manager.hpp"
 
-#include <duckdb.h>
-#include <gtl/meminfo.hpp>
-#include <spdlog/spdlog.h>
+#include <fmt/format.h>
 #include <sqlite3.h>
 #include <tl/expected.hpp>
+#ifdef _WIN32
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
+#else
+#    include <fcntl.h>
+#    include <unistd.h>
+#endif
 
 #include "motif/chess/chess.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/game_store.hpp"
 #include "motif/db/manifest.hpp"
-#include "motif/db/position_store.hpp"
+#include "motif/db/position_postings.hpp"
 #include "motif/db/schema.hpp"
 #include "motif/db/types.hpp"
 
@@ -36,7 +50,7 @@ namespace motif::db
 
 namespace
 {
-constexpr std::size_t rebuild_batch_rows = 50'000;
+constexpr std::size_t checksum_buffer_bytes = 65'536;
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto open_sqlite(std::filesystem::path const& db_path) -> result<sqlite3*>
@@ -49,18 +63,13 @@ auto open_sqlite(std::filesystem::path const& db_path) -> result<sqlite3*>
         }
         return tl::unexpected {error_code::io_failure};
     }
-    // synchronous=FULL: a commit is not durable until fsynced, which is what
-    // makes "checkpoint written after commit" a sound ordering under power
-    // loss. synchronous=NORMAL under WAL only fsyncs at checkpoint boundaries,
-    // so an import.checkpoint.json write (itself fsynced via rename-replace)
-    // could persist and be read back on the next resume() while the SQLite
-    // commit it describes was still only in the OS page cache and lost in a
-    // crash -- silently skipping games on resume. cache_size/mmap_size raise
-    // the working-set that can stay resident as games.db grows into the
-    // multi-GB range; wal_autocheckpoint raised from the 1000-page default
-    // reduces mid-import checkpoint stalls at the cost of a larger WAL file
-    // between checkpoints.
-    sqlite3_exec(conn, "PRAGMA synchronous = FULL;", nullptr, nullptr, nullptr);
+    // EXPERIMENT (not yet validated): bulk-import pragma tuning. synchronous=NORMAL
+    // is safe under WAL (a crash loses at most the last unfsynced commits, never
+    // corrupts the file); cache_size/mmap_size raise the working-set that can stay
+    // resident as games.db grows into the multi-GB range; wal_autocheckpoint raised
+    // from the 1000-page default reduces mid-import checkpoint stalls at the cost of
+    // a larger WAL file between checkpoints.
+    sqlite3_exec(conn, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
     sqlite3_exec(conn, "PRAGMA cache_size = -200000;", nullptr, nullptr, nullptr);
     sqlite3_exec(conn, "PRAGMA mmap_size = 30000000000;", nullptr, nullptr, nullptr);
     sqlite3_exec(conn, "PRAGMA wal_autocheckpoint = 10000;", nullptr, nullptr, nullptr);
@@ -99,16 +108,68 @@ auto path_exists(std::filesystem::path const& path) -> result<bool>
     return exists;
 }
 
-// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto map_result(std::string const& pgn_result) -> std::int8_t
+auto file_checksum(std::filesystem::path const& path) -> result<std::pair<std::uint64_t, std::uint64_t>>
 {
-    if (pgn_result == "1-0") {
-        return 1;
+    std::error_code fs_err;
+    auto const size = std::filesystem::file_size(path, fs_err);
+    if (fs_err) {
+        return tl::unexpected {error_code::io_failure};
     }
-    if (pgn_result == "0-1") {
-        return -1;
+    auto input = std::ifstream {path, std::ios::binary};
+    if (!input) {
+        return tl::unexpected {error_code::io_failure};
     }
-    return 0;
+    constexpr auto fnv_offset_basis = std::uint64_t {14695981039346656037ULL};
+    constexpr auto fnv_prime = std::uint64_t {1099511628211ULL};
+    auto checksum = fnv_offset_basis;
+    auto buffer = std::array<char, checksum_buffer_bytes> {};
+    while (input.read(buffer.data(), static_cast<std::streamsize>(buffer.size())) || input.gcount() > 0) {
+        for (auto const byte : std::span {buffer.data(), static_cast<std::size_t>(input.gcount())}) {
+            checksum ^= static_cast<unsigned char>(byte);
+            checksum *= fnv_prime;
+        }
+    }
+    if (!input.eof()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return std::pair {size, checksum};
+}
+
+auto artifact_matches_manifest(std::filesystem::path const& dir, derived_index_manifest_entry const& entry) -> bool
+{
+    auto const checksum = file_checksum(dir / entry.filename);
+    return checksum && checksum->first == entry.file_size && checksum->second == entry.checksum;
+}
+
+auto sync_file(std::filesystem::path const& path) -> result<void>
+{
+#ifdef _WIN32
+    auto const handle = CreateFileW(path.c_str(),
+                                    GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE || FlushFileBuffers(handle) == 0) {
+        if (handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+        return tl::unexpected {error_code::io_failure};
+    }
+    CloseHandle(handle);
+#else
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) -- POSIX open is required for fsync durability.
+    auto const file_descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (file_descriptor < 0 || ::fsync(file_descriptor) != 0) {
+        if (file_descriptor >= 0) {
+            ::close(file_descriptor);
+        }
+        return tl::unexpected {error_code::io_failure};
+    }
+    ::close(file_descriptor);
+#endif
+    return {};
 }
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
@@ -123,65 +184,255 @@ auto narrow_elo(std::optional<std::int32_t> const& elo) -> result<std::optional<
     return std::optional<std::int16_t> {static_cast<std::int16_t>(*elo)};
 }
 
-// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto build_position_rows(std::span<std::uint16_t const> const moves,
-                         motif::db::game_id const game_id,
-                         std::int8_t const result_code,
-                         std::optional<std::int32_t> const& white_elo,
-                         std::optional<std::int32_t> const& black_elo) -> result<std::vector<position_row>>
+struct elo_bucket_counts
 {
-    if (moves.empty()) {
-        return std::vector<position_row> {};
+    std::uint32_t white_wins {};
+    std::uint32_t draws {};
+    std::uint32_t black_wins {};
+    std::uint32_t game_count {};
+};
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- occurrence filtering and zero-fill preserve SQL aggregation semantics.
+auto postings_elo_distribution(game_store const& store,
+                               position_postings const& postings,
+                               zobrist_hash const hash,
+                               std::vector<game_id> allowed_game_ids,
+                               int const bucket_width) -> result<std::vector<elo_distribution_row>>
+{
+    auto matches = postings.occurrences(hash);
+    if (!matches) {
+        return tl::unexpected {matches.error()};
+    }
+    std::ranges::sort(allowed_game_ids);
+    auto game_ids = std::vector<game_id> {};
+    game_ids.reserve(matches->size());
+    for (auto const& match : *matches) {
+        if (allowed_game_ids.empty() || std::ranges::binary_search(allowed_game_ids, match.game_id)) {
+            game_ids.push_back(match.game_id);
+        }
+    }
+    std::ranges::sort(game_ids);
+    auto const unique_end = std::ranges::unique(game_ids);
+    game_ids.erase(unique_end.begin(), unique_end.end());
+    auto contexts = store.get_game_contexts(game_ids);
+    if (!contexts) {
+        return tl::unexpected {contexts.error()};
     }
 
-    if (moves.size() > std::numeric_limits<std::uint16_t>::max()) {
-        return tl::unexpected {error_code::io_failure};
+    auto buckets = std::map<std::pair<std::uint16_t, std::int32_t>, elo_bucket_counts> {};
+    auto seen = std::set<std::pair<game_id, std::uint16_t>> {};
+    for (auto const& match : *matches) {
+        if ((!allowed_game_ids.empty() && !std::ranges::binary_search(allowed_game_ids, match.game_id)) || !match.white_elo
+            || !match.black_elo)
+        {
+            continue;
+        }
+        auto const context = contexts->find(match.game_id);
+        if (context == contexts->end() || match.ply >= context->second.moves.size()) {
+            continue;
+        }
+        auto const encoded_move = context->second.moves[match.ply];
+        if (!seen.emplace(match.game_id, encoded_move).second) {
+            continue;
+        }
+        auto const average_elo = (static_cast<std::int32_t>(*match.white_elo) + static_cast<std::int32_t>(*match.black_elo)) / 2;
+        auto const bucket = (average_elo / bucket_width) * bucket_width;
+        auto& counts = buckets[{encoded_move, bucket}];
+        if (match.result > 0) {
+            ++counts.white_wins;
+        } else if (match.result < 0) {
+            ++counts.black_wins;
+        } else {
+            ++counts.draws;
+        }
+        ++counts.game_count;
     }
 
-    auto const narrowed_white_elo = narrow_elo(white_elo);
-    if (!narrowed_white_elo) {
-        return tl::unexpected {narrowed_white_elo.error()};
+    auto ranges = std::map<std::uint16_t, std::pair<std::int32_t, std::int32_t>> {};
+    for (auto const& [key, counts] : buckets) {
+        auto& range = ranges.try_emplace(key.first, key.second, key.second).first->second;
+        range.first = std::min(range.first, key.second);
+        range.second = std::max(range.second, key.second);
     }
-    auto const narrowed_black_elo = narrow_elo(black_elo);
-    if (!narrowed_black_elo) {
-        return tl::unexpected {narrowed_black_elo.error()};
+    auto rows = std::vector<elo_distribution_row> {};
+    for (auto const& [encoded_move, range] : ranges) {
+        for (auto bucket = range.first;; bucket += bucket_width) {
+            auto const bucket_entry = buckets.find({encoded_move, bucket});
+            auto const counts = bucket_entry == buckets.end() ? elo_bucket_counts {} : bucket_entry->second;
+            rows.push_back(elo_distribution_row {.encoded_move = encoded_move,
+                                                 .elo_bucket_floor = bucket,
+                                                 .white_wins = counts.white_wins,
+                                                 .draws = counts.draws,
+                                                 .black_wins = counts.black_wins,
+                                                 .game_count = counts.game_count});
+            if (bucket == range.second) {
+                break;
+            }
+        }
     }
-
-    auto board = motif::chess::board {};
-    std::vector<position_row> batch;
-    batch.reserve(moves.size() + 1);
-
-    // Starting position row (ply = 0) so root-hash queries find data
-    batch.push_back(position_row {
-        .zobrist_hash = motif::db::zobrist_hash {board.hash()},
-        .game_id = game_id,
-        .ply = 0,
-        .encoded_move = 0,
-        .result = result_code,
-        .white_elo = *narrowed_white_elo,
-        .black_elo = *narrowed_black_elo,
-    });
-
-    for (std::size_t i = 0; i < moves.size(); ++i) {
-        motif::chess::apply_encoded_move(board, moves[i]);
-        batch.push_back(position_row {
-            .zobrist_hash = motif::db::zobrist_hash {board.hash()},
-            .game_id = game_id,
-            .ply = static_cast<std::uint16_t>(i + 1),
-            .encoded_move = moves[i],
-            .result = result_code,
-            .white_elo = *narrowed_white_elo,
-            .black_elo = *narrowed_black_elo,
-        });
-    }
-
-    return batch;
+    return rows;
 }
+
+struct filtered_edge_aggregate
+{
+    std::uint16_t root_ply {};
+    std::uint32_t frequency {};
+    std::uint32_t white_wins {};
+    std::uint32_t draws {};
+    std::uint32_t black_wins {};
+    std::int64_t white_elo_sum {};
+    std::uint32_t white_elo_count {};
+    std::int64_t black_elo_sum {};
+    std::uint32_t black_elo_count {};
+    double weighted_contrib_sum {};
+    double elo_weight_sum {};
+    game_id eco_sample_min {};
+    game_id eco_sample_max {};
+};
+
+// NOLINTBEGIN(readability-function-cognitive-complexity) -- two replay passes preserve separate direct-edge and child-visit dedup domains.
+auto postings_filtered_opening_stats(game_store const& store,
+                                     position_postings const& postings,
+                                     zobrist_hash const root_hash,
+                                     std::vector<game_id> allowed_game_ids,
+                                     bool const global_child_frequency = false) -> result<std::vector<opening_stat_agg_row>>
+{
+    std::ranges::sort(allowed_game_ids);
+    auto occurrences = postings.occurrences(root_hash);
+    if (!occurrences) {
+        return tl::unexpected {occurrences.error()};
+    }
+    auto contexts = store.get_game_contexts(allowed_game_ids);
+    if (!contexts) {
+        return tl::unexpected {contexts.error()};
+    }
+
+    using edge_key = std::pair<std::uint16_t, zobrist_hash>;
+
+    struct direct_contribution
+    {
+        std::uint16_t root_ply {};
+        position_match match;
+    };
+
+    auto direct_contributions = std::map<std::tuple<game_id, std::uint16_t, zobrist_hash>, direct_contribution> {};
+    for (auto const& occurrence : *occurrences) {
+        if (!std::ranges::binary_search(allowed_game_ids, occurrence.game_id)) {
+            continue;
+        }
+        auto const context = contexts->find(occurrence.game_id);
+        if (context == contexts->end() || occurrence.ply >= context->second.moves.size()) {
+            continue;
+        }
+        auto child_board = motif::chess::replay(context->second.moves, static_cast<std::uint16_t>(occurrence.ply + 1U));
+        if (!child_board) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto const encoded_move = context->second.moves[occurrence.ply];
+        auto const child_hash = zobrist_hash {child_board->hash()};
+        auto const key = std::tuple {occurrence.game_id, encoded_move, child_hash};
+        auto [entry, inserted] =
+            direct_contributions.try_emplace(key, direct_contribution {.root_ply = occurrence.ply, .match = occurrence});
+        if (!inserted && occurrence.ply < entry->second.root_ply) {
+            entry->second = direct_contribution {.root_ply = occurrence.ply, .match = occurrence};
+        }
+    }
+
+    auto aggregates = std::map<edge_key, filtered_edge_aggregate> {};
+    auto child_hashes = std::set<zobrist_hash> {};
+    for (auto const& [key, contribution] : direct_contributions) {
+        auto const& [game_key, encoded_move, child_hash] = key;
+        auto const& occurrence = contribution.match;
+        auto& aggregate = aggregates[{encoded_move, child_hash}];
+        if (aggregate.frequency == 0U) {
+            aggregate.root_ply = contribution.root_ply;
+            aggregate.eco_sample_min = game_key;
+            aggregate.eco_sample_max = game_key;
+        }
+        aggregate.root_ply = std::min(aggregate.root_ply, contribution.root_ply);
+        aggregate.eco_sample_min = std::min(aggregate.eco_sample_min, game_key);
+        aggregate.eco_sample_max = std::max(aggregate.eco_sample_max, game_key);
+        if (occurrence.result > 0) {
+            ++aggregate.white_wins;
+        } else if (occurrence.result < 0) {
+            ++aggregate.black_wins;
+        } else {
+            ++aggregate.draws;
+        }
+        if (occurrence.white_elo) {
+            aggregate.white_elo_sum += *occurrence.white_elo;
+            ++aggregate.white_elo_count;
+        }
+        if (occurrence.black_elo) {
+            aggregate.black_elo_sum += *occurrence.black_elo;
+            ++aggregate.black_elo_count;
+        }
+        if (occurrence.white_elo && occurrence.black_elo) {
+            auto const average_elo = (static_cast<double>(*occurrence.white_elo) + static_cast<double>(*occurrence.black_elo)) / 2.0;
+            aggregate.weighted_contrib_sum += static_cast<double>(occurrence.result) * average_elo;
+            aggregate.elo_weight_sum += average_elo;
+        }
+        ++aggregate.frequency;
+        child_hashes.insert(child_hash);
+    }
+
+    auto child_game_counts = std::map<zobrist_hash, std::uint32_t> {};
+    if (global_child_frequency) {
+        for (auto const child_hash : child_hashes) {
+            auto summary = postings.summary(child_hash);
+            if (!summary) {
+                return tl::unexpected {summary.error()};
+            }
+            child_game_counts[child_hash] = summary->value_or(position_postings_summary {}).distinct_game_count;
+        }
+    } else {
+        for (auto const& [game_key, context] : *contexts) {
+            auto board = motif::chess::board {};
+            auto visited = std::set<zobrist_hash> {zobrist_hash {board.hash()}};
+            for (auto const encoded_move : context.moves) {
+                motif::chess::apply_encoded_move(board, encoded_move);
+                visited.insert(zobrist_hash {board.hash()});
+            }
+            for (auto const child_hash : child_hashes) {
+                if (visited.contains(child_hash)) {
+                    ++child_game_counts[child_hash];
+                }
+            }
+        }
+    }
+
+    auto rows = std::vector<opening_stat_agg_row> {};
+    rows.reserve(aggregates.size());
+    for (auto const& [key, aggregate] : aggregates) {
+        rows.push_back(
+            opening_stat_agg_row {.cont_encoded_move = key.first,
+                                  .cont_hash = key.second,
+                                  .root_ply = aggregate.root_ply,
+                                  .frequency = aggregate.frequency,
+                                  .transposition_frequency = child_game_counts[key.second],
+                                  .white_wins = aggregate.white_wins,
+                                  .draws = aggregate.draws,
+                                  .black_wins = aggregate.black_wins,
+                                  .avg_white_elo = aggregate.white_elo_count == 0U
+                                      ? std::optional<double> {}
+                                      : std::optional<double> {static_cast<double>(aggregate.white_elo_sum) / aggregate.white_elo_count},
+                                  .avg_black_elo = aggregate.black_elo_count == 0U
+                                      ? std::optional<double> {}
+                                      : std::optional<double> {static_cast<double>(aggregate.black_elo_sum) / aggregate.black_elo_count},
+                                  .eco_sample_min = aggregate.eco_sample_min,
+                                  .eco_sample_max = aggregate.eco_sample_max,
+                                  .elo_weighted_score = aggregate.elo_weight_sum == 0.0
+                                      ? std::optional<double> {}
+                                      : std::optional<double> {aggregate.weighted_contrib_sum / aggregate.elo_weight_sum}});
+    }
+    return rows;
+}
+
+// NOLINTEND(readability-function-cognitive-complexity)
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto cleanup_failed_create(std::filesystem::path const& dir,
                            std::filesystem::path const& db_path,
-                           std::filesystem::path const& duck_path,
                            std::filesystem::path const& manifest_path,
                            bool created_dir) noexcept -> void
 {
@@ -193,26 +444,10 @@ auto cleanup_failed_create(std::filesystem::path const& dir,
     std::filesystem::remove(db_path.string() + "-wal", fs_err);
     fs_err.clear();
     std::filesystem::remove(db_path.string() + "-shm", fs_err);
-    fs_err.clear();
-    std::filesystem::remove(duck_path, fs_err);
     if (created_dir) {
         fs_err.clear();
         std::filesystem::remove(dir, fs_err);
     }
-}
-
-// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto open_duckdb(std::filesystem::path const& duck_path, duckdb_database& out_db, duckdb_connection& out_con) -> result<void>
-{
-    if (duckdb_open(duck_path.c_str(), &out_db) == DuckDBError) {
-        return tl::unexpected {error_code::io_failure};
-    }
-    if (duckdb_connect(out_db, &out_con) == DuckDBError) {
-        duckdb_close(&out_db);
-        out_db = nullptr;
-        return tl::unexpected {error_code::io_failure};
-    }
-    return {};
 }
 
 }  // namespace
@@ -231,13 +466,14 @@ database_manager::database_manager(database_manager&& other) noexcept
     , writer_ {std::move(other.writer_)}
     , manifest_ {std::move(other.manifest_)}
     , dir_ {std::move(other.dir_)}
-    , duck_db_ {std::exchange(other.duck_db_, nullptr)}
-    , duck_con_ {std::exchange(other.duck_con_, nullptr)}
-    , positions_ {std::move(other.positions_)}
+    , position_postings_ {std::move(other.position_postings_)}
+    , opening_tree_index_ {std::move(other.opening_tree_index_)}
+    , is_scratch_ {std::exchange(other.is_scratch_, false)}
 {
     other.store_.reset();
     other.writer_.reset();
-    other.positions_.reset();
+    other.position_postings_.reset();
+    other.opening_tree_index_.reset();
 }
 
 auto database_manager::operator=(database_manager&& other) noexcept -> database_manager&
@@ -249,42 +485,46 @@ auto database_manager::operator=(database_manager&& other) noexcept -> database_
         writer_ = std::move(other.writer_);
         manifest_ = std::move(other.manifest_);
         dir_ = std::move(other.dir_);
-        duck_db_ = std::exchange(other.duck_db_, nullptr);
-        duck_con_ = std::exchange(other.duck_con_, nullptr);
-        positions_ = std::move(other.positions_);
+        position_postings_ = std::move(other.position_postings_);
+        opening_tree_index_ = std::move(other.opening_tree_index_);
+        is_scratch_ = std::exchange(other.is_scratch_, false);
         other.store_.reset();
         other.writer_.reset();
-        other.positions_.reset();
+        other.position_postings_.reset();
+        other.opening_tree_index_.reset();
     }
     return *this;
 }
 
 void database_manager::close() noexcept
 {
+    auto const lock = std::scoped_lock {generation_mutex_};
     // Refresh game_count and mark clean before tearing down connections.
     // Best-effort — errors are swallowed since close() is noexcept.
     if (!dir_.empty() && store_ && conn_ != nullptr) {
         if (auto count_res = store_->count_games(); count_res) {
             manifest_.game_count = static_cast<std::uint64_t>(*count_res);
         }
-        manifest_.position_index_dirty = false;
+        // A clean close is recoverable when checksum-verified postings cover
+        // canonical SQLite.
+        if (postings_cover_canonical_games()) {
+            manifest_.position_index_dirty = false;
+        }
         (void)write_manifest(dir_ / "manifest.json", manifest_);
     }
 
-    positions_.reset();
+    position_postings_.reset();
+    opening_tree_index_.reset();
     writer_.reset();
-    if (duck_con_ != nullptr) {
-        duckdb_disconnect(&duck_con_);
-        duck_con_ = nullptr;
-    }
-    if (duck_db_ != nullptr) {
-        duckdb_close(&duck_db_);
-        duck_db_ = nullptr;
-    }
     store_.reset();
     if (conn_ != nullptr) {
         sqlite3_close(conn_);
         conn_ = nullptr;
+    }
+
+    if (is_scratch_ && !dir_.empty()) {
+        std::error_code fs_err;
+        std::filesystem::remove_all(dir_, fs_err);
     }
 }
 
@@ -294,7 +534,6 @@ void database_manager::close() noexcept
 auto database_manager::create(std::filesystem::path const& dir, std::string const& name) -> result<database_manager>
 {
     auto const db_path = dir / "games.db";
-    auto const duck_path = dir / "positions.duckdb";
     auto const manifest_path = dir / "manifest.json";
 
     auto db_exists = path_exists(db_path);
@@ -320,7 +559,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     auto init_res = schema::initialize(conn);
     if (!init_res) {
         sqlite3_close(conn);
-        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
         return tl::unexpected {init_res.error()};
     }
 
@@ -328,7 +567,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     auto write_res = write_manifest(manifest_path, new_manifest);
     if (!write_res) {
         sqlite3_close(conn);
-        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
         return tl::unexpected {write_res.error()};
     }
 
@@ -339,24 +578,21 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     mgr.manifest_ = std::move(new_manifest);
     mgr.dir_ = dir;
 
-    auto duck_res = open_duckdb(duck_path, mgr.duck_db_, mgr.duck_con_);
-    if (!duck_res) {
+    // Publish a trivial empty (0-game) postings generation immediately so
+    // postings_cover_canonical_games() is trivially true for the lifetime of
+    // an unimported bundle. The first import republishes the real
+    // generation once games exist (see rebuild_position_postings()).
+    if (auto postings_res = mgr.rebuild_position_postings(); !postings_res) {
         mgr.close();
-        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
-        return tl::unexpected {duck_res.error()};
-    }
-    mgr.positions_.emplace(mgr.duck_con_);
-    if (auto schema_res = mgr.positions_->initialize_schema(); !schema_res) {
-        mgr.close();
-        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
-        return tl::unexpected {schema_res.error()};
+        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
+        return tl::unexpected {postings_res.error()};
     }
 
     // Mark in-use so that a crash before the first close() triggers a rebuild.
     mgr.manifest_.position_index_dirty = true;
     if (auto dirty_write_res = write_manifest(manifest_path, mgr.manifest_); !dirty_write_res) {
         mgr.close();
-        cleanup_failed_create(dir, db_path, duck_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
         return tl::unexpected {dirty_write_res.error()};
     }
 
@@ -425,47 +661,32 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
     mgr.manifest_ = std::move(*mf_res);
     mgr.dir_ = dir;
 
-    auto duck_res = open_duckdb(dir / "positions.duckdb", mgr.duck_db_, mgr.duck_con_);
-    if (!duck_res) {
-        mgr.close();
-        return tl::unexpected {duck_res.error()};
-    }
-    mgr.positions_.emplace(mgr.duck_con_);
-    // initialize_schema is idempotent — creates table if missing on first open
-    if (auto schema_res = mgr.positions_->initialize_schema(); !schema_res) {
-        mgr.close();
-        return tl::unexpected {schema_res.error()};
-    }
-
-    // A missing game_identity_lookup index means a prior raw bulk ingest was
-    // interrupted before deduplicate() could restore it (see
-    // motif::import::import_pipeline). Repair the raw rows before any
-    // derived position data is rebuilt or reads are exposed on this handle.
-    auto const index_exists = mgr.writer_->identity_index_exists();
-    if (!index_exists) {
-        mgr.close();
-        return tl::unexpected {index_exists.error()};
-    }
-    if (!*index_exists) {
-        if (auto dedup_res = mgr.writer_->deduplicate(); !dedup_res) {
-            mgr.close();
-            return tl::unexpected {error_code::io_failure};
+    // Load checksum-verified immutable derived indexes before deciding
+    // whether a rebuild is needed at all.
+    if (mgr.manifest_.position_postings && artifact_matches_manifest(dir, *mgr.manifest_.position_postings)) {
+        auto postings = position_postings {dir / mgr.manifest_.position_postings->filename};
+        if (postings.open()) {
+            mgr.position_postings_ = std::move(postings);
         }
-        // Raw ingest may have left duplicate rows reflected in the position
-        // store from an earlier partial rebuild; force a rebuild so it
-        // reflects only the deduplicated, canonical games.
-        mgr.manifest_.position_index_dirty = true;
+    }
+    if (mgr.manifest_.opening_tree_index && artifact_matches_manifest(dir, *mgr.manifest_.opening_tree_index)) {
+        auto opening_index = opening_tree_index::open(dir / mgr.manifest_.opening_tree_index->filename);
+        if (opening_index) {
+            mgr.opening_tree_index_ = std::move(*opening_index);
+        }
     }
 
-    // If the previous session did not close cleanly (crash, SIGKILL, etc.),
-    // rebuild the position index from SQLite to guarantee consistency.
-    if (mgr.manifest_.position_index_dirty) {
-        if (auto rebuild_res = mgr.rebuild_position_store(); !rebuild_res) {
-            // close() would clear the dirty flag on disk, which would hide the
-            // inconsistency from the next open().  Re-write it as true afterward.
+    // Missing, corrupt, or predates-postings (one-release migration case: a
+    // legacy bundle with games.db plus a leftover positions.duckdb and no
+    // postings): rebuild directly from canonical SQLite. positions.duckdb,
+    // if present, is never read or deleted by this or any other path -- it
+    // is simply ignored. Rebuild failure fails open() closed; the attempt is
+    // safe to retry on a later open() because it only ever writes to a
+    // staging file that has never been published (see
+    // rebuild_position_postings()).
+    if (!mgr.postings_cover_canonical_games()) {
+        if (auto rebuild_res = mgr.rebuild_position_postings(); !rebuild_res) {
             mgr.close();
-            mgr.manifest_.position_index_dirty = true;
-            (void)write_manifest(manifest_path, mgr.manifest_);
             return tl::unexpected {rebuild_res.error()};
         }
     }
@@ -483,41 +704,21 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
 
 auto database_manager::create_scratch() -> result<database_manager>
 {
-    sqlite3* conn = nullptr;
-    if (sqlite3_open(":memory:", &conn) != SQLITE_OK) {
-        if (conn != nullptr) {
-            sqlite3_close(conn);
-        }
-        return tl::unexpected {error_code::io_failure};
-    }
+    // static: distinguishes create_scratch() calls that land in the same
+    // steady_clock tick (e.g. back-to-back calls in a tight test loop).
+    static std::atomic<std::uint64_t> scratch_sequence {0};
+    auto const tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto const sequence = scratch_sequence.fetch_add(1, std::memory_order_relaxed);
+    auto const scratch_dir = std::filesystem::temp_directory_path() / fmt::format("motif_scratch_{}_{}", tick, sequence);
 
-    if (auto init_res = schema::initialize(conn); !init_res) {
-        sqlite3_close(conn);
-        return tl::unexpected {init_res.error()};
+    auto created = create(scratch_dir, "scratch");
+    if (!created) {
+        std::error_code fs_err;
+        std::filesystem::remove_all(scratch_dir, fs_err);
+        return created;
     }
-
-    database_manager mgr;
-    mgr.conn_ = conn;
-    mgr.store_.emplace(conn);
-    mgr.writer_.emplace(conn);
-    mgr.manifest_ = make_manifest("scratch");
-    // dir_ stays empty — close() skips manifest write for in-memory instances
-
-    if (duckdb_open(nullptr, &mgr.duck_db_) == DuckDBError) {
-        mgr.close();
-        return tl::unexpected {error_code::io_failure};
-    }
-    if (duckdb_connect(mgr.duck_db_, &mgr.duck_con_) == DuckDBError) {
-        mgr.close();
-        return tl::unexpected {error_code::io_failure};
-    }
-    mgr.positions_.emplace(mgr.duck_con_);
-    if (auto schema_res = mgr.positions_->initialize_schema(); !schema_res) {
-        mgr.close();
-        return tl::unexpected {schema_res.error()};
-    }
-
-    return mgr;
+    created->is_scratch_ = true;
+    return created;
 }
 
 // ── Accessors
@@ -554,23 +755,335 @@ auto database_manager::dir() const noexcept -> std::filesystem::path const&
     return dir_;
 }
 
-auto database_manager::positions() noexcept -> position_store&
+auto database_manager::has_valid_derived_index(derived_index_manifest_entry const& entry) const -> bool
 {
-    assert(positions_.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
-    return *positions_;
+    // Immutable generation-qualified artifacts are checksummed before their
+    // reader is installed. Query paths only need to verify source identity;
+    // rescanning a multi-gigabyte file per lookup defeats the index.
+    return !dir_.empty() && entry.source_generation == manifest_.source_generation;
 }
 
-auto database_manager::positions() const noexcept -> position_store const&
+// Caller must hold generation_mutex_ (see database_manager.hpp).
+auto database_manager::postings_cover_canonical_games() const -> bool
 {
-    assert(positions_.has_value());
+    if (!position_postings_ || !manifest_.position_postings || !has_valid_derived_index(*manifest_.position_postings)) {
+        return false;
+    }
+    // store_ is initialized by every successful factory.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const game_count = store_->count_games();
+    return game_count && *game_count >= 0 && static_cast<std::uint64_t>(*game_count) == position_postings_->indexed_game_count();
+}
+
+auto database_manager::mark_derived_indexes_stale() -> result<void>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (dir_.empty()) {
+        return {};
+    }
+    auto const stale_postings = manifest_.position_postings;
+    auto const stale_tree = manifest_.opening_tree_index;
+    auto candidate = manifest_;
+    ++candidate.source_generation;
+    candidate.position_postings.reset();
+    candidate.opening_tree_index.reset();
+    if (auto write_res = write_manifest(dir_ / "manifest.json", candidate); !write_res) {
+        return write_res;
+    }
+    manifest_ = std::move(candidate);
+    position_postings_.reset();
+    opening_tree_index_.reset();
+    // Only now that the manifest durably no longer references these
+    // generation-qualified files is it safe to delete them -- best-effort,
+    // since a rebuild will overwrite/skip an orphan by filename anyway.
+    std::error_code fs_err;
+    if (stale_postings) {
+        std::filesystem::remove(dir_ / stale_postings->filename, fs_err);
+    }
+    if (stale_tree) {
+        fs_err.clear();
+        std::filesystem::remove(dir_ / stale_tree->filename, fs_err);
+    }
+    return {};
+}
+
+auto database_manager::lock_generation() const -> std::unique_lock<std::recursive_mutex>
+{
+    return std::unique_lock {generation_mutex_};
+}
+
+auto database_manager::prepare_canonical_mutation() -> result<void>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!manifest_.position_postings && !manifest_.opening_tree_index) {
+        return {};
+    }
+    return mark_derived_indexes_stale();
+}
+
+// Builds the new manifest entry (referencing a generation-qualified filename
+// that was written to but never previously published -- see
+// rebuild_position_postings()/rebuild_opening_tree_index()) on a copy of
+// manifest_ and only assigns it to the live member once write_manifest()
+// succeeds. A failed write leaves manifest_ -- in memory and on disk --
+// completely untouched, still pointing at whatever artifact was already
+// published: the caller is responsible for cleaning up the unpublished file
+// at `filename`, never the previously-published one.
+auto database_manager::publish_derived_index(std::string const& filename, bool const is_postings, std::uint64_t const next_build_seq)
+    -> result<void>
+{
+    if (auto sync_res = sync_file(dir_ / filename); !sync_res) {
+        return sync_res;
+    }
+    auto checksum = file_checksum(dir_ / filename);
+    if (!checksum) {
+        return tl::unexpected {checksum.error()};
+    }
+    assert(store_.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
-    return *positions_;
+    auto game_count = store_->count_games();
+    if (!game_count || *game_count < 0) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto entry = derived_index_manifest_entry {.filename = filename,
+                                               .source_generation = manifest_.source_generation,
+                                               .game_count = static_cast<std::uint64_t>(*game_count),
+                                               .file_size = checksum->first,
+                                               .checksum = checksum->second};
+    auto candidate = manifest_;
+    candidate.derived_index_build_seq = next_build_seq;
+    if (is_postings) {
+        candidate.position_postings = std::move(entry);
+    } else {
+        candidate.opening_tree_index = std::move(entry);
+    }
+    if (auto write_res = write_manifest(dir_ / "manifest.json", candidate); !write_res) {
+        return tl::unexpected {write_res.error()};
+    }
+    manifest_ = std::move(candidate);
+    return {};
+}
+
+auto database_manager::query_position_matches(zobrist_hash const hash, std::size_t const limit, std::size_t const offset) const
+    -> result<std::vector<position_match>>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    if (!position_postings_ || !manifest_.position_postings || !has_valid_derived_index(*manifest_.position_postings)) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto matches = position_postings_->occurrences(hash, limit, offset);
+    if (!matches) {
+        return tl::unexpected {matches.error()};
+    }
+    return matches;
+}
+
+auto database_manager::position_summary(zobrist_hash const hash) const -> result<std::optional<position_postings_summary>>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (!position_postings_ || !manifest_.position_postings || !has_valid_derived_index(*manifest_.position_postings)) {
+        return std::optional<position_postings_summary> {};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return std::optional<position_postings_summary> {};
+    }
+    return position_postings_->summary(hash);
+}
+
+// Builds the replacement postings file to a generation-qualified filename
+// that has never been published (manifest_.derived_index_build_seq, bumped
+// only on a successful publish -- see publish_derived_index()), validates it
+// by reopening it there, and only publishes the manifest entry once that
+// succeeds. Unlike renaming a fixed "positions.postings" name over itself,
+// the new bytes never occupy the currently-published artifact's path, so a
+// failure at any point -- including a crash -- leaves the previously
+// published generation's file, manifest entry, and in-memory
+// manifest_/position_postings_ readers untouched and fully usable. The old
+// generation's file is only removed after the new one is durably published.
+auto database_manager::rebuild_position_postings(position_postings_build_metrics* const metrics) -> result<void>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (dir_.empty() || !store_) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    auto const build_seq = manifest_.derived_index_build_seq;
+    auto const new_filename = fmt::format("positions.postings.{}", build_seq);
+    auto const new_path = dir_ / new_filename;
+    auto const staging_path = dir_ / (new_filename + ".building");
+
+    std::error_code fs_err;
+    std::filesystem::remove(staging_path, fs_err);
+    // Clears any orphan left by a prior attempt that crashed after this exact
+    // (unpublished) filename was written but before the process could clean
+    // it up -- manifest_.derived_index_build_seq is only advanced by a
+    // successful publish, so a retry always recomputes the same filename.
+    fs_err.clear();
+    std::filesystem::remove(new_path, fs_err);
+
+    // store_ is initialized by every successful persistent factory.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    if (auto build_res = position_postings::build(*store_, staging_path, position_postings::default_spill_threshold, metrics); !build_res) {
+        fs_err.clear();
+        std::filesystem::remove(staging_path, fs_err);
+        return tl::unexpected {build_res.error()};
+    }
+    {
+        auto staged = position_postings {staging_path};
+        if (auto open_res = staged.open(); !open_res) {
+            fs_err.clear();
+            std::filesystem::remove(staging_path, fs_err);
+            return tl::unexpected {open_res.error()};
+        }
+    }
+
+    std::filesystem::rename(staging_path, new_path, fs_err);
+    if (fs_err) {
+        fs_err.clear();
+        std::filesystem::remove(staging_path, fs_err);
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto live_reader = position_postings {new_path};
+    if (auto open_res = live_reader.open(); !open_res) {
+        // The staged copy validated successfully immediately before the
+        // rename, so a failure to reopen the very same bytes at their new
+        // path is unexpected; manifest_/position_postings_ stay untouched
+        // and the checksum gate keeps queries safe regardless.
+        fs_err.clear();
+        std::filesystem::remove(new_path, fs_err);
+        return tl::unexpected {open_res.error()};
+    }
+
+    auto const previous_entry = manifest_.position_postings;
+    if (auto publish_res = publish_derived_index(new_filename, /*is_postings=*/true, build_seq + 1); !publish_res) {
+        fs_err.clear();
+        std::filesystem::remove(new_path, fs_err);
+        return tl::unexpected {publish_res.error()};
+    }
+    position_postings_ = std::move(live_reader);
+
+    // Only remove the previous generation's file after the new one is
+    // durably published -- if this process crashes before this point, the
+    // old file (still what the manifest points to) survives untouched.
+    if (previous_entry && previous_entry->filename != new_filename) {
+        fs_err.clear();
+        std::filesystem::remove(dir_ / previous_entry->filename, fs_err);
+    }
+    return {};
+}
+
+// Same generation-qualified-filename staging/validate/publish discipline as
+// rebuild_position_postings() (see its comment for the failure-safety
+// rationale). opening_tree_index::build() already writes to a temp file and
+// renames it over whatever path it is given, so passing it a ".building"
+// staging path keeps that path's eventual target -- a filename that has
+// never been published -- untouched until the freshly built replacement has
+// been read back successfully.
+auto database_manager::rebuild_opening_tree_index(opening_tree_index_build_metrics* const metrics) -> result<void>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (dir_.empty() || !store_) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    if (!position_postings_ || !manifest_.position_postings || !has_valid_derived_index(*manifest_.position_postings)) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    auto const build_seq = manifest_.derived_index_build_seq;
+    auto const new_filename = fmt::format("opening_tree.idx.{}", build_seq);
+    auto const new_path = dir_ / new_filename;
+    auto const staging_path = dir_ / (new_filename + ".building");
+
+    std::error_code fs_err;
+    std::filesystem::remove(staging_path, fs_err);
+    fs_err.clear();
+    std::filesystem::remove(new_path, fs_err);
+
+    // store_ is initialized by every successful persistent factory.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto child_counts = opening_tree_child_count_stream {
+        [this](opening_tree_child_count_visitor const& visitor) -> result<void>
+        {
+            return position_postings_->for_each_summary(
+                [&visitor](zobrist_hash const hash, position_postings_summary const& summary) -> result<void>
+                { return visitor(hash, summary.distinct_game_count); });
+        }};
+    if (auto build_res = opening_tree_index::build(*store_, staging_path, {}, metrics, std::move(child_counts)); !build_res) {
+        fs_err.clear();
+        std::filesystem::remove(staging_path, fs_err);
+        return tl::unexpected {build_res.error()};
+    }
+    if (auto staged = opening_tree_index::open(staging_path); !staged) {
+        fs_err.clear();
+        std::filesystem::remove(staging_path, fs_err);
+        return tl::unexpected {staged.error()};
+    }
+
+    std::filesystem::rename(staging_path, new_path, fs_err);
+    if (fs_err) {
+        fs_err.clear();
+        std::filesystem::remove(staging_path, fs_err);
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto live_index = opening_tree_index::open(new_path);
+    if (!live_index) {
+        fs_err.clear();
+        std::filesystem::remove(new_path, fs_err);
+        return tl::unexpected {live_index.error()};
+    }
+
+    auto const previous_entry = manifest_.opening_tree_index;
+    if (auto publish_res = publish_derived_index(new_filename, /*is_postings=*/false, build_seq + 1); !publish_res) {
+        fs_err.clear();
+        std::filesystem::remove(new_path, fs_err);
+        return tl::unexpected {publish_res.error()};
+    }
+    opening_tree_index_ = std::move(*live_index);
+
+    if (previous_entry && previous_entry->filename != new_filename) {
+        fs_err.clear();
+        std::filesystem::remove(dir_ / previous_entry->filename, fs_err);
+    }
+    return {};
+}
+
+auto database_manager::position_game_ids(zobrist_hash const hash) const -> result<std::vector<game_id>>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (!position_postings_ || !manifest_.position_postings || !has_valid_derived_index(*manifest_.position_postings)) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return position_postings_->distinct_game_ids(hash);
 }
 
 auto database_manager::patch_game_metadata(game_id const game_key, game_patch const& patch) -> result<void>
 {
-    if (!positions_ || !store_) {
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -592,41 +1105,32 @@ auto database_manager::patch_game_metadata(game_id const game_key, game_patch co
         new_black = *res;
     }
 
-    if (auto res = store_->patch_metadata(game_key, patch); !res) {
-        return res;
-    }
-
-    if (new_white || new_black) {
-        if (auto update_res = positions_->update_elo_for_game(game_key, new_white, new_black); !update_res) {
-            return update_res;
+    auto const affects_derived = new_white || new_black || patch.result;
+    if (affects_derived) {
+        if (auto stale_res = prepare_canonical_mutation(); !stale_res) {
+            return tl::unexpected {stale_res.error()};
         }
     }
-
-    if (patch.result) {
-        if (auto update_res = positions_->update_result_for_game(game_key, map_result(*patch.result)); !update_res) {
-            return update_res;
-        }
-    }
-    return {};
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- store_ presence is checked at function entry.
+    return store_->patch_metadata(game_key, patch);
 }
 
 auto database_manager::remove_game(game_id const game_key) -> result<void>
 {
-    if (!positions_ || !store_) {
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
         return tl::unexpected {error_code::io_failure};
     }
-    // Position rows are removed first: they can always be restored by
-    // rebuild_position_store(), whereas a game deleted from SQLite cannot.
-    // The two operations are not atomic across a crash boundary.
-    if (auto res = positions_->delete_by_game_id(game_key); !res) {
-        return res;
+    if (auto stale_res = prepare_canonical_mutation(); !stale_res) {
+        return tl::unexpected {stale_res.error()};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- store_ presence is checked at function entry.
     return store_->remove(game_key);
 }
 
 auto database_manager::remove_user_game(game_id const game_key) -> result<void>
 {
-    if (!positions_ || !store_) {
+    if (!store_) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -644,7 +1148,8 @@ auto database_manager::remove_user_game(game_id const game_key) -> result<void>
 auto database_manager::query_elo_distribution(zobrist_hash const hash, search_filter const& filter, int const bucket_width) const
     -> result<std::vector<elo_distribution_row>>
 {
-    if (!positions_ || !store_) {
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -655,11 +1160,18 @@ auto database_manager::query_elo_distribution(zobrist_hash const hash, search_fi
     bool const has_metadata = filter.player_name.has_value() || filter.min_elo.has_value() || filter.max_elo.has_value()
         || filter.result.has_value() || filter.eco_prefix.has_value();
 
-    if (!has_metadata) {
-        return positions_->query_elo_distribution(hash, bucket_width);
+    auto const game_count = store_->count_games();
+    auto const postings_valid = position_postings_ && manifest_.position_postings && has_valid_derived_index(*manifest_.position_postings)
+        && game_count && *game_count >= 0 && static_cast<std::uint64_t>(*game_count) == position_postings_->indexed_game_count();
+    if (!postings_valid) {
+        return tl::unexpected {error_code::io_failure};
     }
 
-    auto all_ids_res = positions_->distinct_game_ids_by_zobrist(hash);
+    if (!has_metadata) {
+        return postings_elo_distribution(*store_, *position_postings_, hash, {}, bucket_width);
+    }
+
+    auto all_ids_res = position_game_ids(hash);
     if (!all_ids_res) {
         return tl::unexpected {all_ids_res.error()};
     }
@@ -678,12 +1190,142 @@ auto database_manager::query_elo_distribution(zobrist_hash const hash, search_fi
         return std::vector<elo_distribution_row> {};
     }
 
-    return positions_->query_elo_distribution(hash, *filtered_ids_res, bucket_width);
+    return postings_elo_distribution(*store_, *position_postings_, hash, std::move(*filtered_ids_res), bucket_width);
+}
+
+auto database_manager::query_unfiltered_opening_stats(zobrist_hash const hash) const -> result<std::vector<opening_stat_agg_row>>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const postings_valid = position_postings_ && manifest_.position_postings && has_valid_derived_index(*manifest_.position_postings);
+    if (!postings_valid) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const tree_valid = opening_tree_index_ && manifest_.opening_tree_index && has_valid_derived_index(*manifest_.opening_tree_index);
+    if (!tree_valid || static_cast<std::uint64_t>(*game_count) != opening_tree_index_->source_game_count()) {
+        auto game_ids = position_postings_->distinct_game_ids(hash);
+        if (!game_ids) {
+            return tl::unexpected {game_ids.error()};
+        }
+        return postings_filtered_opening_stats(*store_, *position_postings_, hash, std::move(*game_ids), /*global_child_frequency=*/true);
+    }
+    // A complete node (currently only the canonical starting position, see
+    // opening_tree_index.cpp's format_version v5 comment) was aggregated from
+    // every occurrence of hash in every game, not only occurrences within
+    // max_root_ply, so it needs no summary max_ply cross-check.
+    if (opening_tree_index_->is_complete(hash)) {
+        return opening_tree_index_->query_opening_stats(hash);
+    }
+    auto const summary = position_postings_->summary(hash);
+    if (!summary || !summary->has_value()) {
+        return std::vector<opening_stat_agg_row> {};
+    }
+    if (summary->value().max_ply > opening_tree_index_->max_root_ply()) {
+        auto game_ids = position_postings_->distinct_game_ids(hash);
+        if (!game_ids) {
+            return tl::unexpected {game_ids.error()};
+        }
+        return postings_filtered_opening_stats(*store_, *position_postings_, hash, std::move(*game_ids), /*global_child_frequency=*/true);
+    }
+    return opening_tree_index_->query_opening_stats(hash);
+}
+
+auto database_manager::query_filtered_opening_stats(zobrist_hash const hash, std::vector<game_id> const& game_ids) const
+    -> result<std::vector<opening_stat_agg_row>>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    bool const postings_valid = position_postings_ && manifest_.position_postings && has_valid_derived_index(*manifest_.position_postings);
+    if (!postings_valid) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return postings_filtered_opening_stats(*store_, *position_postings_, hash, game_ids);
+}
+
+auto database_manager::query_tree_slice(zobrist_hash const root_hash,
+                                        std::uint16_t const max_depth,
+                                        std::vector<game_id> const& game_ids) const -> result<std::vector<tree_position_row>>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    bool const postings_valid = position_postings_ && manifest_.position_postings && has_valid_derived_index(*manifest_.position_postings);
+    if (!postings_valid) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto allowed_game_ids = game_ids;
+    std::ranges::sort(allowed_game_ids);
+    auto occurrences = position_postings_->occurrences(root_hash);
+    if (!occurrences) {
+        return tl::unexpected {occurrences.error()};
+    }
+    auto context_ids = std::vector<game_id> {};
+    context_ids.reserve(occurrences->size());
+    for (auto const& occurrence : *occurrences) {
+        if (allowed_game_ids.empty() || std::ranges::binary_search(allowed_game_ids, occurrence.game_id)) {
+            context_ids.push_back(occurrence.game_id);
+        }
+    }
+    std::ranges::sort(context_ids);
+    auto const unique_end = std::ranges::unique(context_ids);
+    context_ids.erase(unique_end.begin(), unique_end.end());
+    auto contexts = store_->get_game_contexts(context_ids);
+    if (!contexts) {
+        return tl::unexpected {contexts.error()};
+    }
+
+    auto rows = std::vector<tree_position_row> {};
+    for (auto const& occurrence : *occurrences) {
+        if (!allowed_game_ids.empty() && !std::ranges::binary_search(allowed_game_ids, occurrence.game_id)) {
+            continue;
+        }
+        auto const context = contexts->find(occurrence.game_id);
+        if (context == contexts->end()) {
+            continue;
+        }
+        auto board = motif::chess::replay(context->second.moves, occurrence.ply);
+        if (!board) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto const last_ply = std::min(context->second.moves.size(), static_cast<std::size_t>(occurrence.ply) + max_depth);
+        for (auto ply = static_cast<std::size_t>(occurrence.ply); ply < last_ply; ++ply) {
+            auto const encoded_move = context->second.moves[ply];
+            motif::chess::apply_encoded_move(*board, encoded_move);
+            rows.push_back(tree_position_row {.game_id = occurrence.game_id,
+                                              .root_ply = occurrence.ply,
+                                              .depth = static_cast<std::uint16_t>(ply - occurrence.ply + 1U),
+                                              .encoded_move = encoded_move,
+                                              .child_hash = zobrist_hash {board->hash()},
+                                              .result = occurrence.result,
+                                              .white_elo = occurrence.white_elo,
+                                              .black_elo = occurrence.black_elo});
+        }
+    }
+    return rows;
 }
 
 auto database_manager::find_games(search_filter const& filter) -> result<game_list_result>
 {
-    if (!positions_ || !store_) {
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -691,7 +1333,7 @@ auto database_manager::find_games(search_filter const& filter) -> result<game_li
         return store_->find_games(filter);
     }
 
-    auto game_ids = positions_->distinct_game_ids_by_zobrist(*filter.position);
+    auto game_ids = position_game_ids(*filter.position);
     if (!game_ids) {
         return tl::unexpected {game_ids.error()};
     }
@@ -699,279 +1341,6 @@ auto database_manager::find_games(search_filter const& filter) -> result<game_li
     auto metadata_filter = filter;
     metadata_filter.position.reset();
     return store_->find_games_with_ids(*game_ids, metadata_filter);
-}
-
-auto database_manager::find_games_by_position(zobrist_hash const hash, std::size_t const limit)
-    -> result<std::pair<game_list_result, std::vector<position_match>>>
-{
-    if (!positions_ || !store_) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    auto ply_matches = positions_->query_min_ply_by_game(hash, limit);
-    if (!ply_matches) {
-        return tl::unexpected {ply_matches.error()};
-    }
-
-    std::vector<game_id> ids;
-    ids.reserve(ply_matches->size());
-    for (auto const& match : *ply_matches) {
-        ids.push_back(match.game_id);
-    }
-
-    search_filter filter;
-    filter.limit = ids.size();
-    auto games = store_->find_games_with_ids(ids, filter);
-    if (!games) {
-        return tl::unexpected {games.error()};
-    }
-
-    auto total = positions_->count_distinct_games_by_zobrist(hash);
-    if (!total) {
-        return tl::unexpected {total.error()};
-    }
-    games->total_count = *total;
-
-    return std::make_pair(std::move(*games), std::move(*ply_matches));
-}
-
-auto database_manager::sort_positions(position_rebuild_timing* const timing) -> result<void>
-{
-    if (duck_con_ == nullptr || !positions_) {
-        return tl::unexpected {error_code::io_failure};
-    }
-    auto const connection_lock = positions_->lock_connection();
-
-    duckdb_result tx_res {};
-    if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
-        duckdb_destroy_result(&tx_res);
-        return tl::unexpected {error_code::io_failure};
-    }
-    duckdb_destroy_result(&tx_res);
-
-    auto rollback = [this]() noexcept -> void
-    {
-        duckdb_result rollback_res {};
-        duckdb_query(duck_con_, "ROLLBACK", &rollback_res);
-        duckdb_destroy_result(&rollback_res);
-    };
-
-    auto const sort_started = std::chrono::steady_clock::now();
-    if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-    if (timing != nullptr) {
-        timing->sort_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - sort_started);
-    }
-    auto const rollup_started = std::chrono::steady_clock::now();
-    if (auto rollup_res = positions_->rebuild_opening_stats_rollups(); !rollup_res) {
-        rollback();
-        return tl::unexpected {rollup_res.error()};
-    }
-    if (timing != nullptr) {
-        timing->rollup_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rollup_started);
-    }
-
-    duckdb_result commit_res {};
-    if (duckdb_query(duck_con_, "COMMIT", &commit_res) == DuckDBError) {
-        duckdb_destroy_result(&commit_res);
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-    duckdb_destroy_result(&commit_res);
-
-    return {};
-}
-
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto database_manager::rebuild_position_store(bool const sort_by_zobrist, position_rebuild_timing* const timing) -> result<void>
-{
-    if (duck_con_ == nullptr || !positions_) {
-        return tl::unexpected {error_code::io_failure};
-    }
-    auto const connection_lock = positions_->lock_connection();
-
-    auto log = spdlog::get("motif.db");
-    auto log_rss = [&](char const* const phase) -> void
-    {
-        if (log == nullptr) {
-            return;
-        }
-        // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker)
-        auto const rss_bytes = gtl::GetProcessMemoryUsed();
-        log->info("rebuild_position_store rss {}: {} bytes", phase, rss_bytes);
-    };
-
-    log_rss("start");
-    duckdb_result tx_res {};
-    if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
-        duckdb_destroy_result(&tx_res);
-        return tl::unexpected {error_code::io_failure};
-    }
-    duckdb_destroy_result(&tx_res);
-
-    auto rollback = [this]() noexcept -> void
-    {
-        duckdb_result rollback_res {};
-        duckdb_query(duck_con_, "ROLLBACK", &rollback_res);
-        duckdb_destroy_result(&rollback_res);
-    };
-
-    // Drop and recreate so that any schema changes (new columns) are applied,
-    // and so a rebuild always reflects the current SQLite game.result/elo --
-    // game_result's insert path uses ON CONFLICT DO NOTHING (see
-    // insert_game_results_for_batch), which would otherwise silently keep a
-    // stale row from before a patch_game_metadata() edit.
-    duckdb_result drop_res {};
-    if (duckdb_query(duck_con_, "DROP TABLE IF EXISTS position", &drop_res) == DuckDBError) {
-        duckdb_destroy_result(&drop_res);
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-    duckdb_destroy_result(&drop_res);
-    if (duckdb_query(duck_con_, "DROP TABLE IF EXISTS game_result", &drop_res) == DuckDBError) {
-        duckdb_destroy_result(&drop_res);
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-    duckdb_destroy_result(&drop_res);
-    if (auto schema_res = positions_->initialize_schema(); !schema_res) {
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    // Stream exactly the fields required for replay. game_store::get() also
-    // loads event, player, provenance, and tag metadata, none of which is
-    // needed to reconstruct positions.
-    sqlite3_stmt* raw = nullptr;
-    constexpr auto replay_games_sql = R"sql(
-        SELECT g.id, g.result, w.elo, b.elo, g.moves
-        FROM game AS g
-        JOIN player AS w ON w.id = g.white_id
-        JOIN player AS b ON b.id = g.black_id
-        ORDER BY g.id
-    )sql";
-    if (sqlite3_prepare_v2(conn_, replay_games_sql, -1, &raw, nullptr) != SQLITE_OK) {
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-    auto const stmt_guard = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {raw, sqlite3_finalize};
-
-    std::vector<position_row> pending_rows;
-    pending_rows.reserve(rebuild_batch_rows);
-    auto position_insert_elapsed = std::chrono::steady_clock::duration {};
-
-    auto flush_pending_rows = [&]() -> result<void>
-    {
-        if (pending_rows.empty()) {
-            return {};
-        }
-        auto const insert_started = std::chrono::steady_clock::now();
-        if (auto ins_res = positions_->insert_batch(pending_rows); !ins_res) {
-            return tl::unexpected {ins_res.error()};
-        }
-        position_insert_elapsed += std::chrono::steady_clock::now() - insert_started;
-        pending_rows.clear();
-        log_rss("after_flush_batch");
-        return {};
-    };
-
-    auto const replay_started = std::chrono::steady_clock::now();
-    auto position_row_build_elapsed = std::chrono::steady_clock::duration {};
-    int step_result = sqlite3_step(stmt_guard.get());
-    while (step_result == SQLITE_ROW) {
-        auto const game_id = motif::db::game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt_guard.get(), 0))};
-        auto const* result =
-            reinterpret_cast<char const*>(sqlite3_column_text(stmt_guard.get(), 1));  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-        auto const white_elo = sqlite3_column_type(stmt_guard.get(), 2) == SQLITE_NULL
-            ? std::optional<std::int32_t> {}
-            : std::optional<std::int32_t> {static_cast<std::int32_t>(sqlite3_column_int(stmt_guard.get(), 2))};
-        auto const black_elo = sqlite3_column_type(stmt_guard.get(), 3) == SQLITE_NULL
-            ? std::optional<std::int32_t> {}
-            : std::optional<std::int32_t> {static_cast<std::int32_t>(sqlite3_column_int(stmt_guard.get(), 3))};
-        auto const* moves_blob = sqlite3_column_blob(stmt_guard.get(), 4);
-        auto const move_bytes = sqlite3_column_bytes(stmt_guard.get(), 4);
-        if (result == nullptr || move_bytes < 0 || move_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0) {
-            rollback();
-            return tl::unexpected {error_code::io_failure};
-        }
-
-        std::vector<std::uint16_t> moves(static_cast<std::size_t>(move_bytes) / sizeof(std::uint16_t));
-        if (!moves.empty() && moves_blob == nullptr) {
-            rollback();
-            return tl::unexpected {error_code::io_failure};
-        }
-        if (!moves.empty()) {
-            std::memcpy(moves.data(), moves_blob, static_cast<std::size_t>(move_bytes));
-        }
-
-        auto const build_started = std::chrono::steady_clock::now();
-        auto batch = build_position_rows(moves, game_id, map_result(result), white_elo, black_elo);
-        if (!batch) {
-            rollback();
-            return tl::unexpected {batch.error()};
-        }
-
-        if (!batch->empty()) {
-            pending_rows.insert(pending_rows.end(), batch->begin(), batch->end());
-        }
-        position_row_build_elapsed += std::chrono::steady_clock::now() - build_started;
-        if (pending_rows.size() >= rebuild_batch_rows) {
-            auto flush_res = flush_pending_rows();
-            if (!flush_res) {
-                rollback();
-                return tl::unexpected {flush_res.error()};
-            }
-        }
-        step_result = sqlite3_step(stmt_guard.get());
-    }
-    if (step_result != SQLITE_DONE) {
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-
-    if (auto flush_res = flush_pending_rows(); !flush_res) {
-        rollback();
-        return tl::unexpected {flush_res.error()};
-    }
-    if (timing != nullptr) {
-        timing->position_replay_elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - replay_started);
-        timing->position_row_build_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(position_row_build_elapsed);
-        timing->position_insert_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(position_insert_elapsed);
-    }
-
-    if (sort_by_zobrist) {
-        auto const sort_started = std::chrono::steady_clock::now();
-        if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
-            rollback();
-            return tl::unexpected {sort_res.error()};
-        }
-        if (timing != nullptr) {
-            timing->sort_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - sort_started);
-        }
-        log_rss("after_sort_by_zobrist");
-    }
-
-    auto const rollup_started = std::chrono::steady_clock::now();
-    if (auto rollup_res = positions_->rebuild_opening_stats_rollups(); !rollup_res) {
-        rollback();
-        return tl::unexpected {rollup_res.error()};
-    }
-    if (timing != nullptr) {
-        timing->rollup_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rollup_started);
-    }
-
-    duckdb_result commit_res {};
-    if (duckdb_query(duck_con_, "COMMIT", &commit_res) == DuckDBError) {
-        duckdb_destroy_result(&commit_res);
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-    duckdb_destroy_result(&commit_res);
-    log_rss("after_commit");
-    return {};
 }
 
 }  // namespace motif::db

@@ -1,13 +1,25 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
+
+#include <tl/expected.hpp>
+
+#include "motif/chess/chess.hpp"
+#include "motif/db/database_manager.hpp"
+#include "motif/db/error.hpp"
+#include "motif/db/game_store.hpp"
+#include "motif/db/types.hpp"
 
 namespace test_helpers
 {
@@ -93,5 +105,41 @@ class peak_rss_sampler
     std::atomic<std::size_t> peak_ {0};
     std::thread thread_;
 };
+
+// Replays a random sample of up to `limit` distinct games from the bundle's
+// canonical SQLite store and returns one zobrist hash per sampled game (its
+// final position), for perf-test query-latency sampling. Independent of any
+// derived-index reader: works purely from motif_db's public game_store API.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- limit and deterministic seed have distinct call-site roles.
+inline auto sample_zobrist_hashes(motif::db::database_manager& manager, std::size_t limit, std::uint64_t seed)
+    -> motif::db::result<std::vector<motif::db::zobrist_hash>>
+{
+    auto game_ids = manager.store().all_game_ids();
+    if (!game_ids) {
+        return tl::unexpected {game_ids.error()};
+    }
+
+    auto rng = std::mt19937_64 {seed};
+    std::shuffle(game_ids->begin(), game_ids->end(), rng);
+    if (game_ids->size() > limit) {
+        game_ids->resize(limit);
+    }
+
+    auto contexts = manager.store().get_game_contexts(*game_ids);
+    if (!contexts) {
+        return tl::unexpected {contexts.error()};
+    }
+
+    std::vector<motif::db::zobrist_hash> hashes;
+    hashes.reserve(contexts->size());
+    for (auto const& [game_key, context] : *contexts) {
+        auto board = motif::chess::replay(context.moves, static_cast<std::uint16_t>(context.moves.size()));
+        if (!board) {
+            continue;
+        }
+        hashes.push_back(motif::db::zobrist_hash {board->hash()});
+    }
+    return hashes;
+}
 
 }  // namespace test_helpers
