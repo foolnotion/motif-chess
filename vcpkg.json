@@ -13,9 +13,6 @@
       "name": "sqlite3"
     },
     {
-      "name": "duckdb"
-    },
-    {
       "name": "spdlog"
     },
     {
