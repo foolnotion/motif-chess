@@ -1,3 +1,5 @@
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -8,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <duckdb.h>
+#include <fmt/base.h>
 
 #include "motif/db/types.hpp"
 
@@ -347,4 +350,63 @@ TEST_CASE("position_store::query_tree_slice filtered returns only requested game
     CHECK(slice->at(0).depth == 1U);
     CHECK(slice->at(1).game_id == motif::db::game_id {2U});
     CHECK(slice->at(1).depth == 2U);
+}
+
+// Isolates the DuckDB appender's row-by-row API cost (begin_row/append_*/
+// end_row per position row) from everything else in the import pipeline --
+// no PGN parsing, no SQLite, no file I/O. A real game contributes ~87
+// position rows (one per ply, median game length ~44 full moves per the
+// 3.36M-game reference bundle), so this reproduces the actual row-count
+// pattern stage2's inline-position path drives through insert_batch.
+TEST_CASE("position_store::insert_batch throughput on synthetic 1M-game-shaped load", "[motif-db][position_store][performance]")
+{
+#ifndef NDEBUG
+    SKIP("performance checks run only in release builds");
+#endif
+
+    duck_fixture fix;
+    REQUIRE(fix.store.initialize_schema().has_value());
+
+    constexpr std::size_t games = 100'000;
+    constexpr std::size_t plies_per_game = 87;
+    constexpr std::size_t flush_batch = 50'000;
+    constexpr std::int16_t synthetic_elo = 2000;
+    constexpr std::size_t total_rows = games * plies_per_game;
+
+    std::vector<motif::db::position_row> pending;
+    pending.reserve(flush_batch);
+
+    auto const started = std::chrono::steady_clock::now();
+    for (std::size_t row_index = 0; row_index < total_rows; ++row_index) {
+        auto const ply = static_cast<std::uint16_t>(row_index % plies_per_game);
+        pending.push_back(motif::db::position_row {
+            .zobrist_hash = motif::db::zobrist_hash {row_index},
+            .game_id = motif::db::game_id {static_cast<std::uint32_t>((row_index / plies_per_game) + 1)},
+            .ply = ply,
+            .encoded_move = static_cast<std::uint16_t>(ply + 1),
+            .result = 1,
+            .white_elo = synthetic_elo,
+            .black_elo = synthetic_elo,
+        });
+        if (pending.size() >= flush_batch) {
+            REQUIRE(fix.store.insert_batch(pending).has_value());
+            pending.clear();
+        }
+    }
+    if (!pending.empty()) {
+        REQUIRE(fix.store.insert_batch(pending).has_value());
+    }
+    auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+
+    auto const ns_per_row =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()) / static_cast<double>(total_rows);
+    auto const us_per_game = ns_per_row * static_cast<double>(plies_per_game) / 1000.0;
+
+    fmt::print("\n=== position_store::insert_batch throughput ===\n"
+               "  games:        {}\n"
+               "  rows:         {}\n"
+               "  elapsed:      {} ms\n"
+               "  ns/row:       {:.1f}\n"
+               "  us/game:      {:.2f} ({} rows/game)\n",
+               games, total_rows, elapsed.count(), ns_per_row, us_per_game, plies_per_game);
 }

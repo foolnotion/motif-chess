@@ -13,7 +13,10 @@ namespace motif::db::schema
 // v1 → v2: added source_type, source_label, review_status columns to game.
 // v2 → v3: added moves_hash (see schema.cpp's migrate() for why v2-or-earlier
 // bundles aren't migrated in place).
-inline constexpr std::uint32_t current_version = 3;
+// v3 → v4: replaced moves_hash with a collision-safe move_hash + identity_collision
+// pair (see schema.cpp's migrate() for why v3-or-earlier bundles aren't migrated
+// in place).
+inline constexpr std::uint32_t current_version = 4;
 
 // Create all tables, indexes, and set WAL mode, foreign_keys ON, and
 // PRAGMA user_version. Idempotent: uses CREATE TABLE IF NOT EXISTS throughout;
@@ -27,5 +30,22 @@ auto migrate(sqlite3* conn, std::uint32_t from_version) -> result<void>;
 
 // Query PRAGMA user_version from the connection.
 auto version(sqlite3* conn) -> result<std::uint32_t>;
+
+// Create the game_identity_lookup unique index (see schema.cpp for its
+// column list and why it's keyed on move_hash rather than the raw moves
+// blob). Idempotent. Used both by initialize() and by the raw-ingest import
+// path, which drops the index before bulk insert and recreates it here after
+// deduplication so per-row insert cost doesn't include index maintenance.
+auto create_identity_index(sqlite3* conn) -> result<void>;
+
+// Drop game_identity_lookup if present. Only safe to call around a bulk
+// raw-ingest window that ends with create_identity_index() -- the index is
+// what makes game_writer::insert()'s duplicate check possible, so leaving it
+// dropped breaks correctness for any other insert path sharing the connection.
+auto drop_identity_index(sqlite3* conn) -> result<void>;
+
+// Whether game_identity_lookup exists. A missing index marks an interrupted
+// raw import and requires deduplication before normal writes can resume.
+auto identity_index_exists(sqlite3* conn) -> result<bool>;
 
 }  // namespace motif::db::schema

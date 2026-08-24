@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -23,6 +24,17 @@ namespace motif::db
 
 class database_manager;
 class game_writer;
+
+// Minimal data needed by replay-based derived indexes. Keeping this separate
+// from game avoids loading players, events, provenance, and tags per row.
+struct replay_game_record
+{
+    game_id id {};
+    std::string result;
+    std::optional<std::int32_t> white_elo;
+    std::optional<std::int32_t> black_elo;
+    std::vector<std::uint16_t> moves;
+};
 
 class game_store
 {
@@ -66,6 +78,9 @@ class game_store
     // All game IDs, ascending, unfiltered. For full-corpus streaming
     // consumers (index builders, rebuilds) -- not paginated like find_games.
     auto all_game_ids() const -> result<std::vector<game_id>>;
+    // Visit every game once in ascending ID order using one SQLite cursor.
+    // The visitor may stop iteration by returning an error.
+    auto for_each_replay_game(std::function<result<void>(replay_game_record const&)> const& visitor) const -> result<void>;
 
     // Delete the game row and all associated game_tag rows.
     // Player and event rows are preserved.
@@ -81,11 +96,6 @@ class game_store
     // Returns error_code::not_editable if source_type != "manual".
     // Returns error_code::duplicate if the patch would create an identity conflict.
     auto patch_metadata(game_id game_key, game_patch const& patch) -> result<void>;
-
-    // Delete a manual game by id; rejects imported/reference games.
-    // Returns error_code::not_found if the id does not exist.
-    // Returns error_code::not_editable if source_type != "manual".
-    auto remove_user_game(game_id game_key) -> result<void>;
 
     // Mark a just-inserted game as manually-added (source_type = 'manual').
     // Used after import_worker::process() to flip the default 'imported' provenance.

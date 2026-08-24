@@ -1,8 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <duckdb.h>
@@ -18,6 +20,15 @@ struct sqlite3;
 
 namespace motif::db
 {
+
+struct position_rebuild_timing
+{
+    std::chrono::milliseconds position_replay_elapsed {};
+    std::chrono::milliseconds position_row_build_elapsed {};
+    std::chrono::milliseconds position_insert_elapsed {};
+    std::chrono::milliseconds sort_elapsed {};
+    std::chrono::milliseconds rollup_elapsed {};
+};
 
 // Owns the lifecycle of a named chess database bundle:
 //   <dir>/games.db        — SQLite WAL (game metadata and moves)
@@ -77,6 +88,10 @@ class database_manager
     // Returns error_code::not_found if the game does not exist.
     auto remove_game(game_id game_key) -> result<void>;
 
+    // Delete a manually-added game from both stores. Imported games return
+    // error_code::not_editable without modifying either store.
+    auto remove_user_game(game_id game_key) -> result<void>;
+
     // Elo distribution per continuation from a given position.
     // When filter contains metadata criteria, first narrows game IDs via SQLite,
     // then delegates to position_store with the filtered set. Empty filter uses
@@ -89,11 +104,23 @@ class database_manager
     // then applies metadata filters in SQLite.
     auto find_games(search_filter const& filter) -> result<game_list_result>;
 
+    // Games reaching hash, paired 1:1 with the lowest ply at which each does
+    // so. The game list and ply list are derived from the same limit-bounded,
+    // game_id-ordered distinct-game selection, so every returned game has a
+    // real ply -- never fabricated. game_list_result::total_count is the true
+    // total distinct-game count, which may exceed limit. Contrast with
+    // find_games(), whose position filter path selects distinct game ids and
+    // caps them independently of any separate ply lookup, which can leave
+    // some of those games without ply data when a position repeats often
+    // within earlier games.
+    auto find_games_by_position(zobrist_hash hash, std::size_t limit = max_search_limit)
+        -> result<std::pair<game_list_result, std::vector<position_match>>>;
+
     // Drop and repopulate the DuckDB position table from all games in SQLite.
-    auto rebuild_position_store(bool sort_by_zobrist = true) -> result<void>;
+    auto rebuild_position_store(bool sort_by_zobrist = true, position_rebuild_timing* timing = nullptr) -> result<void>;
 
     // Sort the position table by Zobrist hash, wrapped in a DuckDB transaction.
-    auto sort_positions() -> result<void>;
+    auto sort_positions(position_rebuild_timing* timing = nullptr) -> result<void>;
 
     // Release all connections and clear internal state.
     // Safe to call multiple times.

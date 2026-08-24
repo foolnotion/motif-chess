@@ -366,6 +366,9 @@ auto game_store::operator=(game_store&& other) noexcept -> game_store&
 void game_store::clear_insert_caches() noexcept
 {
     writer_->clear_insert_caches();
+    player_id_cache_.clear();
+    event_id_cache_.clear();
+    tag_id_cache_.clear();
 }
 
 auto game_store::begin_transaction() -> result<void>
@@ -381,6 +384,9 @@ auto game_store::commit_transaction() -> result<void>
 auto game_store::rollback_transaction() noexcept -> void
 {
     writer_->rollback_transaction();
+    player_id_cache_.clear();
+    event_id_cache_.clear();
+    tag_id_cache_.clear();
 }
 
 auto game_store::create_schema() -> result<void>
@@ -428,20 +434,22 @@ auto game_store::create_schema() -> result<void>
             date          TEXT,
             result        TEXT NOT NULL,
             eco           TEXT,
-            moves         BLOB    NOT NULL,
-            moves_hash    INTEGER NOT NULL,
+            moves         BLOB NOT NULL,
+            move_hash     BLOB NOT NULL,
+            identity_collision INTEGER NOT NULL DEFAULT 0,
             source_type   TEXT NOT NULL DEFAULT 'imported',
             source_label  TEXT,
             review_status TEXT NOT NULL DEFAULT 'new'
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_game_identity ON game(
+        CREATE UNIQUE INDEX IF NOT EXISTS game_identity_lookup ON game(
             white_id,
             black_id,
             COALESCE(event_id, -1),
             COALESCE(date, ''),
             result,
-            moves_hash
+            move_hash,
+            identity_collision
         );
 
         CREATE TABLE IF NOT EXISTS game_tag (
@@ -487,6 +495,7 @@ auto game_store::find_or_insert_player(player const& plr) -> result<std::int64_t
         sqlite3_bind_text(*sel, 1, plr.name.c_str(), static_cast<int>(plr.name.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(*sel) == SQLITE_ROW) {
             auto const player_id = sqlite3_column_int64(*sel, 0);
+            reset_stmt(*sel);
             player_id_cache_.emplace(plr.name, player_id);
             return player_id;
         }
@@ -523,6 +532,7 @@ auto game_store::find_or_insert_event(event const& evt) -> result<std::int64_t>
         sqlite3_bind_text(*sel, 1, evt.name.c_str(), static_cast<int>(evt.name.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(*sel) == SQLITE_ROW) {
             auto const event_id = sqlite3_column_int64(*sel, 0);
+            reset_stmt(*sel);
             event_id_cache_.emplace(evt.name, event_id);
             return event_id;
         }
@@ -561,6 +571,7 @@ auto game_store::insert_game_tags(game_id const game_key, std::vector<std::pair<
 
             if (sqlite3_step(*tag_sel) == SQLITE_ROW) {
                 tag_id = sqlite3_column_int64(*tag_sel, 0);
+                reset_stmt(*tag_sel);
             } else {
                 auto tag_ins = prepare_cached_stmt(insert_tag_stmt_, "INSERT INTO tag(name) VALUES(?)");
                 if (!tag_ins) {
@@ -812,6 +823,58 @@ auto game_store::all_game_ids() const -> result<std::vector<game_id>>
     }
 
     return ids;
+}
+
+auto game_store::for_each_replay_game(std::function<result<void>(replay_game_record const&)> const& visitor) const -> result<void>
+{
+    // language=sql
+    constexpr auto replay_games_sql = R"sql(
+        SELECT g.id, g.result, w.elo, b.elo, g.moves
+        FROM game AS g
+        JOIN player AS w ON w.id = g.white_id
+        JOIN player AS b ON b.id = g.black_id
+        ORDER BY g.id
+    )sql";
+    auto stmt = prepare(db_, replay_games_sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+
+    int step_rc = SQLITE_ROW;
+    while ((step_rc = sqlite3_step(stmt->get())) == SQLITE_ROW) {
+        auto const move_bytes = sqlite3_column_bytes(stmt->get(), 4);
+        auto const* moves_blob = sqlite3_column_blob(stmt->get(), 4);
+        auto const* result_text =
+            reinterpret_cast<char const*>(sqlite3_column_text(stmt->get(), 1));  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+        if (result_text == nullptr || move_bytes < 0 || move_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0
+            || (move_bytes > 0 && moves_blob == nullptr))
+        {
+            return tl::unexpected {error {error_code::io_failure, "invalid replay row"}};
+        }
+
+        replay_game_record record {
+            .id = game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt->get(), 0))},
+            .result = result_text,
+            .white_elo = sqlite3_column_type(stmt->get(), 2) == SQLITE_NULL
+                ? std::optional<std::int32_t> {}
+                : std::optional<std::int32_t> {sqlite3_column_int(stmt->get(), 2)},
+            .black_elo = sqlite3_column_type(stmt->get(), 3) == SQLITE_NULL
+                ? std::optional<std::int32_t> {}
+                : std::optional<std::int32_t> {sqlite3_column_int(stmt->get(), 3)},
+            .moves = {},
+        };
+        record.moves.resize(static_cast<std::size_t>(move_bytes) / sizeof(std::uint16_t));
+        if (!record.moves.empty()) {
+            std::memcpy(record.moves.data(), moves_blob, static_cast<std::size_t>(move_bytes));
+        }
+        if (auto visit_res = visitor(record); !visit_res) {
+            return visit_res;
+        }
+    }
+    if (step_rc != SQLITE_DONE) {
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+    }
+    return {};
 }
 
 auto game_store::find_games(search_filter const& filter) const -> result<game_list_result>
@@ -1263,6 +1326,36 @@ auto game_store::patch_metadata(game_id const game_key, game_patch const& patch)
         return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
 
+    // txn's destructor rolls back on any early return below via a raw SQL
+    // ROLLBACK, which doesn't know about these in-memory id caches -- an
+    // early return after find_or_insert_player/event/tag cached a
+    // just-inserted (and now rolled-back) id would leave that id cached,
+    // causing a later insert reusing it to fail its foreign-key check.
+    struct cache_rollback_guard
+    {
+        game_store* self;
+        bool committed {false};
+
+        explicit cache_rollback_guard(game_store* owner) noexcept
+            : self {owner}
+        {
+        }
+
+        cache_rollback_guard(cache_rollback_guard const&) = delete;
+        auto operator=(cache_rollback_guard const&) -> cache_rollback_guard& = delete;
+        cache_rollback_guard(cache_rollback_guard&&) = delete;
+        auto operator=(cache_rollback_guard&&) -> cache_rollback_guard& = delete;
+
+        ~cache_rollback_guard() noexcept
+        {
+            if (!committed) {
+                self->player_id_cache_.clear();
+                self->event_id_cache_.clear();
+                self->tag_id_cache_.clear();
+            }
+        }
+    } cache_guard {this};
+
     if (patch.white_name || patch.white_elo || patch.black_name || patch.black_elo || patch.event || patch.site) {
         auto cur = get(game_key);
         if (!cur) {
@@ -1321,19 +1414,8 @@ auto game_store::patch_metadata(game_id const game_key, game_patch const& patch)
     if (!txn.commit()) {
         return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
     }
+    cache_guard.committed = true;
     return {};
-}
-
-auto game_store::remove_user_game(game_id const game_key) -> result<void>
-{
-    auto prov_res = get_provenance(game_key);
-    if (!prov_res) {
-        return tl::unexpected {prov_res.error()};
-    }
-    if (prov_res->source_type != "manual") {
-        return tl::unexpected {error_code::not_editable};
-    }
-    return remove(game_key);
 }
 
 auto game_store::set_manual_provenance(game_id const game_key,

@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,14 @@
 namespace motif::import
 {
 
+auto default_worker_count() noexcept -> std::size_t
+{
+    constexpr std::size_t min_workers = 1;
+    constexpr std::size_t half_divisor = 2;
+    auto const detected = static_cast<std::size_t>(std::thread::hardware_concurrency());
+    return std::max(min_workers, detected / half_divisor);
+}
+
 namespace
 {
 
@@ -45,7 +54,7 @@ auto current_time_ns() noexcept -> std::int64_t
 
 constexpr std::string_view event_marker = "[Event \"";
 
-auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
+auto count_games(std::filesystem::path const& pgn_path, std::size_t start_offset) -> result<std::size_t>
 {
     auto file = std::ifstream {pgn_path, std::ios::binary | std::ios::ate};
     if (!file.is_open()) {
@@ -53,10 +62,20 @@ auto count_games(std::filesystem::path const& pgn_path) -> result<std::size_t>
     }
 
     auto const file_size = file.tellg();
-    if (file_size == std::streampos {0}) {
+    if (file_size < std::streampos {0}) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const source_size = static_cast<std::size_t>(file_size);
+    if (std::cmp_greater(start_offset, source_size)) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (std::cmp_equal(start_offset, source_size)) {
         return std::size_t {0};
     }
-    file.seekg(0);
+    file.seekg(static_cast<std::streamoff>(start_offset));
+    if (!file) {
+        return tl::unexpected {error_code::io_failure};
+    }
 
     constexpr std::size_t buf_size = 1048576;
     constexpr std::size_t overlap = event_marker.size() - 1;
@@ -247,23 +266,93 @@ auto import_pipeline::request_stop() noexcept -> void
 
 auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
+    if (config.num_workers == 0 || config.num_lines == 0) {
+        return tl::unexpected {error_code::invalid_state};
+    }
+
+    auto const chk = read_checkpoint(db_.dir());
+    if (chk) {
+        auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {chk->source_path}).lexically_normal();
+        auto const requested_source = std::filesystem::absolute(pgn_path).lexically_normal();
+        if (checkpoint_source == requested_source) {
+            auto resumed = resume_from_checkpoint(pgn_path, *chk, config);
+            if (resumed || resumed.error() != error_code::invalid_state) {
+                return resumed;
+            }
+            delete_checkpoint(db_.dir());
+        }
+    } else if (chk.error() != error_code::not_found) {
+        return tl::unexpected {chk.error()};
+    }
     return run_from(pgn_path, 0, 0, 0, config);
 }
 
 auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
-    auto chk = read_checkpoint(db_.dir());
+    auto const chk = read_checkpoint(db_.dir());
     if (!chk) {
         return tl::unexpected {error_code::io_failure};
     }
+    return resume_from_checkpoint(pgn_path, *chk, config);
+}
 
-    auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {chk->source_path}).lexically_normal();
+auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_path,
+                                             import_checkpoint const& checkpoint,
+                                             import_config const& config) -> result<import_summary>
+{
+    auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {checkpoint.source_path}).lexically_normal();
     auto const requested_source = std::filesystem::absolute(pgn_path).lexically_normal();
     if (checkpoint_source != requested_source) {
         return tl::unexpected {error_code::invalid_state};
     }
 
-    return run_from(pgn_path, chk->byte_offset, chk->games_committed, chk->last_game_id, config);
+    auto const current_stat = stat_source(pgn_path);
+    if (!current_stat) {
+        return tl::unexpected {current_stat.error()};
+    }
+    // A checkpoint offset strictly beyond the current file's end can never be
+    // a valid resume point; exact EOF (the source was fully ingested) is
+    // valid. Reject anything past it rather than letting pgn_reader silently
+    // treat it as "nothing more to read".
+    if (checkpoint.byte_offset > current_stat->size) {
+        return tl::unexpected {error_code::invalid_state};
+    }
+    // Detect the source file being edited or replaced at the same path since
+    // the checkpoint was written -- either would make byte_offset point at
+    // content that no longer matches what was already ingested.
+    if (current_stat->size != checkpoint.source_size || current_stat->mtime_ns != checkpoint.source_mtime_ns) {
+        return tl::unexpected {error_code::invalid_state};
+    }
+    auto const current_hash = hash_source(pgn_path);
+    if (!current_hash) {
+        return tl::unexpected {current_hash.error()};
+    }
+    if (*current_hash != checkpoint.source_content_hash) {
+        return tl::unexpected {error_code::invalid_state};
+    }
+
+    auto const index_exists = db_.writer().identity_index_exists();
+    if (!index_exists) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto pre_committed = checkpoint.games_committed;
+    if (!*index_exists) {
+        // A process or power failure can occur after raw batches commit but
+        // before deduplicate() restores the identity index. Reconcile that
+        // durable SQLite state before resuming with checked inserts or
+        // rebuilding DuckDB positions.
+        if (auto repair_res = db_.writer().deduplicate(); !repair_res) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto const game_count = db_.store().count_games();
+        if (!game_count) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        pre_committed = *game_count;
+    }
+
+    return run_from(pgn_path, checkpoint.byte_offset, pre_committed, checkpoint.last_game_id, config);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -284,7 +373,12 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
     auto log = spdlog::get("motif.import");
 
-    stop_requested_.store(false, std::memory_order_relaxed);
+    // Deliberately not resetting stop_requested_ here: request_stop() can be
+    // called (e.g. via DELETE /api/imports/:id) after a session's pipeline is
+    // constructed but before its worker thread reaches this point, and each
+    // import_pipeline is single-use (one run()/resume() call per HTTP
+    // session) -- clearing a pending request here would silently drop that
+    // cancellation and run the import to completion anyway.
     games_processed_.store(0, std::memory_order_relaxed);
     games_committed_.store(0, std::memory_order_relaxed);
     games_skipped_.store(0, std::memory_order_relaxed);
@@ -293,8 +387,20 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     start_time_ns_.store(current_time_ns(), std::memory_order_relaxed);
     phase_.store(import_phase::ingesting, std::memory_order_relaxed);
 
-    if (auto game_count = count_games(pgn_path); game_count.has_value()) {
+    if (auto game_count = count_games(pgn_path, start_offset); game_count.has_value()) {
         total_games_.store(*game_count, std::memory_order_relaxed);
+    }
+
+    // Captured once per run and embedded in every checkpoint written below so
+    // a later resume() can detect the source file being edited or replaced
+    // at the same path in the meantime.
+    auto const source_stat_res = stat_source(pgn_path);
+    if (!source_stat_res) {
+        return tl::unexpected {source_stat_res.error()};
+    }
+    auto const source_hash_res = hash_source(pgn_path);
+    if (!source_hash_res) {
+        return tl::unexpected {source_hash_res.error()};
     }
 
     pgn_reader reader {pgn_path};
@@ -313,7 +419,20 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     std::size_t checkpoint_offset = start_offset;
     std::optional<error> fatal_error;
 
-    bool const build_inline_positions = config.rebuild_positions_after_import && pre_committed == 0;
+    // A fresh import (never resumed) skips the per-row identity check during
+    // ingest and reconciles duplicates in one pass afterward -- see
+    // deduplicate_and_rebuild_index below. resume() keeps the checked path:
+    // reasoning about a partially-committed DB is already nontrivial without
+    // also tracking "is the identity index currently dropped".
+    bool const raw_mode = pre_committed == 0;
+
+    // Positions are never built inline: previously this ran only for a fresh
+    // import (pre_committed == 0), which is now exactly raw_mode. A game
+    // inserted during raw ingest may turn out to be an exact duplicate and
+    // get deleted by the post-ingest dedup pass, which would leave its
+    // inline position rows dangling -- rebuild_position_store() (below,
+    // after dedup) replays from the deduplicated game table instead.
+    bool const build_inline_positions = false;
     std::vector<motif::db::position_row> inline_positions;
     bool any_inline_flushed = false;
 
@@ -378,6 +497,9 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             .byte_offset = checkpoint_offset,
             .games_committed = committed,
             .last_game_id = last_game_id,
+            .source_size = source_stat_res->size,
+            .source_mtime_ns = source_stat_res->mtime_ns,
+            .source_content_hash = *source_hash_res,
         };
         if (auto wres = write_checkpoint(db_.dir(), chk); !wres) {
             if (log) {
@@ -386,7 +508,42 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         }
     };
 
+    // Once drop_identity_index() below succeeds, every remaining early-return
+    // path in this function must call this before returning: the DB is left
+    // without its uniqueness guarantee -- and, once any raw insert has
+    // landed, with potential unreconciled duplicates -- until deduplicate()
+    // runs. deduplicate() is safe to call even with zero raw-mode inserts
+    // pending (it's a no-op DELETE/UPDATE followed by CREATE INDEX).
+    // A failure here leaves the DB without its identity index and with
+    // possible unreconciled raw duplicates -- log it rather than discarding
+    // it, so the state is diagnosable instead of silently indistinguishable
+    // from a clean repair. The next database_manager::open() will detect the
+    // still-missing index and retry the repair.
+    auto restore_identity_index = [&]() -> bool
+    {
+        if (!raw_mode) {
+            return true;
+        }
+        if (auto repair_res = db_.writer().deduplicate(); !repair_res) {
+            if (log) {
+                log->error("failed to restore game_identity_lookup after aborting raw ingest: {}",
+                           motif::db::to_string(repair_res.error()));
+            }
+            return false;
+        }
+        return true;
+    };
+
+    if (raw_mode) {
+        if (auto drop_res = db_.writer().drop_identity_index(); !drop_res) {
+            return tl::unexpected {error_code::io_failure};
+        }
+    }
+
     if (!begin_sqlite_batch()) {
+        if (!restore_identity_index()) {
+            return tl::unexpected {error_code::io_failure};
+        }
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -478,7 +635,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
         auto& prep = *slot.prepared;
 
-        auto ins = db_.writer().insert(prep.game_row);
+        auto ins = raw_mode ? db_.writer().insert_raw(prep.game_row) : db_.writer().insert(prep.game_row);
         if (!ins) {
             if (ins.error() == motif::db::error_code::duplicate) {
                 games_skipped_.fetch_add(1, std::memory_order_relaxed);
@@ -575,17 +732,46 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     };
 
     taskflow.composed_of(pipeline);
+    auto const ingest_started = std::chrono::steady_clock::now();
     tf::Executor executor {config.num_workers};  // NOLINT(misc-include-cleaner)
     executor.run(taskflow).wait();
 
     if (fatal_error.has_value() && *fatal_error != error_code::eof) {
         rollback_sqlite_batch();
+        if (!restore_identity_index()) {
+            return tl::unexpected {error_code::io_failure};
+        }
         return tl::unexpected {*fatal_error};
     }
 
     if (!commit_sqlite_batch()) {
         rollback_sqlite_batch();
+        if (!restore_identity_index()) {
+            return tl::unexpected {error_code::io_failure};
+        }
         return tl::unexpected {error_code::io_failure};
+    }
+    auto const ingest_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ingest_started);
+    auto rebuild_timing = motif::db::position_rebuild_timing {};
+
+    // Runs even on early stop/cancel: raw_mode dropped the identity index
+    // before ingest, so the DB is left without it -- and with unreconciled
+    // raw duplicates -- until this completes. Never skip it once raw_mode
+    // ingest has started.
+    std::size_t duplicates_removed = 0;
+    std::chrono::milliseconds dedup_elapsed {0};
+    if (raw_mode) {
+        phase_.store(import_phase::deduplicating, std::memory_order_relaxed);
+        auto const dedup_started = std::chrono::steady_clock::now();
+        auto dedup_res = db_.writer().deduplicate();
+        if (!dedup_res) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        dedup_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - dedup_started);
+        duplicates_removed = dedup_res->removed;
+        committed -= static_cast<std::int64_t>(duplicates_removed);
+        games_committed_.fetch_sub(duplicates_removed, std::memory_order_relaxed);
+        games_skipped_.fetch_add(duplicates_removed, std::memory_order_relaxed);
     }
 
     if (stopped || stop_requested_.load(std::memory_order_relaxed)) {
@@ -598,6 +784,9 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             .committed = static_cast<std::size_t>(committed - pre_committed),
             .skipped = games_skipped_.load(std::memory_order_relaxed),
             .errors = games_errored_.load(std::memory_order_relaxed),
+            .duplicates_removed = duplicates_removed,
+            .ingest_elapsed = ingest_elapsed,
+            .dedup_elapsed = dedup_elapsed,
             .elapsed = elapsed,
         };
     }
@@ -608,7 +797,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             return tl::unexpected {error_code::io_failure};
         }
         if (any_inline_flushed && config.sort_positions_by_zobrist_after_rebuild) {
-            if (auto sort_res = db_.sort_positions(); !sort_res) {
+            if (auto sort_res = db_.sort_positions(&rebuild_timing); !sort_res) {
                 return tl::unexpected {error_code::io_failure};
             }
         } else if (any_inline_flushed) {
@@ -625,7 +814,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         }
     } else if (config.rebuild_positions_after_import) {
         phase_.store(import_phase::rebuilding, std::memory_order_relaxed);
-        if (auto rebuild_res = db_.rebuild_position_store(config.sort_positions_by_zobrist_after_rebuild); !rebuild_res) {
+        if (auto rebuild_res = db_.rebuild_position_store(config.sort_positions_by_zobrist_after_rebuild, &rebuild_timing); !rebuild_res) {
             return tl::unexpected {error_code::io_failure};
         }
     }
@@ -641,6 +830,12 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         .committed = static_cast<std::size_t>(committed - pre_committed),
         .skipped = games_skipped_.load(std::memory_order_relaxed),
         .errors = games_errored_.load(std::memory_order_relaxed),
+        .duplicates_removed = duplicates_removed,
+        .ingest_elapsed = ingest_elapsed,
+        .dedup_elapsed = dedup_elapsed,
+        .position_replay_elapsed = rebuild_timing.position_replay_elapsed,
+        .sort_elapsed = rebuild_timing.sort_elapsed,
+        .rollup_elapsed = rebuild_timing.rollup_elapsed,
         .elapsed = elapsed,
     };
 }

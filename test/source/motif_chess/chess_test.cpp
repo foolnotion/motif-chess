@@ -48,7 +48,7 @@ TEST_CASE("motif::chess board copy from moved-from value stays valid", "[motif-c
     REQUIRE(motif::chess::apply_san(original, "e4").has_value());
 
     auto moved = std::move(original);
-    auto copied = original;
+    auto copied = original;  // NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved,clang-analyzer-cplusplus.Move)
     auto assigned = motif::chess::board {};
     assigned = original;
 
@@ -57,6 +57,7 @@ TEST_CASE("motif::chess board copy from moved-from value stays valid", "[motif-c
     CHECK(motif::chess::write_fen(moved) == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("motif::chess legal_moves returns promotion metadata", "[motif-chess]")
 {
     auto board = motif::chess::parse_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1");

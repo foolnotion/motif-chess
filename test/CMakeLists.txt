@@ -106,6 +106,31 @@ if(motif_ENABLE_APP)
     catch_discover_tests(motif_app_test)
 endif()
 
+if(motif_ENABLE_SLINT_SPIKE)
+    add_executable(motif_slint_spike_presenter_test
+        source/motif_slint_spike/game_browser_presenter_test.cpp
+    )
+    target_link_libraries(motif_slint_spike_presenter_test PRIVATE
+        motif_slint_spike_presenter
+        Catch2::Catch2WithMain
+    )
+    target_compile_features(motif_slint_spike_presenter_test PRIVATE cxx_std_23)
+    catch_discover_tests(motif_slint_spike_presenter_test)
+endif()
+
+if(motif_ENABLE_SLINT_APP)
+    add_executable(motif_slint_app_service_test
+        source/motif_slint_app/import_service_test.cpp
+        source/motif_slint_app/workspace_service_test.cpp
+    )
+    target_link_libraries(motif_slint_app_service_test PRIVATE
+        motif_slint_app_service
+        Catch2::Catch2WithMain
+    )
+    target_compile_features(motif_slint_app_service_test PRIVATE cxx_std_23)
+    catch_discover_tests(motif_slint_app_service_test)
+endif()
+
 # ---- End-of-file commands ----
 
 add_folders(Test)
