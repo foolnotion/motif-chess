@@ -178,6 +178,44 @@ TEST_CASE("schema::migrate refuses a v1 database without mutating it first", "[m
     CHECK(second_migrate_res.error() == motif::db::error_code::schema_mismatch);
 }
 
+TEST_CASE("schema::migrate refuses a v3 database rather than silently bumping the version", "[motif-db][schema]")
+{
+    disk_db ddb {"migrate-v3-refused"};
+    REQUIRE(ddb.conn != nullptr);
+
+    // v3's moves_hash-keyed shape, frozen here rather than reused from
+    // schema.cpp's current DDL, since the whole point is to simulate a
+    // database stuck at the old version.
+    // language=sql
+    constexpr char const* v3_ddl = R"sql(
+        CREATE TABLE player (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, elo INTEGER, title TEXT, country TEXT);
+        CREATE TABLE event (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, site TEXT, date TEXT);
+        CREATE TABLE tag (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+        CREATE TABLE game (
+            id INTEGER PRIMARY KEY, white_id INTEGER NOT NULL REFERENCES player(id),
+            black_id INTEGER NOT NULL REFERENCES player(id), event_id INTEGER REFERENCES event(id),
+            date TEXT, result TEXT NOT NULL, eco TEXT, moves BLOB NOT NULL, moves_hash INTEGER NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'imported', source_label TEXT, review_status TEXT NOT NULL DEFAULT 'new'
+        );
+        CREATE UNIQUE INDEX ux_game_identity ON game(white_id, black_id, COALESCE(event_id, -1), COALESCE(date, ''), result, moves_hash);
+        CREATE TABLE game_tag (game_id INTEGER NOT NULL REFERENCES game(id) ON DELETE CASCADE, tag_id INTEGER NOT NULL REFERENCES tag(id), value TEXT NOT NULL, PRIMARY KEY (game_id, tag_id));
+        CREATE TABLE schema_migrations (name TEXT NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+        PRAGMA user_version = 3;
+    )sql";
+    REQUIRE(sqlite3_exec(ddb.conn, v3_ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    auto migrate_res = motif::db::schema::migrate(ddb.conn, 3U);
+    REQUIRE_FALSE(migrate_res.has_value());
+    CHECK(migrate_res.error() == motif::db::error_code::schema_mismatch);
+
+    // Refused, so user_version must be left untouched -- not silently bumped
+    // to current_version with rows that don't have a usable move_hash.
+    auto ver = motif::db::schema::version(ddb.conn);
+    REQUIRE(ver.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(*ver == 3U);
+}
+
 TEST_CASE("schema::initialize on :memory: succeeds (WAL falls back to memory mode)", "[motif-db][schema]")
 {
     sqlite3* conn = open_memory();

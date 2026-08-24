@@ -1,0 +1,221 @@
+import { Button, LineEdit } from "std-widgets.slint";
+
+export struct RecentEntry {
+    name: string,
+    path: string,
+}
+
+export component WorkspaceWindow inherits Window {
+    in property <bool> has-database: false;
+    in property <bool> is-scratch: false;
+    in property <bool> busy: false;
+    in property <string> display-name;
+    in property <string> active-path;
+    in-out property <string> error-text;
+    in property <[RecentEntry]> recent-databases;
+    in-out property <string> create-path-text;
+    in-out property <string> create-name-text;
+    in-out property <string> open-path-text;
+    in-out property <string> import-path-text;
+    in property <bool> import-active: false;
+    in property <bool> import-status-visible: false;
+    in property <string> import-state-text;
+    in property <string> import-phase-text;
+    in property <int> import-processed: 0;
+    in property <int> import-total: 0;
+    in property <int> import-committed: 0;
+    in property <int> import-skipped: 0;
+
+    in property <int> import-errors: 0;
+
+    callback create-requested(string, string);
+    callback open-requested(string);
+    callback scratch-requested();
+    callback close-requested();
+    callback dismiss-error();
+    callback recent-activated(string);
+    callback import-requested(string);
+    callback cancel-import-requested();
+
+    title: "Motif Chess";
+    preferred-width: 900px;
+    preferred-height: 600px;
+    min-width: 640px;
+    min-height: 420px;
+    background: #11151d;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 18px;
+        alignment: start;
+
+        if !root.has-database: VerticalLayout {
+            spacing: 14px;
+            Text {
+                text: "No database open";
+                font-size: 22px;
+                font-weight: 700;
+                color: #f1f4f8;
+            }
+            Rectangle {
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: #313949;
+                background: #171c26;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    Text { text: "Create a new database"; color: #91a4c4; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            placeholder-text: "Directory path";
+                            text <=> root.create-path-text;
+                            enabled: !root.busy;
+                        }
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            placeholder-text: "Name";
+                            text <=> root.create-name-text;
+                            enabled: !root.busy;
+                        }
+                        Button {
+                            text: "Create";
+                            enabled: !root.busy && root.create-path-text != "" && root.create-name-text != "";
+                            clicked => { root.create-requested(root.create-path-text, root.create-name-text); }
+                        }
+                    }
+                    Rectangle { height: 1px; background: #313949; }
+                    Text { text: "Open an existing database"; color: #91a4c4; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            placeholder-text: "Bundle directory path";
+                            text <=> root.open-path-text;
+                            enabled: !root.busy;
+                        }
+                        Button {
+                            text: "Open";
+                            enabled: !root.busy && root.open-path-text != "";
+                            clicked => { root.open-requested(root.open-path-text); }
+                        }
+                    }
+                    Rectangle { height: 1px; background: #313949; }
+                    Button {
+                        text: "Use Scratch Database";
+                        enabled: !root.busy;
+                        clicked => { root.scratch-requested(); }
+                    }
+                }
+            }
+            if root.recent-databases.length > 0: Rectangle {
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: #313949;
+                background: #171c26;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 6px;
+                    Text { text: "Recent databases"; color: #91a4c4; font-weight: 700; }
+                    for entry[index] in root.recent-databases: entry-scope := FocusScope {
+                        height: 44px;
+                        key-pressed(event) => {
+                            if (!root.busy && (event.text == "\n" || event.text == " ")) {
+                                root.recent-activated(entry.path);
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            border-radius: 3px;
+                            background: entry-scope.has-focus ? #232b3a : transparent;
+                            TouchArea {
+                                enabled: !root.busy;
+                                clicked => {
+                                    entry-scope.focus();
+                                    root.recent-activated(entry.path);
+                                }
+                                VerticalLayout {
+                                    padding: 6px;
+                                    Text { text: entry.name; color: #f1f4f8; font-weight: 600; }
+                                    Text { text: entry.path; color: #91a4c4; font-size: 11px; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.has-database: Rectangle {
+            border-radius: 5px;
+            border-width: 1px;
+            border-color: #313949;
+            background: #171c26;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                Text {
+                    text: root.is-scratch ? "Scratch database (temporary)" : "Database: " + root.display-name;
+                    font-size: 20px;
+                    color: #f1f4f8;
+                }
+                if !root.is-scratch: Text { text: root.active-path; color: #91a4c4; font-size: 12px; }
+                if !root.import-active: HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "PGN file path";
+                        text <=> root.import-path-text;
+                        enabled: !root.busy;
+                    }
+                    Button {
+                        text: "Import PGN";
+                        enabled: !root.busy && root.import-path-text != "";
+                        clicked => { root.import-requested(root.import-path-text); }
+                    }
+                }
+                if root.import-status-visible: VerticalLayout {
+                    spacing: 6px;
+                    Text { text: root.import-state-text + " · " + root.import-phase-text; color: #d4bc78; }
+                    Text {
+                        text: root.import-processed + " / " + root.import-total
+                            + " processed · " + root.import-committed + " committed · "
+                            + root.import-skipped + " skipped · " + root.import-errors + " errors";
+                        color: #91a4c4;
+                    }
+                    if root.import-active: Button {
+                        text: "Cancel Import";
+                        enabled: root.import-state-text != "Canceling";
+                        clicked => { root.cancel-import-requested(); }
+                    }
+                }
+                Button {
+                    text: "Close Database";
+                    enabled: !root.busy && !root.import-active;
+                    clicked => { root.close-requested(); }
+                }
+            }
+        }
+        if root.busy: Text { text: "Working…"; color: #d4bc78; }
+        if root.error-text != "": Rectangle {
+            min-height: 38px;
+            background: #52252b;
+            border-radius: 3px;
+            HorizontalLayout {
+                padding: 9px;
+                spacing: 8px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.error-text;
+                    color: #ffd6d9;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+                Button { text: "Dismiss"; clicked => { root.dismiss-error(); } }
+            }
+        }
+    }
+}

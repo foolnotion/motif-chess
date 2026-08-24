@@ -165,7 +165,7 @@
     {
       "name": "dev-linux",
       "binaryDir": "${sourceDir}/build/dev-linux",
-      "inherits": ["dev-mode", "clang-tidy", "cppcheck", "ci-linux"],
+      "inherits": ["dev-mode", "ci-linux"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"

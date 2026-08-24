@@ -30,9 +30,10 @@ namespace
 constexpr auto magic = std::array<char, 8> {'M', 'O', 'T', 'I', 'F', 'O', 'T', '1'};
 // v1 -> v2: continuation-record fields switched from fixed-width to
 // LEB128 varints (write_varint/read_varint) -- most edges have small counts.
-constexpr auto format_version = std::uint32_t {2};
+constexpr auto format_version = std::uint32_t {3};
 constexpr auto byte_bits = std::size_t {8};
 constexpr auto byte_mask = std::uint64_t {0xff};
+constexpr auto default_spill_threshold = std::size_t {1} << 20U;
 
 template<typename Integer>
 auto write_little_endian(std::ofstream& output, Integer value) -> bool
@@ -455,21 +456,23 @@ struct build_state
     // root_hash -> the edges discovered under it, built up as edges are
     // found so the final grouping pass doesn't need to re-derive it.
     gtl::flat_hash_map<std::uint64_t, std::vector<edge_key>> edges_by_root;
+    // Distinct games that reach every indexed root, including terminal roots
+    // with no continuation record.
+    gtl::flat_hash_map<std::uint64_t, std::uint32_t> root_game_counts;
 };
 
 // Replays one game into `state` and `visits`: `visits`
 // (transposition_frequency) is uncapped, `state.edges` is capped at
 // max_root_ply -- see position_store.cpp's create_opening_stats_rollups_template
 // for why that asymmetry exists in the DuckDB rollup this mirrors.
-auto accumulate_game(motif::db::game const& current_game,
-                     game_id const game_key,
+auto accumulate_game(replay_game_record const& current_game,
                      std::uint16_t const max_root_ply,
                      hash_visit_counter& visits,
                      build_state& state) -> result<void>
 {
     auto const result_code = map_result(current_game.result);
-    auto const white_elo = current_game.white.elo;
-    auto const black_elo = current_game.black.elo;
+    auto const& white_elo = current_game.white_elo;
+    auto const& black_elo = current_game.black_elo;
 
     auto board = motif::chess::board {};
     auto prev_hash = board.hash();
@@ -478,12 +481,14 @@ auto accumulate_game(motif::db::game const& current_game,
     // Per-game dedup + min-root-ply-within-this-game tracking, matching
     // edge_deduped's "GROUP BY p_root.game_id, ..." + MIN(p_root.ply).
     gtl::flat_hash_map<edge_key, std::uint16_t, edge_key_hash> edges_this_game;
+    gtl::flat_hash_set<std::uint64_t> roots_this_game;
 
     if (visited_this_game.insert(prev_hash).second) {
         if (auto visit_res = visits.visit(prev_hash); !visit_res) {
             return visit_res;
         }
     }
+    roots_this_game.insert(prev_hash);
 
     for (std::size_t root_ply = 0; root_ply < current_game.moves.size(); ++root_ply) {
         if (root_ply > std::numeric_limits<std::uint16_t>::max()) {
@@ -509,7 +514,15 @@ auto accumulate_game(motif::db::game const& current_game,
             }
         }
 
+        if (root_ply + 1U <= max_root_ply) {
+            roots_this_game.insert(child_hash);
+        }
+
         prev_hash = child_hash;
+    }
+
+    for (auto const root_hash : roots_this_game) {
+        ++state.root_game_counts[root_hash];
     }
 
     for (auto const& [key, min_ply_this_game] : edges_this_game) {
@@ -522,8 +535,8 @@ auto accumulate_game(motif::db::game const& current_game,
         note_result(agg, result_code);
         note_elo(agg, result_code, white_elo, black_elo);
         agg.root_ply = std::min(agg.root_ply, min_ply_this_game);
-        agg.eco_sample_min = std::min(agg.eco_sample_min, game_key.value);
-        agg.eco_sample_max = std::max(agg.eco_sample_max, game_key.value);
+        agg.eco_sample_min = std::min(agg.eco_sample_min, current_game.id.value);
+        agg.eco_sample_max = std::max(agg.eco_sample_max, current_game.id.value);
     }
 
     return {};
@@ -550,10 +563,15 @@ auto write_node(std::ofstream& output,
                 build_state const& state,
                 std::vector<std::pair<std::uint64_t, std::uint32_t>> const& child_counts) -> bool
 {
-    auto keys = state.edges_by_root.at(root_hash);
+    auto keys = std::vector<edge_key> {};
+    if (auto const edge_iter = state.edges_by_root.find(root_hash); edge_iter != state.edges_by_root.end()) {
+        keys = edge_iter->second;
+    }
     std::ranges::sort(keys, {}, &edge_key::encoded_move);
 
-    if (!write_little_endian(output, root_hash) || !write_varint(output, keys.size())) {
+    if (!write_little_endian(output, root_hash) || !write_varint(output, state.root_game_counts.at(root_hash))
+        || !write_varint(output, keys.size()))
+    {
         return false;
     }
 
@@ -572,8 +590,8 @@ auto write_index_file(std::filesystem::path const& path,
                       std::vector<std::pair<std::uint64_t, std::uint32_t>> const& child_counts) -> result<void>
 {
     std::vector<std::uint64_t> roots;
-    roots.reserve(state.edges_by_root.size());
-    for (auto const& [root_hash, keys] : state.edges_by_root) {
+    roots.reserve(state.root_game_counts.size());
+    for (auto const& [root_hash, game_count] : state.root_game_counts) {
         roots.push_back(root_hash);
     }
     std::ranges::sort(roots);
@@ -604,44 +622,67 @@ auto write_index_file(std::filesystem::path const& path,
 
 }  // namespace
 
-auto opening_tree_index::build(game_store& store, std::filesystem::path const& path, build_options const& opts) -> result<void>
+struct opening_tree_index_builder::state
 {
-    auto ids_res = store.all_game_ids();
-    if (!ids_res) {
-        return tl::unexpected {ids_res.error()};
-    }
+    std::filesystem::path path;
+    opening_tree_index_build_options options;
+    hash_visit_counter visits;
+    build_state aggregate;
+    bool finalized {false};
 
-    constexpr auto default_spill_threshold = std::size_t {1} << 20U;
-    // Only hashes visited by 2+ distinct games need an explicit entry; a
-    // single-visit hash's transposition_frequency is implicitly 1 (see
-    // transposition_frequency_for). This is the actual memory-bounding
-    // lever: deep positions are overwhelmingly singletons.
-    constexpr auto keep_min_count = std::uint32_t {2};
-
-    hash_visit_counter visits {std::filesystem::path {path.string() + ".childfreq"}, default_spill_threshold};
-    build_state state;
-    for (auto const game_key : *ids_res) {
-        auto game_res = store.get(game_key);
-        if (!game_res) {
-            return tl::unexpected {game_res.error()};
-        }
-        if (auto accumulate_res = accumulate_game(*game_res, game_key, opts.max_root_ply, visits, state); !accumulate_res) {
-            return accumulate_res;
-        }
+    state(std::filesystem::path output_path, opening_tree_index_build_options build_options)
+        : path {std::move(output_path)}
+        , options {build_options}
+        , visits {std::filesystem::path {path.string() + ".childfreq"}, default_spill_threshold}
+    {
     }
+};
+
+opening_tree_index_builder::opening_tree_index_builder(std::filesystem::path path, opening_tree_index_build_options options)
+    : state_ {std::make_unique<state>(std::move(path), options)}
+{
+}
+
+opening_tree_index_builder::~opening_tree_index_builder() = default;
+opening_tree_index_builder::opening_tree_index_builder(opening_tree_index_builder&&) noexcept = default;
+auto opening_tree_index_builder::operator=(opening_tree_index_builder&&) noexcept -> opening_tree_index_builder& = default;
+
+auto opening_tree_index_builder::accumulate(replay_game_record const& game) -> result<void>
+{
+    if (state_->finalized) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    return accumulate_game(game, state_->options.max_root_ply, state_->visits, state_->aggregate);
+}
+
+auto opening_tree_index_builder::finalize() -> result<void>
+{
+    if (state_->finalized) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    state_->finalized = true;
 
     gtl::flat_hash_set<std::uint64_t> needed_child_hashes;
-    needed_child_hashes.reserve(state.edges.size());
-    for (auto const& entry : state.edges) {
+    needed_child_hashes.reserve(state_->aggregate.edges.size());
+    for (auto const& entry : state_->aggregate.edges) {
         needed_child_hashes.insert(entry.first.child_hash);
     }
-
-    auto child_counts = visits.finalize(keep_min_count, needed_child_hashes);
+    auto child_counts = state_->visits.finalize(std::uint32_t {2}, needed_child_hashes);
     if (!child_counts) {
         return tl::unexpected {child_counts.error()};
     }
+    return write_index_file(state_->path, state_->options, state_->aggregate, *child_counts);
+}
 
-    return write_index_file(path, opts, state, *child_counts);
+auto opening_tree_index::build(game_store& store, std::filesystem::path const& path, build_options const& opts) -> result<void>
+{
+    auto builder = opening_tree_index_builder {path, opts};
+    auto const replay_res =
+        store.for_each_replay_game([&builder](replay_game_record const& game) -> result<void> { return builder.accumulate(game); });
+    if (!replay_res) {
+        return tl::unexpected {replay_res.error()};
+    }
+    return builder.finalize();
 }
 
 auto opening_tree_index::open(std::filesystem::path const& path) -> result<opening_tree_index>
@@ -673,11 +714,13 @@ auto opening_tree_index::open(std::filesystem::path const& path) -> result<openi
 
     for (std::uint64_t node_index = 0; node_index < node_count; ++node_index) {
         std::uint64_t node_hash {};
+        std::uint64_t game_count_raw {};
         std::uint64_t continuation_count {};
-        if (!read_little_endian(input, node_hash) || !read_varint(input, continuation_count)) {
+        if (!read_little_endian(input, node_hash) || !read_varint(input, game_count_raw) || !read_varint(input, continuation_count)) {
             return tl::unexpected {error {error_code::io_failure, "truncated node header"}};
         }
         index.node_hashes_.push_back(node_hash);
+        index.node_game_counts_.push_back(static_cast<std::uint32_t>(game_count_raw));
 
         for (std::uint64_t cont_index = 0; cont_index < continuation_count; ++cont_index) {
             std::uint16_t encoded_move {};
@@ -755,6 +798,16 @@ auto opening_tree_index::query_opening_stats(zobrist_hash const hash) const -> r
     auto const begin = continuations_.begin() + static_cast<std::ptrdiff_t>(node_offsets_[node_index]);
     auto const end = continuations_.begin() + static_cast<std::ptrdiff_t>(node_offsets_[node_index + 1]);
     return std::vector<opening_stat_agg_row> {begin, end};
+}
+
+auto opening_tree_index::game_count(zobrist_hash const hash) const -> result<std::uint32_t>
+{
+    auto const lower = std::ranges::lower_bound(node_hashes_, hash.value);
+    auto const node_index = static_cast<std::size_t>(lower - node_hashes_.begin());
+    if (node_index >= node_hashes_.size() || node_hashes_[node_index] != hash.value) {
+        return std::uint32_t {0};
+    }
+    return node_game_counts_[node_index];
 }
 
 }  // namespace motif::db

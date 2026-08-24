@@ -4,6 +4,7 @@ find_package(glaze REQUIRED)
 find_package(tl-expected REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(DuckDB REQUIRED)
+find_package(xxHash REQUIRED)
 
 add_library(motif_db STATIC
     game_store.cpp
@@ -25,6 +26,7 @@ target_link_libraries(
         SQLite::SQLite3
         duckdb
         spdlog::spdlog
+        xxHash::xxhash
 )
 
 target_include_directories(

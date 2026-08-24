@@ -155,7 +155,7 @@ auto pgn_reader::game_number() const noexcept -> std::size_t
 auto pgn_reader::byte_offset() const noexcept -> std::size_t
 {
     if (!stream_.has_value() || iterator_ == stream_->end()) {
-        return 0;
+        return eof_offset_;
     }
     return base_offset_ + iterator_.byte_offset();
 }
@@ -173,6 +173,12 @@ auto pgn_reader::reset_to_offset(std::size_t byte_offset) -> result<void>
         return tl::unexpected(error_code::io_failure);
     }
 
+    std::error_code fserr;
+    eof_offset_ = std::filesystem::file_size(path_, fserr);
+    if (fserr) {
+        return tl::unexpected(error_code::io_failure);
+    }
+
     file_.clear();
     file_.seekg(0, std::ios::beg);
 
@@ -183,6 +189,17 @@ auto pgn_reader::reset_to_offset(std::size_t byte_offset) -> result<void>
 
         if (line.empty()) {
             if (file_.bad()) {
+                return tl::unexpected(error_code::io_failure);
+            }
+            // byte_offset == 0 (nothing to resume) and byte_offset >=
+            // eof_offset_ (a checkpoint taken exactly at the end of a
+            // now-fully-processed file -- nothing left to import) both
+            // legitimately reach EOF without a match. Any other byte_offset
+            // reaching EOF without a match means the requested resume point
+            // was never found -- e.g. the source file was truncated below a
+            // checkpointed offset -- and must be reported rather than
+            // silently treated as "nothing to import".
+            if (byte_offset > 0 && byte_offset < eof_offset_) {
                 return tl::unexpected(error_code::io_failure);
             }
             return {};
