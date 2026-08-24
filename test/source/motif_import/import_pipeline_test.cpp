@@ -762,7 +762,7 @@ TEST_CASE("import_pipeline: cancellation leaves the position table dirty, and re
         CHECK(start_position_matches(*mgr) == 3U);
     }
 
-    // A second run against the same source is cancelled before the worker
+    // A second run against the same source is canceled before the worker
     // starts (request_stop() called ahead of run(), mirroring a UI cancel
     // that lands before any line is read). commit_sqlite_batch() still opens
     // and commits the (empty) SQLite transaction and, per its real code
@@ -783,7 +783,7 @@ TEST_CASE("import_pipeline: cancellation leaves the position table dirty, and re
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(manifest_after_cancel->position_index_dirty);
 
-    // The cancelled run invalidated the postings generation. Reopen repairs
+    // The canceled run invalidated the postings generation. Reopen repairs
     // directly from canonical SQLite.
 
     auto reopened = motif::db::database_manager::open(tmp / "db");

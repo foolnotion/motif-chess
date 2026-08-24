@@ -114,7 +114,7 @@ class opening_tree_index
     std::vector<std::uint32_t> node_game_counts_;  // parallel to node_hashes_
     std::vector<std::uint64_t> node_data_offsets_;  // byte offset of each node's first continuation
     std::vector<std::uint32_t> node_continuation_counts_;
-    std::vector<std::uint8_t> node_complete_;  // parallel to node_hashes_; 1 iff fully aggregated past max_root_ply
+    std::vector<std::uint8_t> node_complete_;  // parallel to node_hashes_; 1 when fully aggregated past max_root_ply
     std::uint64_t source_game_count_ {};
     std::uint16_t max_root_ply_ {};
 };
