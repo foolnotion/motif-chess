@@ -141,6 +141,8 @@ auto measure_query_latencies(motif::db::database_manager const& manager,
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch assertions
 // make the perf setup inherently branchy
+// Catch2 assertion macros inflate this helper's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void run_position_search_perf_test()
 {
     if (is_sanitized_build) {

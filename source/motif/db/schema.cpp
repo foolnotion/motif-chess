@@ -70,23 +70,12 @@ constexpr char const* ddl = R"sql(
         date          TEXT,
         result        TEXT NOT NULL,
         eco           TEXT,
-        moves         BLOB    NOT NULL,
-        moves_hash    INTEGER NOT NULL,
+        moves         BLOB NOT NULL,
+        move_hash     BLOB NOT NULL,
+        identity_collision INTEGER NOT NULL DEFAULT 0,
         source_type   TEXT NOT NULL DEFAULT 'imported',
         source_label  TEXT,
         review_status TEXT NOT NULL DEFAULT 'new'
-    );
-
-    -- Keyed on moves_hash rather than the raw moves blob: an identity index
-    -- on moves would store every move sequence a second time in the index
-    -- B-tree, doubling that column's disk cost for no benefit over a hash.
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_game_identity ON game(
-        white_id,
-        black_id,
-        COALESCE(event_id, -1),
-        COALESCE(date, ''),
-        result,
-        moves_hash
     );
 
     CREATE TABLE IF NOT EXISTS game_tag (
@@ -100,6 +89,31 @@ constexpr char const* ddl = R"sql(
         name       TEXT NOT NULL PRIMARY KEY,
         applied_at TEXT NOT NULL
     );
+)sql";
+
+// Keyed on move_hash rather than the raw moves blob: an identity index on
+// moves would store every move sequence a second time in the index B-tree,
+// doubling that column's disk cost for no benefit over a hash.
+// identity_collision distinguishes distinct games that share every other
+// indexed field plus a move_hash collision, so the index stays unique
+// without a hash collision ever causing a false duplicate rejection.
+// language=sql
+constexpr char const* identity_index_ddl = R"sql(
+    CREATE UNIQUE INDEX IF NOT EXISTS game_identity_lookup ON game(
+        white_id,
+        black_id,
+        COALESCE(event_id, -1),
+        COALESCE(date, ''),
+        result,
+        move_hash,
+        identity_collision
+    );
+)sql";
+
+// language=sql
+constexpr auto identity_index_exists_sql = R"sql(
+    SELECT 1 FROM sqlite_master
+    WHERE type = 'index' AND name = 'game_identity_lookup'
 )sql";
 
 }  // namespace
@@ -147,13 +161,16 @@ auto initialize(sqlite3* conn) -> result<void>
     if (!ddl_res) {
         return tl::unexpected {ddl_res.error()};
     }
+    if (auto index_res = create_identity_index(conn); !index_res) {
+        return tl::unexpected {index_res.error()};
+    }
 
     // Set schema version.
     auto const ver_sql = fmt::format("PRAGMA user_version = {};", current_version);
     return exec(conn, ver_sql.c_str());
 }
 
-auto migrate(sqlite3* conn, std::uint32_t const from_version) -> result<void>
+auto migrate(sqlite3* /*conn*/, std::uint32_t const from_version) -> result<void>
 {
     if (from_version > current_version) {
         return tl::unexpected {error_code::schema_mismatch};
@@ -162,15 +179,12 @@ auto migrate(sqlite3* conn, std::uint32_t const from_version) -> result<void>
         return {};
     }
 
-    // v2 -> v3 added moves_hash, which needs a real hash evaluated per row --
-    // this exec()-only migration can't do that. Refuse rather than silently
-    // bump user_version; bundles at v2 or earlier must be rebuilt by reimporting.
-    if (from_version < 3U) {
-        return tl::unexpected {error_code::schema_mismatch};
-    }
-
-    auto const ver_sql = fmt::format("PRAGMA user_version = {};", current_version);
-    return exec(conn, ver_sql.c_str());
+    // Every version bump so far has needed either a real per-row hash
+    // (v2 -> v3) or the new collision-safe move_hash/identity_collision pair
+    // (v3 -> v4), neither of which an exec()-only migration can produce.
+    // Refuse rather than silently bump user_version; bundles below
+    // current_version must be rebuilt by reimporting.
+    return tl::unexpected {error_code::schema_mismatch};
 }
 
 auto version(sqlite3* conn) -> result<std::uint32_t>
@@ -187,6 +201,33 @@ auto version(sqlite3* conn) -> result<std::uint32_t>
         return tl::unexpected {error_code::io_failure};
     }
     return static_cast<std::uint32_t>(val);
+}
+
+auto create_identity_index(sqlite3* conn) -> result<void>
+{
+    return exec(conn, identity_index_ddl);
+}
+
+auto drop_identity_index(sqlite3* conn) -> result<void>
+{
+    return exec(conn, "DROP INDEX IF EXISTS game_identity_lookup;");
+}
+
+auto identity_index_exists(sqlite3* conn) -> result<bool>
+{
+    auto stmt = prepare(conn, identity_index_exists_sql);
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+
+    auto const step_rc = sqlite3_step(stmt->get());
+    if (step_rc == SQLITE_ROW) {
+        return true;
+    }
+    if (step_rc == SQLITE_DONE) {
+        return false;
+    }
+    return tl::unexpected {error_code::io_failure};
 }
 
 }  // namespace motif::db::schema

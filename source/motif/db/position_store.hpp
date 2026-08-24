@@ -36,6 +36,14 @@ class position_store
     auto insert_batch(std::span<position_row const> rows) -> result<void>;
     auto row_count() const -> result<std::int64_t>;
     auto query_by_zobrist(zobrist_hash hash, std::size_t limit = 0, std::size_t offset = 0) const -> result<std::vector<position_match>>;
+    // One row per distinct game reaching hash, holding the lowest ply at
+    // which it does so (result/elo fields are left default -- not populated
+    // by this query). Bounded to at most limit distinct games (0 = no
+    // limit), ordered by game_id. Unlike query_by_zobrist(), the limit here
+    // caps distinct games rather than rows, so combined with game-id-only
+    // consumers of the same limit the result never omits a returned game's
+    // ply.
+    auto query_min_ply_by_game(zobrist_hash hash, std::size_t limit = 0) const -> result<std::vector<position_match>>;
     auto query_tree_slice(zobrist_hash root_hash, std::uint16_t max_depth) const -> result<std::vector<tree_position_row>>;
     auto query_opening_stats(zobrist_hash hash) const -> result<std::vector<opening_stat_agg_row>>;
     auto query_opening_stats(zobrist_hash hash, std::vector<game_id> const& game_ids) const -> result<std::vector<opening_stat_agg_row>>;
@@ -45,6 +53,7 @@ class position_store
     auto delete_by_game_id(game_id game_key) -> result<void>;
     auto update_elo_for_game(game_id game_key, std::optional<std::int16_t> new_white_elo, std::optional<std::int16_t> new_black_elo)
         -> result<void>;
+    auto update_result_for_game(game_id game_key, std::int8_t new_result) -> result<void>;
     auto query_elo_distribution(zobrist_hash hash, int bucket_width) const -> result<std::vector<elo_distribution_row>>;
     auto query_elo_distribution(zobrist_hash hash, std::vector<game_id> const& game_ids, int bucket_width) const
         -> result<std::vector<elo_distribution_row>>;

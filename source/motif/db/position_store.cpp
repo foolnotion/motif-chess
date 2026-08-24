@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -32,11 +34,10 @@ constexpr auto create_position = R"sql(
 // result/white_elo/black_elo are per-game facts, not per-position ones. Kept
 // out of `position` (one row per ply visited, ~44 rows/game on average) and
 // normalized here (one row per game) instead -- storing them inline in
-// `position` cost ~1.2 GiB of otherwise-redundant, uncompressible bytes on a
+// `position` cost ~1.2 GiB of otherwise-redundant, incompressible bytes on a
 // 3.36M-game bundle (that table is sorted by zobrist_hash, not by game_id,
 // so the redundant per-game values never cluster and DuckDB's compression
-// gets no benefit from the repetition). See
-// docs/handoffs/2026-08-17-opening-explorer-storage.md, Session 6.
+// gets no benefit from the repetition).
 // language=sql
 constexpr auto create_game_result = R"sql(
     CREATE TABLE IF NOT EXISTS game_result (
@@ -206,7 +207,6 @@ auto run_query(duckdb_connection con, char const* sql) -> motif::db::result<void
     return {};
 }
 
-// One row per distinct game_id in `rows`, in the order it first appears.
 // position_row still carries result/white_elo/black_elo per instance (every
 // row of a game shares the same values, computed once by the import
 // pipeline) -- only insert_batch's storage split cares that these belong in
@@ -477,17 +477,56 @@ auto position_store::insert_batch(std::span<position_row const> rows) -> result<
         return tl::unexpected {error_code::io_failure};
     }
 
-    for (auto const& row : rows) {
-        duckdb_appender_begin_row(appender);
-        duckdb_append_uint64(appender, row.zobrist_hash.value);
-        duckdb_append_uint32(appender, row.game_id.value);
-        duckdb_append_uint16(appender, row.ply);
-        duckdb_append_uint16(appender, row.encoded_move);
-        if (duckdb_appender_end_row(appender) == DuckDBError) {
+    // Vectorized append: writes whole column vectors directly through their
+    // data pointers instead of one begin_row/append_*/end_row API-call
+    // sequence per row. Measured 225.9 ns/row (~19.65 us/game at the
+    // corpus's ~87 rows/game median) for the row-by-row appender in
+    // isolation -- this is DuckDB's documented high-throughput path for
+    // exactly that case. `position` has no nullable columns, so no validity
+    // mask handling is needed.
+    std::array<duckdb_logical_type, 4> types {
+        duckdb_create_logical_type(DUCKDB_TYPE_UBIGINT),
+        duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER),
+        duckdb_create_logical_type(DUCKDB_TYPE_USMALLINT),
+        duckdb_create_logical_type(DUCKDB_TYPE_USMALLINT),
+    };
+    duckdb_data_chunk chunk = duckdb_create_data_chunk(types.data(), types.size());
+    for (auto& type : types) {
+        duckdb_destroy_logical_type(&type);
+    }
+
+    auto const vector_size = static_cast<std::size_t>(duckdb_vector_size());
+    std::size_t offset = 0;
+    while (offset < rows.size()) {
+        auto const chunk_rows = std::min(vector_size, rows.size() - offset);
+
+        duckdb_data_chunk_reset(chunk);
+        auto const hash_data =
+            std::span {static_cast<std::uint64_t*>(duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 0))), vector_size};
+        auto const game_id_data =
+            std::span {static_cast<std::uint32_t*>(duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 1))), vector_size};
+        auto const ply_data =
+            std::span {static_cast<std::uint16_t*>(duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 2))), vector_size};
+        auto const move_data =
+            std::span {static_cast<std::uint16_t*>(duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 3))), vector_size};
+
+        for (std::size_t i = 0; i < chunk_rows; ++i) {
+            auto const& row = rows[offset + i];
+            hash_data[i] = row.zobrist_hash.value;
+            game_id_data[i] = row.game_id.value;
+            ply_data[i] = row.ply;
+            move_data[i] = row.encoded_move;
+        }
+        duckdb_data_chunk_set_size(chunk, chunk_rows);
+
+        if (duckdb_append_data_chunk(appender, chunk) == DuckDBError) {
+            duckdb_destroy_data_chunk(&chunk);
             duckdb_appender_destroy(&appender);
             return tl::unexpected {error_code::io_failure};
         }
+        offset += chunk_rows;
     }
+    duckdb_destroy_data_chunk(&chunk);
 
     auto const flush_ret = duckdb_appender_flush(appender);
     duckdb_appender_destroy(&appender);
@@ -541,6 +580,42 @@ auto position_store::query_by_zobrist(zobrist_hash const hash, std::size_t const
             .result = duckdb_value_int8(&guard.res, by_zobrist_col::result, row),
             .white_elo = read_optional_int16(guard.res, by_zobrist_col::white_elo, row),
             .black_elo = read_optional_int16(guard.res, by_zobrist_col::black_elo, row),
+        });
+    }
+
+    return matches;
+}
+
+auto position_store::query_min_ply_by_game(zobrist_hash const hash, std::size_t const limit) const -> result<std::vector<position_match>>
+{
+    auto const lock = std::scoped_lock {connection_mutex_};
+    auto sql = fmt::format(
+        "SELECT game_id, MIN(ply) AS ply "
+        "FROM position WHERE zobrist_hash = CAST({} AS UBIGINT) "
+        "GROUP BY game_id ORDER BY game_id",
+        hash.value);
+    if (limit > 0) {
+        sql += fmt::format(" LIMIT {}", limit);
+    }
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const nrows = static_cast<std::size_t>(duckdb_row_count(&guard.res));
+    std::vector<position_match> matches;
+    matches.reserve(nrows);
+    constexpr idx_t game_id_col = 0;
+    constexpr idx_t ply_col = 1;
+    for (std::size_t i = 0; i < nrows; ++i) {
+        auto const row = static_cast<idx_t>(i);
+        matches.push_back(position_match {
+            .game_id = motif::db::game_id {duckdb_value_uint32(&guard.res, game_id_col, row)},
+            .ply = duckdb_value_uint16(&guard.res, ply_col, row),
+            .result = 0,
+            .white_elo = std::nullopt,
+            .black_elo = std::nullopt,
         });
     }
 
@@ -838,6 +913,23 @@ auto position_store::update_elo_for_game(game_id const game_key,
         sql += fmt::format("black_elo = {}", static_cast<int>(*new_black_elo));
     }
     sql += fmt::format(" WHERE game_id = CAST({} AS UINTEGER)", game_key.value);
+
+    result_guard guard {};
+    if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return {};
+}
+
+auto position_store::update_result_for_game(game_id const game_key, std::int8_t const new_result) -> result<void>
+{
+    auto const lock = std::scoped_lock {connection_mutex_};
+    if (auto drop_res = run_query(con_, drop_opening_stats_rollups); !drop_res) {
+        return drop_res;
+    }
+
+    auto const sql = fmt::format(
+        "UPDATE game_result SET result = {} WHERE game_id = CAST({} AS UINTEGER)", static_cast<int>(new_result), game_key.value);
 
     result_guard guard {};
     if (duckdb_query(con_, sql.c_str(), &guard.res) == DuckDBError) {

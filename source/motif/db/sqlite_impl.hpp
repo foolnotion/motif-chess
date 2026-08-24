@@ -27,7 +27,7 @@ class txn_guard
             started_local_ = false;
             return;
         }
-        began_ = sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr) == SQLITE_OK;
+        began_ = sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) == SQLITE_OK;
         started_local_ = began_;
     }
 
