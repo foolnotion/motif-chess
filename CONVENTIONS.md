@@ -54,7 +54,7 @@ Treating a duplicate as a fatal error is a bug.
 - **All identifiers**: `lower_snake_case` — variables, functions, struct members, Qt signals, logger names.
 - **Template parameters only**: `CamelCase` (e.g., `template <typename ResultType>`).
 - **No `k_` prefix** for constants. Use `constexpr auto max_retry_count = 3;` not `constexpr auto k_max_retry_count = 3;`.
-- **Namespaces** mirror CMake targets: `motif::db`, `motif::import`, `motif::search`, `motif::engine`, `motif::app`.
+- **Namespaces** mirror CMake targets: `motif::db`, `motif::import`, `motif::search`, `motif::engine`, `motif::app`, `motif::slint_app`.
 - **No `using namespace`** in any header, ever.
 
 ---
@@ -125,9 +125,12 @@ result.and_then([](auto& game) { ... })
 | `motif_import` | Any Qt header; SQLite headers directly |
 | `motif_search` | Any Qt header; SQLite headers directly |
 | `motif_engine` | Any Qt header |
+| `motif_slint_app_service` | Any Qt or Slint header |
 
 `motif_import` and `motif_search` access storage exclusively through `motif_db` APIs.
 Shared domain types (`game`, `player`, `event`, `position`) live in `motif_db/types.hpp`.
+Generated Slint types and event-loop APIs stay in the `motif_slint_app` executable adapter; toolkit-neutral
+workspace/import services must not expose them in public headers.
 
 ---
 
