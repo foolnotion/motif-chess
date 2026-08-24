@@ -49,12 +49,12 @@ auto import_state_text(motif::slint_app::import_state state) -> std::string_view
             return "Idle";
         case import_state::running:
             return "Importing";
-        case import_state::cancelling:
-            return "Cancelling";
+        case import_state::canceling:
+            return "Canceling";
         case import_state::completed:
             return "Completed";
-        case import_state::cancelled:
-            return "Cancelled";
+        case import_state::canceled:
+            return "Canceled";
         case import_state::failed:
             return "Failed";
     }
@@ -87,7 +87,7 @@ auto publish_import_state(WorkspaceWindow& window, motif::slint_app::import_serv
 {
     auto const snapshot = importer.snapshot();
     auto const active =
-        snapshot.state == motif::slint_app::import_state::running || snapshot.state == motif::slint_app::import_state::cancelling;
+        snapshot.state == motif::slint_app::import_state::running || snapshot.state == motif::slint_app::import_state::canceling;
     window.set_import_active(active);
     window.set_import_status_visible(snapshot.state != motif::slint_app::import_state::idle);
     window.set_import_state_text(shared_string(import_state_text(snapshot.state)));

@@ -35,7 +35,7 @@ auto import_service::start(motif::db::database_manager* database, std::filesyste
     auto const start_lock = std::scoped_lock {start_mutex_};
     {
         auto const lock = std::scoped_lock {mutex_};
-        if (snapshot_.state == import_state::running || snapshot_.state == import_state::cancelling) {
+        if (snapshot_.state == import_state::running || snapshot_.state == import_state::canceling) {
             return tl::unexpected {import_error_code::busy};
         }
     }
@@ -83,7 +83,7 @@ auto import_service::start(motif::db::database_manager* database, std::filesyste
                 snapshot_.skipped = result->skipped;
                 snapshot_.errors = result->errors;
                 snapshot_.elapsed = result->elapsed;
-                snapshot_.state = cancel_requested_ ? import_state::cancelled : import_state::completed;
+                snapshot_.state = cancel_requested_ ? import_state::canceled : import_state::completed;
             } else {
                 snapshot_.state = import_state::failed;
                 snapshot_.error_message =
@@ -97,11 +97,11 @@ auto import_service::start(motif::db::database_manager* database, std::filesyste
 void import_service::request_cancel() noexcept
 {
     auto const lock = std::scoped_lock {mutex_};
-    if (snapshot_.state != import_state::running && snapshot_.state != import_state::cancelling) {
+    if (snapshot_.state != import_state::running && snapshot_.state != import_state::canceling) {
         return;
     }
     cancel_requested_ = true;
-    snapshot_.state = import_state::cancelling;
+    snapshot_.state = import_state::canceling;
     if (pipeline_) {
         pipeline_->request_stop();
     }
@@ -127,7 +127,7 @@ auto import_service::snapshot() const -> import_snapshot
 auto import_service::active() const -> bool
 {
     auto const lock = std::scoped_lock {mutex_};
-    return snapshot_.state == import_state::running || snapshot_.state == import_state::cancelling;
+    return snapshot_.state == import_state::running || snapshot_.state == import_state::canceling;
 }
 
 }  // namespace motif::slint_app
