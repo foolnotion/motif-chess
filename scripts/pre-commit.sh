@@ -21,7 +21,7 @@ fi
 # were applied", not an error -- only treat 2+ as fatal.
 echo "Running clang-format on staged changes..."
 set +e
-git clang-format --staged --quiet
+git clang-format --staged --quiet -- '*.cpp' '*.hpp' '*.h'
 clang_format_status=$?
 set -e
 if [ "$clang_format_status" -gt 1 ]; then
@@ -36,7 +36,7 @@ fi
 
 for f in $staged_cpp_files; do
     if [ -f "$f" ]; then
-        clang-tidy --quiet -p "$build_dir" --extra-arg="-w" "$f"
+        clang-tidy --quiet -p "$build_dir" --exclude-header-filter='^.*/build/.*' --extra-arg="-w" "$f"
     fi
 done
 

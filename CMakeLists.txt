@@ -22,6 +22,18 @@ option(
     OFF
 )
 
+option(
+    motif_ENABLE_SLINT_SPIKE
+    "Build the experimental Slint game-browser spike"
+    OFF
+)
+
+option(
+    motif_ENABLE_SLINT_APP
+    "Build the production motif_slint_app Slint desktop shell"
+    OFF
+)
+
 if(motif_ENABLE_X86_64_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=x86-64-v3>)
 endif()
@@ -35,6 +47,13 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 
 find_package(fmt REQUIRED)
 
+# Slint's package config unconditionally defines the GLOBAL imported target
+# Slint::slint-compiler. Resolve it once here to avoid duplicate target errors
+# when both Slint applications are enabled in the same configure run.
+if(motif_ENABLE_SLINT_SPIKE OR motif_ENABLE_SLINT_APP)
+  find_package(Slint CONFIG REQUIRED)
+endif()
+
 # ---- Modules ----
 
 add_subdirectory(source/motif/db)
@@ -45,6 +64,12 @@ add_subdirectory(source/motif/engine)
 add_subdirectory(source/motif/http)
 if(motif_ENABLE_APP)
   add_subdirectory(source/motif/app)
+endif()
+if(motif_ENABLE_SLINT_SPIKE)
+  add_subdirectory(source/motif/slint_spike)
+endif()
+if(motif_ENABLE_SLINT_APP)
+  add_subdirectory(source/motif/slint_app)
 endif()
 
 # ---- Install rules ----

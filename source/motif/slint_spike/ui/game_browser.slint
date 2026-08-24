@@ -1,0 +1,224 @@
+import { Button, ScrollView } from "std-widgets.slint";
+
+export struct GameRow {
+    white: string,
+    black: string,
+    result: string,
+    event: string,
+    date: string,
+    eco: string,
+}
+
+component TableHeader inherits Rectangle {
+    in property <string> title;
+    in property <int> column;
+    in-out property <length> column-width;
+    callback sort(int, bool);
+    property <bool> ascending: true;
+
+    height: 36px;
+    background: #202633;
+    Text {
+        x: 10px;
+        width: parent.width - 18px;
+        height: parent.height;
+        vertical-alignment: center;
+        color: #d7deea;
+        text: root.title + (root.ascending ? "  ^" : "  v");
+        font-weight: 600;
+    }
+    TouchArea {
+        width: parent.width - 5px;
+        clicked => {
+            root.ascending = !root.ascending;
+            root.sort(root.column, root.ascending);
+        }
+    }
+    resize := TouchArea {
+        property <length> last-mouse-x;
+        x: parent.width - 5px;
+        width: 10px;
+        mouse-cursor: col-resize;
+        changed pressed => {
+            self.last-mouse-x = self.mouse-x;
+        }
+        moved => {
+            if (self.pressed) {
+                root.column-width = max(70px, root.column-width + self.mouse-x - self.last-mouse-x);
+                self.last-mouse-x = self.mouse-x;
+            }
+        }
+    }
+}
+
+export component GameBrowser inherits Window {
+    in property <[GameRow]> games;
+    in-out property <int> selected-row: -1;
+    in property <string> selected-players;
+    in property <string> selected-event;
+    in property <string> selected-date;
+    in property <string> selected-result;
+    in property <string> moves;
+    in property <string> fen;
+    in property <int> current-ply;
+    in-out property <string> error-text;
+
+    callback select-row(int);
+    callback sort-requested(int, bool);
+    callback previous();
+    callback next();
+
+    property <length> white-width: 145px;
+    property <length> black-width: 145px;
+    property <length> result-width: 85px;
+    property <length> event-width: 170px;
+    property <length> date-width: 100px;
+    property <length> eco-width: 70px;
+    property <length> table-width: white-width + black-width + result-width + event-width + date-width + eco-width;
+
+    title: "Motif Slint Game Browser Spike";
+    preferred-width: 1180px;
+    preferred-height: 720px;
+    min-width: 800px;
+    min-height: 480px;
+    background: #11151d;
+    forward-focus: keyboard-handler;
+
+    function select-and-reveal(row: int) {
+        root.select-row(row);
+        let row-top: length = 36px + row * 34px;
+        let row-bottom: length = row-top + 34px;
+        if (row-top < table-scroll.viewport-y) {
+            table-scroll.viewport-y = row-top;
+        } else if (row-bottom > table-scroll.viewport-y + table-scroll.height) {
+            table-scroll.viewport-y = row-bottom - table-scroll.height;
+        }
+    }
+
+    keyboard-handler := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow && root.games.length > 0) {
+                root.select-and-reveal(min(root.games.length - 1, root.selected-row + 1));
+                return accept;
+            }
+            if (event.text == Key.UpArrow && root.games.length > 0) {
+                root.select-and-reveal(max(0, root.selected-row - 1));
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    HorizontalLayout {
+        padding: 14px;
+        spacing: 14px;
+
+        Rectangle {
+            horizontal-stretch: 3;
+            border-radius: 5px;
+            border-width: 1px;
+            border-color: #313949;
+            background: #171c26;
+
+            VerticalLayout {
+                padding: 1px;
+                spacing: 0px;
+
+                Rectangle {
+                    height: 44px;
+                    background: #171c26;
+                    Text {
+                        x: 12px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: "GAMES  " + root.games.length;
+                        color: #91a4c4;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+                }
+
+                table-scroll := ScrollView {
+                    viewport-width: max(self.width, root.table-width);
+                    viewport-height: 36px + root.games.length * 34px;
+
+                    HorizontalLayout {
+                        y: 0px;
+                        width: root.table-width;
+                        height: 36px;
+                        spacing: 0px;
+                        TableHeader { title: "White"; column: 0; column-width <=> root.white-width; sort(c, a) => { root.sort-requested(c, a); } }
+                        TableHeader { title: "Black"; column: 1; column-width <=> root.black-width; sort(c, a) => { root.sort-requested(c, a); } }
+                        TableHeader { title: "Result"; column: 2; column-width <=> root.result-width; sort(c, a) => { root.sort-requested(c, a); } }
+                        TableHeader { title: "Event"; column: 3; column-width <=> root.event-width; sort(c, a) => { root.sort-requested(c, a); } }
+                        TableHeader { title: "Date"; column: 4; column-width <=> root.date-width; sort(c, a) => { root.sort-requested(c, a); } }
+                        TableHeader { title: "ECO"; column: 5; column-width <=> root.eco-width; sort(c, a) => { root.sort-requested(c, a); } }
+                    }
+
+                    for row[index] in root.games: Rectangle {
+                        y: 36px + index * 34px;
+                        width: root.table-width;
+                        height: 34px;
+                        background: index == root.selected-row ? #315d86 : (Math.mod(index, 2) == 0 ? #1b2230 : #171c26);
+
+                        HorizontalLayout {
+                            spacing: 0px;
+                            Text { width: root.white-width; text: "  " + row.white; color: #e5eaf2; vertical-alignment: center; overflow: elide; }
+                            Text { width: root.black-width; text: "  " + row.black; color: #e5eaf2; vertical-alignment: center; overflow: elide; }
+                            Text { width: root.result-width; text: "  " + row.result; color: #d4bc78; vertical-alignment: center; }
+                            Text { width: root.event-width; text: "  " + row.event; color: #bbc5d6; vertical-alignment: center; overflow: elide; }
+                            Text { width: root.date-width; text: "  " + row.date; color: #bbc5d6; vertical-alignment: center; }
+                            Text { width: root.eco-width; text: "  " + row.eco; color: #91a4c4; vertical-alignment: center; }
+                        }
+                        TouchArea {
+                            clicked => { root.select-row(index); }
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                    root.select-row(index);
+                                    root.error-text = "Context action requested for row " + (index + 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 2;
+            min-width: 310px;
+            border-radius: 5px;
+            border-width: 1px;
+            border-color: #313949;
+            background: #171c26;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                Text { text: "SELECTED GAME"; color: #91a4c4; font-size: 14px; font-weight: 700; }
+                Text { text: root.selected-players; color: #f1f4f8; font-size: 22px; wrap: word-wrap; }
+                Text { text: root.selected-event; color: #bbc5d6; wrap: word-wrap; }
+                Text { text: root.selected-date + "   " + root.selected-result; color: #d4bc78; }
+                Rectangle { height: 1px; background: #313949; }
+                Text { text: "MOVES"; color: #91a4c4; font-size: 12px; font-weight: 700; }
+                ScrollView {
+                    vertical-stretch: 2;
+                    Text { width: parent.width; text: root.moves; color: #d7deea; wrap: word-wrap; }
+                }
+                HorizontalLayout {
+                    Button { text: "Previous"; clicked => { root.previous(); } }
+                    Text { horizontal-stretch: 1; text: "Ply " + root.current-ply; color: #91a4c4; horizontal-alignment: center; vertical-alignment: center; }
+                    Button { text: "Next"; clicked => { root.next(); } }
+                }
+                Text { text: "FEN"; color: #91a4c4; font-size: 12px; font-weight: 700; }
+                Text { text: root.fen; color: #aab7ca; wrap: word-wrap; font-size: 12px; }
+                if root.error-text != "": Rectangle {
+                    min-height: 38px;
+                    background: #52252b;
+                    border-radius: 3px;
+                    Text { x: 9px; width: parent.width - 18px; height: parent.height; text: root.error-text; color: #ffd6d9; wrap: word-wrap; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+}
