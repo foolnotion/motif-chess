@@ -186,7 +186,7 @@ export component WorkspaceWindow inherits Window {
                     }
                     if root.import-active: Button {
                         text: "Cancel Import";
-                        enabled: root.import-state-text != "Cancelling";
+                        enabled: root.import-state-text != "Canceling";
                         clicked => { root.cancel-import-requested(); }
                     }
                 }

@@ -131,7 +131,7 @@ TEST_CASE("import_service: rejects reentry and cancellation reaches a terminal s
     REQUIRE(second.error() == motif::slint_app::import_error_code::busy);
     service.request_cancel();
     auto const snapshot = wait_for_terminal(service);
-    REQUIRE(snapshot.state == motif::slint_app::import_state::cancelled);
+    REQUIRE(snapshot.state == motif::slint_app::import_state::canceled);
     REQUIRE_FALSE(service.active());
 }
 

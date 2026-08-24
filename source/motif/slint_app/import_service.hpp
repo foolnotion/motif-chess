@@ -28,9 +28,9 @@ enum class import_state : std::uint8_t
 {
     idle,
     running,
-    cancelling,
+    canceling,
     completed,
-    cancelled,
+    canceled,
     failed,
 };
 
