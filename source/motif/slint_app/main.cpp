@@ -95,6 +95,7 @@ auto publish_import_state(WorkspaceWindow& window, motif::slint_app::import_serv
     window.set_import_processed(to_ui_count(snapshot.processed));
     window.set_import_total(to_ui_count(snapshot.total));
     window.set_import_committed(to_ui_count(snapshot.committed));
+    window.set_import_skipped(to_ui_count(snapshot.skipped));
     window.set_import_errors(to_ui_count(snapshot.errors));
     if (snapshot.state == motif::slint_app::import_state::failed) {
         window.set_error_text(shared_string(snapshot.error_message));

@@ -266,12 +266,20 @@ auto import_pipeline::request_stop() noexcept -> void
 
 auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
+    if (config.num_workers == 0 || config.num_lines == 0) {
+        return tl::unexpected {error_code::invalid_state};
+    }
+
     auto const chk = read_checkpoint(db_.dir());
     if (chk) {
         auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {chk->source_path}).lexically_normal();
         auto const requested_source = std::filesystem::absolute(pgn_path).lexically_normal();
         if (checkpoint_source == requested_source) {
-            return resume(pgn_path, config);
+            auto resumed = resume_from_checkpoint(pgn_path, *chk, config);
+            if (resumed || resumed.error() != error_code::invalid_state) {
+                return resumed;
+            }
+            delete_checkpoint(db_.dir());
         }
     } else if (chk.error() != error_code::not_found) {
         return tl::unexpected {chk.error()};
@@ -281,12 +289,18 @@ auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config c
 
 auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
-    auto chk = read_checkpoint(db_.dir());
+    auto const chk = read_checkpoint(db_.dir());
     if (!chk) {
         return tl::unexpected {error_code::io_failure};
     }
+    return resume_from_checkpoint(pgn_path, *chk, config);
+}
 
-    auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {chk->source_path}).lexically_normal();
+auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_path,
+                                             import_checkpoint const& checkpoint,
+                                             import_config const& config) -> result<import_summary>
+{
+    auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {checkpoint.source_path}).lexically_normal();
     auto const requested_source = std::filesystem::absolute(pgn_path).lexically_normal();
     if (checkpoint_source != requested_source) {
         return tl::unexpected {error_code::invalid_state};
@@ -300,20 +314,20 @@ auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_confi
     // a valid resume point; exact EOF (the source was fully ingested) is
     // valid. Reject anything past it rather than letting pgn_reader silently
     // treat it as "nothing more to read".
-    if (chk->byte_offset > current_stat->size) {
+    if (checkpoint.byte_offset > current_stat->size) {
         return tl::unexpected {error_code::invalid_state};
     }
     // Detect the source file being edited or replaced at the same path since
     // the checkpoint was written -- either would make byte_offset point at
     // content that no longer matches what was already ingested.
-    if (current_stat->size != chk->source_size || current_stat->mtime_ns != chk->source_mtime_ns) {
+    if (current_stat->size != checkpoint.source_size || current_stat->mtime_ns != checkpoint.source_mtime_ns) {
         return tl::unexpected {error_code::invalid_state};
     }
     auto const current_hash = hash_source(pgn_path);
     if (!current_hash) {
         return tl::unexpected {current_hash.error()};
     }
-    if (*current_hash != chk->source_content_hash) {
+    if (*current_hash != checkpoint.source_content_hash) {
         return tl::unexpected {error_code::invalid_state};
     }
 
@@ -322,7 +336,7 @@ auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_confi
         return tl::unexpected {error_code::io_failure};
     }
 
-    auto pre_committed = chk->games_committed;
+    auto pre_committed = checkpoint.games_committed;
     if (!*index_exists) {
         // A process or power failure can occur after raw batches commit but
         // before deduplicate() restores the identity index. Reconcile that
@@ -338,7 +352,7 @@ auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_confi
         pre_committed = *game_count;
     }
 
-    return run_from(pgn_path, chk->byte_offset, pre_committed, chk->last_game_id, config);
+    return run_from(pgn_path, checkpoint.byte_offset, pre_committed, checkpoint.last_game_id, config);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

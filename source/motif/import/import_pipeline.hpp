@@ -12,6 +12,8 @@
 namespace motif::import
 {
 
+struct import_checkpoint;
+
 // Parallelism default that scales with the host instead of assuming a fixed
 // machine size: half of hardware_concurrency(), floor of 1. Chosen over a
 // flat cap after measuring diminishing returns above ~16-24 workers on a
@@ -92,6 +94,10 @@ class import_pipeline
     void request_stop() noexcept;
 
   private:
+    [[nodiscard]] auto resume_from_checkpoint(std::filesystem::path const& pgn_path,
+                                              import_checkpoint const& checkpoint,
+                                              import_config const& config) -> result<import_summary>;
+
     [[nodiscard]] auto run_from(std::filesystem::path const& pgn_path,
                                 std::size_t start_offset,
                                 std::int64_t pre_committed,
