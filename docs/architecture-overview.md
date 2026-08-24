@@ -2,7 +2,7 @@
 
 ## High-Level Stack
 
-Motif Chess is split into a backend server and a web frontend.
+Motif Chess is a local-first C++ application with multiple presentation adapters.
 
 Backend:
 
@@ -11,11 +11,14 @@ Backend:
 - Immutable position postings and opening-tree sidecars for position/statistics queries
 - HTTP API with SSE for progress and engine streaming
 
-Frontend:
+Desktop presentation:
 
-- React + TypeScript
-- panel-based workspace UI
-- generated API types from the OpenAPI contract
+- Slint is the production presentation direction
+- toolkit-neutral workspace and import services own UI-facing behavior
+- the existing Qt application remains a working migration baseline until Slint reaches parity
+
+The local HTTP/SSE adapter remains available for experimental web clients and automation. It is not
+the production desktop presentation layer.
 
 ## Data Model
 
@@ -38,21 +41,21 @@ Import flow:
 
 Opening exploration flow:
 
-- frontend derives or requests a position hash
+- a presentation adapter derives or requests a position hash
 - backend loads matching position occurrences from exact postings
 - backend resolves valid game contexts from SQLite
 - backend returns per-move aggregated statistics
 
 Engine analysis flow:
 
-- frontend registers or selects a UCI engine
+- a presentation adapter registers or selects a UCI engine
 - backend starts an analysis session for a FEN position
 - info, complete, and error events stream over SSE
 
 ## Quality Controls
 
 - strong Catch2 backend coverage
-- smoke E2E coverage in the web frontend
+- headless tests for toolkit-neutral desktop services
 - OpenAPI as the wire-contract source of truth
 - pre-commit formatting and `clang-tidy` checks
 - Docker image publication via GitHub Actions to Quay
@@ -60,5 +63,6 @@ Engine analysis flow:
 ## Known Limitations
 
 - SQLite mutations invalidate derived indexes before changing canonical data; queries fail closed until rebuild
-- the web UI is ahead of documentation, but still behind the backend in overall maturity
-- some historical specs describe a Qt GUI, while the active implementation is a web frontend
+- the production Slint shell currently covers workspace and import lifecycle; game browsing, board,
+  notation, and search parity remain migration work
+- some historical specs describe Qt as the target GUI; Qt now serves only as the working migration baseline
