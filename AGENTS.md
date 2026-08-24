@@ -123,10 +123,10 @@ Decisions are numbered sequentially across all entries (D001, D002, ...).
 
 Conventional commits: feat, fix, refactor, docs, test, chore.
 
-AI authorship attribution is prohibited in commit messages. Before committing
-in a fresh checkout, run `scripts/install-git-hooks.sh`; CI also rejects
-`Co-Authored-By` trailers for Anthropic or OpenCode and `Claude-Session`
-trailers.
+Never add AI authorship attribution to a commit message. Do not add
+`Co-Authored-By` trailers for any AI agent and do not add `Claude-Session`
+trailers. Before committing in a fresh checkout, run
+`scripts/install-git-hooks.sh`; CI enforces this rule.
 
 ## Do Not
 
