@@ -221,7 +221,50 @@ TEST_CASE("pgn_reader: byte_offset stays absolute across seek_to_offset", "[moti
     auto game = reader.next();
     REQUIRE(game.has_value());
     CHECK(find_tag(*game, "Event") == "Game2");
-    CHECK(reader.byte_offset() == 0);
+    CHECK(reader.byte_offset() == std::filesystem::file_size(tmp));
+
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("pgn_reader: seek_to_offset past the last event tag but before EOF fails", "[motif-import]")
+{
+    auto tmp = write_temp_pgn(two_games, "pgn_reader_truncated_resume_test.pgn");
+
+    const auto game2_offset = two_games.find("[Event \"Game2\"]");
+    REQUIRE(game2_offset != std::string_view::npos);
+
+    // Simulates resuming a checkpoint against a source file that's been
+    // truncated below the checkpointed offset: seeking to a byte offset
+    // strictly between the last event tag and EOF should surface an error
+    // rather than silently succeed with the offset never matched.
+    motif::import::pgn_reader reader {tmp};
+    auto const past_last_event = game2_offset + 1;
+    REQUIRE(past_last_event < std::filesystem::file_size(tmp));
+    auto seek_result = reader.seek_to_offset(past_last_event);
+    CHECK_FALSE(seek_result.has_value());
+    if (!seek_result) {
+        CHECK(seek_result.error() == motif::import::error_code::io_failure);
+    }
+
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("pgn_reader: seek_to_offset exactly at EOF succeeds with nothing left to read", "[motif-import]")
+{
+    auto tmp = write_temp_pgn(two_games, "pgn_reader_resume_at_eof_test.pgn");
+
+    // Simulates resuming a checkpoint taken right after the last game was
+    // processed (nothing left to import) -- must not be treated as an error.
+    motif::import::pgn_reader reader {tmp};
+    auto const eof_offset = std::filesystem::file_size(tmp);
+    auto seek_result = reader.seek_to_offset(eof_offset);
+    REQUIRE(seek_result.has_value());
+
+    auto game = reader.next();
+    CHECK_FALSE(game.has_value());
+    if (!game) {
+        CHECK(game.error() == motif::import::error_code::eof);
+    }
 
     std::filesystem::remove(tmp);
 }

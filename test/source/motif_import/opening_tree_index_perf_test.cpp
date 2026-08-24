@@ -78,11 +78,8 @@ TEST_CASE("opening_tree_index::build bounded-memory claim on a real corpus", "[p
     REQUIRE(init_log.has_value());
 
     motif::import::import_pipeline pipeline {*manager};
-    motif::import::import_config const import_cfg {
-        .num_workers = 1,
-        .num_lines = 1,
-        .rebuild_positions_after_import = false,
-    };
+    auto import_cfg = motif::import::import_config {};
+    import_cfg.rebuild_positions_after_import = false;
     auto import_summary = pipeline.run(pgn_path, import_cfg);
     auto const shutdown_result = motif::import::shutdown_logging();
     (void)shutdown_result;

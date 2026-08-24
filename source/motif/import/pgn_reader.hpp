@@ -34,7 +34,8 @@ class pgn_reader
     [[nodiscard]] auto game_number() const noexcept -> std::size_t;
 
     // Byte offset of the game currently ready to be returned (before next() is
-    // called). Returns 0 when the stream is exhausted or not yet started.
+    // called). Returns the source file size when the stream is exhausted and
+    // 0 when the stream is not yet started.
     [[nodiscard]] auto byte_offset() const noexcept -> std::size_t;
 
   private:
@@ -43,6 +44,7 @@ class pgn_reader
     std::filesystem::path path_;
     std::ifstream file_;
     std::size_t base_offset_ {0};
+    std::size_t eof_offset_ {0};
     std::optional<pgn::import_stream> stream_;
     pgn::import_stream::iterator iterator_;
     std::size_t game_number_ {0};

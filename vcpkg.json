@@ -36,6 +36,9 @@
     },
     {
       "name": "pgnlib"
+    },
+    {
+      "name": "xxhash"
     }
   ],
   "default-features": [],

@@ -184,6 +184,8 @@ constexpr auto opening_stats_perf_p99_limit_us = 500000.0;
 constexpr std::chrono::milliseconds opening_stats_endpoint_limit {500};
 constexpr std::string_view fail_next_import_worker_start_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_START"};
 constexpr std::string_view fail_next_import_worker_run_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_RUN"};
+constexpr std::int32_t color_filter_white_elo {2830};
+constexpr std::int32_t color_filter_black_elo {2795};
 
 struct tmp_dir
 {
@@ -347,14 +349,14 @@ struct http_game_seed
 {
     std::string white;
     std::string black;
-    std::optional<std::int32_t> white_elo {};
-    std::optional<std::int32_t> black_elo {};
+    std::optional<std::int32_t> white_elo {};  // NOLINT(readability-redundant-member-init)
+    std::optional<std::int32_t> black_elo {};  // NOLINT(readability-redundant-member-init)
     std::string result;
     std::string event;
     std::string date;
     std::string eco;
     std::uint16_t move_seed {};
-    std::optional<std::vector<std::uint16_t>> moves {};
+    std::optional<std::vector<std::uint16_t>> moves {};  // NOLINT(readability-redundant-member-init)
 };
 
 auto make_http_player(std::string name) -> motif::db::player
@@ -1354,6 +1356,7 @@ TEST_CASE("server: opening stats returns continuations for populated DB", "[moti
     CHECK(body.contains(R"("san")"));
     CHECK(body.contains(R"("result_hash")"));
     CHECK(body.contains(R"("frequency")"));
+    CHECK(body.contains(R"("direct_frequency")"));
     CHECK(body.contains(R"("white_wins")"));
     CHECK(body.contains(R"("draws")"));
     CHECK(body.contains(R"("black_wins")"));
@@ -1544,8 +1547,8 @@ TEST_CASE("server: game list filters by color and returns elos with total_count"
                      http_game_seed {
                          .white = "Magnus Carlsen",
                          .black = "Ian Nepomniachtchi",
-                         .white_elo = 2830,
-                         .black_elo = 2795,
+                         .white_elo = color_filter_white_elo,
+                         .black_elo = color_filter_black_elo,
                          .result = "1-0",
                          .event = "WCC",
                          .date = "2021.12.03",
@@ -2189,6 +2192,79 @@ TEST_CASE("server: import DELETE requests cancellation", "[motif-http]")
     run_import_delete_test();
 }
 
+// A database request made while an import holds database_mutex for its
+// entire run() must return promptly (503) instead of blocking the calling
+// httplib worker thread for the whole import, and progress/cancel must
+// remain reachable throughout.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: database request during active import returns promptly and progress/cancel stay reachable", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"import_busy"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "import-busy");
+    REQUIRE(db_res.has_value());
+
+    auto const pgn_path = write_pgn_fixture(tdir.path, make_repeated_pgn(long_import_game_count));
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18169};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const post_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 202);
+    auto const import_id = extract_import_id(post_res->body);
+    REQUIRE(!import_id.empty());
+
+    // A data endpoint issued while the import is running must come back
+    // fast -- it must not sit blocked on database_mutex for anywhere near
+    // the import's full duration.
+    auto const busy_started = std::chrono::steady_clock::now();
+    auto const busy_res = cli.Get("/api/games/count");
+    auto const busy_elapsed = std::chrono::steady_clock::now() - busy_started;
+    REQUIRE(busy_res != nullptr);
+    CHECK(busy_res->status == 503);
+    CHECK(busy_elapsed < std::chrono::seconds {2});
+
+    // Progress dispatch must still be reachable while busy: the connection
+    // yields data promptly rather than stalling behind database_mutex.
+    // Returning false from the content receiver after the first chunk makes
+    // cpp-httplib report the request as canceled (a null Result), so success
+    // here is judged by having received data at all, not by the Result
+    // pointer.
+    std::string first_progress_chunk;
+    cli.Get("/api/imports/" + import_id + "/progress",
+            httplib::Headers {},
+            [&first_progress_chunk](const char* data, size_t size) -> bool
+            {
+                first_progress_chunk.append(data, size);
+                return false;
+            });
+    CHECK_FALSE(first_progress_chunk.empty());
+
+    auto const del_res = cli.Delete("/api/imports/" + import_id);
+    REQUIRE(del_res != nullptr);
+    CHECK(del_res->status == 200);
+
+    std::string collected_events;
+    cli.Get("/api/imports/" + import_id + "/progress",
+            httplib::Headers {},
+            [&collected_events](const char* data, size_t size) -> bool
+            {
+                collected_events.append(data, size);
+                return true;
+            });
+    CHECK(collected_events.contains("event: complete"));
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("server: second POST while import active returns 409 immediately", "[motif-http]")
 {
@@ -2620,6 +2696,7 @@ TEST_CASE("server: legal-moves missing fen returns 400", "[motif-http]")
 
 // ─── Position hash endpoint tests ─────────────────────────────────────────────
 
+// NOLINTBEGIN(readability-function-cognitive-complexity)
 TEST_CASE("server: position hash initial position returns correct hash", "[motif-http]")
 {
     auto const tdir = tmp_dir {"pos_hash_initial"};
@@ -2680,6 +2757,8 @@ TEST_CASE("server: position hash missing or malformed fen returns 400", "[motif-
     CHECK(empty_param->body == R"({"error":"invalid fen"})");
     CHECK(malformed->body == R"({"error":"invalid fen"})");
 }
+
+// NOLINTEND(readability-function-cognitive-complexity)
 
 // ─── Apply-move endpoint tests ────────────────────────────────────────────────
 
@@ -2812,6 +2891,7 @@ TEST_CASE("server: apply-move bad request body returns 400", "[motif-http]")
 // Engine analysis route tests (AC 1, 3, 7 — Story 4d.2)
 // ---------------------------------------------------------------------------
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("server: POST /api/engine/analyses valid body returns 202 with analysis_id", "[motif-http]")
 {
     auto const fake_engine = make_fast_complete_engine_http();
@@ -3088,6 +3168,7 @@ TEST_CASE("server: POST /api/engine/analyses returns 503 when no engine configur
     CHECK(res->status == 503);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("server: GET /api/engine/analyses/:id/stream receives info and complete SSE events", "[motif-http]")
 {
     auto const fake_engine = make_fast_complete_engine_http();
@@ -3129,10 +3210,11 @@ TEST_CASE("server: GET /api/engine/analyses/:id/stream receives info and complet
     server_thread.join();
     static_cast<void>(std::filesystem::remove(fake_engine));
 
-    CHECK(collected_events.find("event: info") != std::string::npos);
-    CHECK(collected_events.find("event: complete") != std::string::npos);
+    CHECK(collected_events.find("event: info") != std::string::npos);  // NOLINT(abseil-string-find-str-contains)
+    CHECK(collected_events.find("event: complete") != std::string::npos);  // NOLINT(abseil-string-find-str-contains)
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("server: DELETE /api/engine/analyses/:id for active session returns 204", "[motif-http]")
 {
     // Use a wait-for-stop engine (emits info but no bestmove until stop)
@@ -3173,6 +3255,7 @@ TEST_CASE("server: DELETE /api/engine/analyses/:id for active session returns 20
     CHECK(del_res->status == 204);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("server: DELETE /api/engine/analyses/:id for already-terminal session returns 409", "[motif-http]")
 {
     auto const fake_engine = make_fast_complete_engine_http();

@@ -627,11 +627,8 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
     REQUIRE(stats_before.has_value());
     CHECK(stats_before->total_games == 2);
 
-    auto del_positions = manager->positions().delete_by_game_id(*game1_id);
-    REQUIRE(del_positions.has_value());
-
-    auto del_game = manager->store().remove(*game1_id);
-    REQUIRE(del_game.has_value());
+    auto const delete_res = manager->remove_game(*game1_id);
+    REQUIRE(delete_res.has_value());
 
     auto stats_after = motif::search::opening_stats::query(*manager, start_hash);
     REQUIRE(stats_after.has_value());
@@ -743,7 +740,7 @@ TEST_CASE("opening_stats::query counts transpositions in total_games", "[motif-s
     CHECK(stats->continuations.front().frequency == 2);
 }
 
-TEST_CASE("opening_stats::query continuation frequency counts all paths to child", "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query separates direct frequency from transposition popularity", "[motif-search][opening_stats]")
 {
     // Game 1 arrives at the transposition position via 1.Nf3 Nc6 2.Nc3 Nf6 (parent = after Nf3 Nc6 Nc3).
     // Game 2 arrives via 1.Nc3 Nf6 2.Nf3 Nc6 (different parent).
@@ -1289,6 +1286,7 @@ TEST_CASE("opening_stats::query filtered with transposition counts only games th
     CHECK(cont.result_hash == child_hash);
     // Only game1 is in filtered_ids (game2 never passes through parent_hash)
     CHECK(cont.frequency == 1);
+    CHECK(cont.direct_frequency == 1);
 }
 
 // ─── Elo distribution (3b-3) ─────────────────────────────────────────────────

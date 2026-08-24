@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -107,8 +108,8 @@ struct opening_continuation_response
 {
     std::string san;
     std::string result_hash;
-    std::uint32_t frequency {};
-    std::uint32_t direct_frequency {};
+    std::uint32_t frequency {};  // Existing API: games reaching result_hash by any move order.
+    std::uint32_t direct_frequency {};  // Games playing this direct continuation.
     std::uint32_t white_wins {};
     std::uint32_t draws {};
     std::uint32_t black_wins {};
@@ -307,6 +308,43 @@ void set_json_error(httplib::Response& res, int const status, std::string_view c
     res.set_content(body, "application/json");
     res.status = status;
 }
+
+// Fails fast with 503 while an import/rebuild holds database_mutex for its
+// entire (potentially minutes-long) duration, instead of letting the calling
+// httplib worker thread block on database_mutex for that whole time. Callers
+// check this before attempting database_mutex; returns true if the response
+// was set and the caller must return without touching the database.
+[[nodiscard]] auto try_database_access(std::atomic<bool> const& import_active, std::shared_mutex& database_gate, httplib::Response& res)
+    -> std::optional<std::shared_lock<std::shared_mutex>>
+{
+    if (import_active.load(std::memory_order_acquire)) {
+        set_json_error(res, http_service_unavailable, "database busy: import in progress");
+        return std::nullopt;
+    }
+    auto lock = std::shared_lock {database_gate, std::try_to_lock};
+    if (!lock.owns_lock() || import_active.load(std::memory_order_acquire)) {
+        set_json_error(res, http_service_unavailable, "database busy: import in progress");
+        return std::nullopt;
+    }
+    return lock;
+}
+
+struct active_operation_guard
+{
+    explicit active_operation_guard(std::atomic<bool>* active_flag) noexcept
+        : active {active_flag}
+    {
+    }
+
+    ~active_operation_guard() { active->store(false, std::memory_order_release); }
+
+    active_operation_guard(active_operation_guard const&) = delete;
+    auto operator=(active_operation_guard const&) -> active_operation_guard& = delete;
+    active_operation_guard(active_operation_guard&&) = delete;
+    auto operator=(active_operation_guard&&) -> active_operation_guard& = delete;
+
+    std::atomic<bool>* active;
+};
 
 auto parse_size(std::string_view str) -> std::optional<std::size_t>
 {
@@ -669,6 +707,15 @@ struct server::impl
     httplib::Server svr;
     motif::engine::engine_manager engine_mgr;
     std::mutex database_mutex;
+    std::shared_mutex database_gate;
+    // Set for the duration of a running import/rebuild (import_pipeline::run()
+    // touches the shared SQLite/DuckDB connections for potentially minutes).
+    // Data endpoints check this before attempting database_mutex so they fail
+    // fast with 503 instead of occupying an httplib worker thread blocked on
+    // the mutex for the whole import, which would otherwise starve the
+    // server's limited thread pool and, transitively, progress/cancel
+    // dispatch for new connections.
+    std::atomic<bool> import_active {false};
     std::mutex sessions_mutex;
     gtl::flat_hash_map<std::string, std::shared_ptr<detail::import_session>> sessions;
     // Each entry pairs an import_id with its worker thread for lifecycle tracking.
@@ -930,6 +977,10 @@ void server::impl::setup_routes()
                     return;
                 }
 
+                auto database_access = try_database_access(import_active, database_gate, res);
+                if (!database_access) {
+                    return;
+                }
                 auto matches = [this, hash_val, limit, offset]() -> decltype(motif::search::position_search::find(
                                                                      database, motif::db::zobrist_hash {hash_val}, limit, offset))
                 {
@@ -965,6 +1016,10 @@ void server::impl::setup_routes()
                     // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
                 }
 
+                auto database_access = try_database_access(import_active, database_gate, res);
+                if (!database_access) {
+                    return;
+                }
                 auto query_result =
                     [this, hash_val]() -> decltype(motif::search::opening_stats::query(database, motif::db::zobrist_hash {hash_val}))
                 {
@@ -1063,6 +1118,10 @@ void server::impl::setup_routes()
                     .limit = limit,
                 };
 
+                auto database_access = try_database_access(import_active, database_gate, res);
+                if (!database_access) {
+                    return;
+                }
                 auto games = [this, &filter]() -> decltype(database.find_games(filter))
                 {
                     std::scoped_lock const lock {database_mutex};
@@ -1093,6 +1152,10 @@ void server::impl::setup_routes()
                     return;
                 }
 
+                auto database_access = try_database_access(import_active, database_gate, res);
+                if (!database_access) {
+                    return;
+                }
                 auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
                 {
                     std::scoped_lock const lock {database_mutex};
@@ -1121,6 +1184,10 @@ void server::impl::setup_routes()
                     return;
                 }
 
+                auto database_access = try_database_access(import_active, database_gate, res);
+                if (!database_access) {
+                    return;
+                }
                 auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
                 {
                     std::scoped_lock const lock {database_mutex};
@@ -1180,6 +1247,10 @@ void server::impl::setup_routes()
 
                  auto const& pgn_game = games.front();
 
+                 auto database_access = try_database_access(import_active, database_gate, res);
+                 if (!database_access) {
+                     return;
+                 }
                  auto game_id = motif::db::game_id {};
                  {
                      std::scoped_lock const lock {database_mutex};
@@ -1232,6 +1303,10 @@ void server::impl::setup_routes()
     svr.Get("/api/games/count",
             [this](httplib::Request const& /*req*/, httplib::Response& res) -> void
             {
+                auto database_access = try_database_access(import_active, database_gate, res);
+                if (!database_access) {
+                    return;
+                }
                 auto count = [this]() -> decltype(database.store().count_games())
                 {
                     std::scoped_lock const lock {database_mutex};
@@ -1250,8 +1325,22 @@ void server::impl::setup_routes()
     svr.Post("/api/positions/rebuild",
              [this](httplib::Request const& /*req*/, httplib::Response& res) -> void
              {
-                 std::scoped_lock const lock {database_mutex};
-                 auto rebuild_res = database.rebuild_position_store();
+                 auto expected = false;
+                 if (!import_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                     set_json_error(res, http_service_unavailable, "database busy: import in progress");
+                     return;
+                 }
+                 active_operation_guard const active_guard {&import_active};
+                 // rebuild_position_store() is itself a long-running DB mutation
+                 // (see database_manager.cpp); mark it active so other data
+                 // endpoints fail fast instead of blocking on database_mutex for
+                 // its whole duration.
+                 auto rebuild_res = [this]() -> motif::db::result<void>
+                 {
+                     std::unique_lock const gate_lock {database_gate};
+                     std::scoped_lock const lock {database_mutex};
+                     return database.rebuild_position_store();
+                 }();
                  if (!rebuild_res) {
                      set_json_error(res, http_internal_error, "position store rebuild failed");
                      return;
@@ -1285,6 +1374,10 @@ void server::impl::setup_routes()
                       return;
                   }
 
+                  auto database_access = try_database_access(import_active, database_gate, res);
+                  if (!database_access) {
+                      return;
+                  }
                   auto patch_result = [this, &game_id, &patch]() -> motif::db::result<void>
                   {
                       std::scoped_lock const lock {database_mutex};
@@ -1337,9 +1430,13 @@ void server::impl::setup_routes()
                        return;
                    }
 
+                   auto database_access = try_database_access(import_active, database_gate, res);
+                   if (!database_access) {
+                       return;
+                   }
                    {
                        std::scoped_lock const lock {database_mutex};
-                       auto delete_result = database.store().remove_user_game(*game_id);
+                       auto delete_result = database.remove_user_game(*game_id);
 
                        if (!delete_result) {
                            if (delete_result.error() == motif::db::error_code::not_found) {
@@ -1353,11 +1450,6 @@ void server::impl::setup_routes()
                            set_json_error(res, http_internal_error, "delete failed");
                            return;
                        }
-
-                       // Remove deleted game's position rows from DuckDB.
-                       // position_store has no bulk delete API; delete_by_game_id
-                       // is cheaper than a full rebuild for a single game.
-                       static_cast<void>(database.positions().delete_by_game_id(*game_id));
                    }
 
                    res.status = http_no_content;
@@ -1373,6 +1465,10 @@ void server::impl::setup_routes()
                     return;
                 }
 
+                auto database_access = try_database_access(import_active, database_gate, res);
+                if (!database_access) {
+                    return;
+                }
                 auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
                 {
                     std::scoped_lock const lock {database_mutex};
@@ -1661,35 +1757,49 @@ void server::impl::setup_routes()
                  auto const simulate_start_failure = fail_next_import_worker_start_for_test.exchange(false);
                  auto const simulate_run_failure = fail_next_import_worker_run_for_test.exchange(false);
                  try {
+                     auto expected = false;
+                     if (!import_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                         std::scoped_lock const lock {sessions_mutex};
+                         sessions.erase(import_id);
+                         set_json_error(res, http_service_unavailable, "database busy: import in progress");
+                         return;
+                     }
                      if (simulate_start_failure) {
                          throw std::system_error {std::make_error_code(std::errc::resource_unavailable_try_again),
                                                   "simulated import worker start failure"};
                      }
-                     auto worker = std::jthread {
-                         [session, pgn_path, simulate_run_failure]() -> void
-                         {
-                             auto result = simulate_run_failure ? motif::import::result<motif::import::import_summary> {tl::unexpected {
-                                                                      motif::import::error_code::invalid_state}}
-                                                                : session->pipeline->run(pgn_path, {});
-                             if (result) {
-                                 session->summary = *result;
-                             } else {
-                                 // Include error code in message so the SSE JSON
-                                 // escaping path is exercised when chars like '"'
-                                 // appear after further formatting.
-                                 session->error_message = fmt::format(R"(import failed: "{}")", motif::import::to_string(result.error()));
-                                 // Release store: pairs with acquire loads on done
-                                 // to make error_message visible.
-                                 session->failed.store(true, std::memory_order_release);
-                             }
-                             session->done.store(true, std::memory_order_release);
-                             session->cv.notify_all();
-                         }};
+                     auto worker = std::jthread {[this, session, pgn_path, simulate_run_failure]() -> void
+                                                 {
+                                                     active_operation_guard const active_guard {&import_active};
+                                                     {
+                                                         std::unique_lock const gate_lock {database_gate};
+                                                         std::scoped_lock const lock {database_mutex};
+                                                         auto result = simulate_run_failure
+                                                             ? motif::import::result<motif::import::import_summary> {tl::unexpected {
+                                                                   motif::import::error_code::invalid_state}}
+                                                             : session->pipeline->run(pgn_path, {});
+                                                         if (result) {
+                                                             session->summary = *result;
+                                                         } else {
+                                                             // Include error code in message so the SSE JSON
+                                                             // escaping path is exercised when chars like '"'
+                                                             // appear after further formatting.
+                                                             session->error_message = fmt::format(R"(import failed: "{}")",
+                                                                                                  motif::import::to_string(result.error()));
+                                                             // Release store: pairs with acquire loads on done
+                                                             // to make error_message visible.
+                                                             session->failed.store(true, std::memory_order_release);
+                                                         }
+                                                     }
+                                                     session->done.store(true, std::memory_order_release);
+                                                     session->cv.notify_all();
+                                                 }};
                      {
                          std::scoped_lock const lock {sessions_mutex};
                          import_workers.emplace_back(import_id, std::move(worker));
                      }
                  } catch (std::system_error const&) {
+                     import_active.store(false, std::memory_order_release);
                      std::scoped_lock const lock {sessions_mutex};
                      sessions.erase(import_id);
                      set_json_error(res, http_internal_error, "failed to start import worker");
@@ -1753,16 +1863,30 @@ void server::impl::setup_routes()
                  }
 
                  try {
-                     auto worker = std::jthread {[session, pgn_path = temp_path]() -> void
+                     auto expected = false;
+                     if (!import_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                         std::error_code remove_err {};
+                         std::filesystem::remove(temp_path, remove_err);
+                         std::scoped_lock const lock {sessions_mutex};
+                         sessions.erase(import_id);
+                         set_json_error(res, http_service_unavailable, "database busy: import in progress");
+                         return;
+                     }
+                     auto worker = std::jthread {[this, session, pgn_path = temp_path]() -> void
                                                  {
+                                                     active_operation_guard const active_guard {&import_active};
                                                      try {
-                                                         auto result = session->pipeline->run(pgn_path, {});
-                                                         if (result) {
-                                                             session->summary = *result;
-                                                         } else {
-                                                             session->error_message = fmt::format(R"(import failed: "{}")",
-                                                                                                  motif::import::to_string(result.error()));
-                                                             session->failed.store(true, std::memory_order_release);
+                                                         {
+                                                             std::unique_lock const gate_lock {database_gate};
+                                                             std::scoped_lock const lock {database_mutex};
+                                                             auto result = session->pipeline->run(pgn_path, {});
+                                                             if (result) {
+                                                                 session->summary = *result;
+                                                             } else {
+                                                                 session->error_message = fmt::format(
+                                                                     R"(import failed: "{}")", motif::import::to_string(result.error()));
+                                                                 session->failed.store(true, std::memory_order_release);
+                                                             }
                                                          }
                                                      } catch (...) {
                                                          std::error_code remove_err {};
@@ -1783,6 +1907,7 @@ void server::impl::setup_routes()
                          import_workers.emplace_back(import_id, std::move(worker));
                      }
                  } catch (std::system_error const&) {
+                     import_active.store(false, std::memory_order_release);
                      std::error_code remove_err {};
                      std::filesystem::remove(temp_path, remove_err);
                      std::scoped_lock const lock {sessions_mutex};
@@ -1837,6 +1962,8 @@ void server::impl::setup_routes()
                             switch (phase) {
                                 case motif::import::import_phase::ingesting:
                                     return "ingesting";
+                                case motif::import::import_phase::deduplicating:
+                                    return "deduplicating";
                                 case motif::import::import_phase::rebuilding:
                                     return "rebuilding";
                                 default:

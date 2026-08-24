@@ -253,6 +253,10 @@ TEST_CASE("opening_tree_index::build dedupes a within-game repeated edge and agg
     auto stats = opened->query_opening_stats(start_hash);
     REQUIRE(stats.has_value());
     REQUIRE(stats->size() == 1);
+    REQUIRE(opened->game_count(start_hash).has_value());
+    CHECK(*opened->game_count(start_hash) == 2);
+    REQUIRE(opened->game_count(h_hash).has_value());
+    CHECK(*opened->game_count(h_hash) == 2);
 
     check_dedup_edge(stats->front(), h_hash, white_elo_a, white_elo_b, black_elo_a);
 }
@@ -286,6 +290,13 @@ TEST_CASE("opening_tree_index::open is stable across repeated reads of the same 
     for (std::size_t i = 0; i < first_stats->size(); ++i) {
         check_rows_equal((*first_stats)[i], (*second_stats)[i]);
     }
+
+    auto const terminal_hash = hash_after_sans({"e4", "e5"});
+    auto terminal_stats = opened_first->query_opening_stats(terminal_hash);
+    REQUIRE(terminal_stats.has_value());
+    CHECK(terminal_stats->empty());
+    REQUIRE(opened_first->game_count(terminal_hash).has_value());
+    CHECK(*opened_first->game_count(terminal_hash) == 1);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate the reported complexity of test bodies.
@@ -353,7 +364,7 @@ void write_u64_le(std::ofstream& out, std::uint64_t const value)
     }
 }
 
-constexpr auto test_format_version = std::uint32_t {2};
+constexpr auto test_format_version = std::uint32_t {3};
 constexpr auto test_max_root_ply = std::uint16_t {20};
 constexpr auto arbitrary_hash_a = std::uint64_t {0xAAAAAAAAAAAAAAAAULL};
 constexpr auto arbitrary_hash_b = std::uint64_t {0xBBBBBBBBBBBBBBBBULL};
@@ -402,6 +413,7 @@ TEST_CASE("opening_tree_index::open rejects a malformed overflowing varint inste
         write_u64_le(out, 1);  // node_count: one node
 
         write_u64_le(out, arbitrary_hash_a);  // node hash
+        out.put(single_continuation_varint_byte);  // game_count varint: 1
         out.put(single_continuation_varint_byte);  // continuation_count varint: 1
 
         write_u16_le(out, arbitrary_encoded_move);

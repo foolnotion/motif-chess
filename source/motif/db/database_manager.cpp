@@ -1,10 +1,12 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -47,6 +49,21 @@ auto open_sqlite(std::filesystem::path const& db_path) -> result<sqlite3*>
         }
         return tl::unexpected {error_code::io_failure};
     }
+    // synchronous=FULL: a commit is not durable until fsynced, which is what
+    // makes "checkpoint written after commit" a sound ordering under power
+    // loss. synchronous=NORMAL under WAL only fsyncs at checkpoint boundaries,
+    // so an import.checkpoint.json write (itself fsynced via rename-replace)
+    // could persist and be read back on the next resume() while the SQLite
+    // commit it describes was still only in the OS page cache and lost in a
+    // crash -- silently skipping games on resume. cache_size/mmap_size raise
+    // the working-set that can stay resident as games.db grows into the
+    // multi-GB range; wal_autocheckpoint raised from the 1000-page default
+    // reduces mid-import checkpoint stalls at the cost of a larger WAL file
+    // between checkpoints.
+    sqlite3_exec(conn, "PRAGMA synchronous = FULL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(conn, "PRAGMA cache_size = -200000;", nullptr, nullptr, nullptr);
+    sqlite3_exec(conn, "PRAGMA mmap_size = 30000000000;", nullptr, nullptr, nullptr);
+    sqlite3_exec(conn, "PRAGMA wal_autocheckpoint = 10000;", nullptr, nullptr, nullptr);
     return conn;
 }
 
@@ -107,28 +124,32 @@ auto narrow_elo(std::optional<std::int32_t> const& elo) -> result<std::optional<
 }
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto build_position_rows(game const& game, motif::db::game_id const game_id, std::int8_t result_code) -> result<std::vector<position_row>>
+auto build_position_rows(std::span<std::uint16_t const> const moves,
+                         motif::db::game_id const game_id,
+                         std::int8_t const result_code,
+                         std::optional<std::int32_t> const& white_elo,
+                         std::optional<std::int32_t> const& black_elo) -> result<std::vector<position_row>>
 {
-    if (game.moves.empty()) {
+    if (moves.empty()) {
         return std::vector<position_row> {};
     }
 
-    if (game.moves.size() > std::numeric_limits<std::uint16_t>::max()) {
+    if (moves.size() > std::numeric_limits<std::uint16_t>::max()) {
         return tl::unexpected {error_code::io_failure};
     }
 
-    auto white_elo = narrow_elo(game.white.elo);
-    if (!white_elo) {
-        return tl::unexpected {white_elo.error()};
+    auto const narrowed_white_elo = narrow_elo(white_elo);
+    if (!narrowed_white_elo) {
+        return tl::unexpected {narrowed_white_elo.error()};
     }
-    auto black_elo = narrow_elo(game.black.elo);
-    if (!black_elo) {
-        return tl::unexpected {black_elo.error()};
+    auto const narrowed_black_elo = narrow_elo(black_elo);
+    if (!narrowed_black_elo) {
+        return tl::unexpected {narrowed_black_elo.error()};
     }
 
     auto board = motif::chess::board {};
     std::vector<position_row> batch;
-    batch.reserve(game.moves.size() + 1);
+    batch.reserve(moves.size() + 1);
 
     // Starting position row (ply = 0) so root-hash queries find data
     batch.push_back(position_row {
@@ -137,20 +158,20 @@ auto build_position_rows(game const& game, motif::db::game_id const game_id, std
         .ply = 0,
         .encoded_move = 0,
         .result = result_code,
-        .white_elo = *white_elo,
-        .black_elo = *black_elo,
+        .white_elo = *narrowed_white_elo,
+        .black_elo = *narrowed_black_elo,
     });
 
-    for (std::size_t i = 0; i < game.moves.size(); ++i) {
-        motif::chess::apply_encoded_move(board, game.moves[i]);
+    for (std::size_t i = 0; i < moves.size(); ++i) {
+        motif::chess::apply_encoded_move(board, moves[i]);
         batch.push_back(position_row {
             .zobrist_hash = motif::db::zobrist_hash {board.hash()},
             .game_id = game_id,
             .ply = static_cast<std::uint16_t>(i + 1),
-            .encoded_move = game.moves[i],
+            .encoded_move = moves[i],
             .result = result_code,
-            .white_elo = *white_elo,
-            .black_elo = *black_elo,
+            .white_elo = *narrowed_white_elo,
+            .black_elo = *narrowed_black_elo,
         });
     }
 
@@ -416,6 +437,26 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
         return tl::unexpected {schema_res.error()};
     }
 
+    // A missing game_identity_lookup index means a prior raw bulk ingest was
+    // interrupted before deduplicate() could restore it (see
+    // motif::import::import_pipeline). Repair the raw rows before any
+    // derived position data is rebuilt or reads are exposed on this handle.
+    auto const index_exists = mgr.writer_->identity_index_exists();
+    if (!index_exists) {
+        mgr.close();
+        return tl::unexpected {index_exists.error()};
+    }
+    if (!*index_exists) {
+        if (auto dedup_res = mgr.writer_->deduplicate(); !dedup_res) {
+            mgr.close();
+            return tl::unexpected {error_code::io_failure};
+        }
+        // Raw ingest may have left duplicate rows reflected in the position
+        // store from an earlier partial rebuild; force a rebuild so it
+        // reflects only the deduplicated, canonical games.
+        mgr.manifest_.position_index_dirty = true;
+    }
+
     // If the previous session did not close cleanly (crash, SIGKILL, etc.),
     // rebuild the position index from SQLite to guarantee consistency.
     if (mgr.manifest_.position_index_dirty) {
@@ -485,18 +526,21 @@ auto database_manager::create_scratch() -> result<database_manager>
 auto database_manager::store() noexcept -> game_store&
 {
     assert(store_.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *store_;
 }
 
 auto database_manager::store() const noexcept -> game_store const&
 {
     assert(store_.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *store_;
 }
 
 auto database_manager::writer() noexcept -> game_writer&
 {
     assert(writer_.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *writer_;
 }
 
@@ -513,12 +557,14 @@ auto database_manager::dir() const noexcept -> std::filesystem::path const&
 auto database_manager::positions() noexcept -> position_store&
 {
     assert(positions_.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *positions_;
 }
 
 auto database_manager::positions() const noexcept -> position_store const&
 {
     assert(positions_.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *positions_;
 }
 
@@ -551,7 +597,15 @@ auto database_manager::patch_game_metadata(game_id const game_key, game_patch co
     }
 
     if (new_white || new_black) {
-        return positions_->update_elo_for_game(game_key, new_white, new_black);
+        if (auto update_res = positions_->update_elo_for_game(game_key, new_white, new_black); !update_res) {
+            return update_res;
+        }
+    }
+
+    if (patch.result) {
+        if (auto update_res = positions_->update_result_for_game(game_key, map_result(*patch.result)); !update_res) {
+            return update_res;
+        }
     }
     return {};
 }
@@ -568,6 +622,23 @@ auto database_manager::remove_game(game_id const game_key) -> result<void>
         return res;
     }
     return store_->remove(game_key);
+}
+
+auto database_manager::remove_user_game(game_id const game_key) -> result<void>
+{
+    if (!positions_ || !store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const provenance = store_->get_provenance(game_key);
+    if (!provenance) {
+        return tl::unexpected {provenance.error()};
+    }
+    if (provenance->source_type != "manual") {
+        return tl::unexpected {error_code::not_editable};
+    }
+
+    return remove_game(game_key);
 }
 
 auto database_manager::query_elo_distribution(zobrist_hash const hash, search_filter const& filter, int const bucket_width) const
@@ -630,11 +701,46 @@ auto database_manager::find_games(search_filter const& filter) -> result<game_li
     return store_->find_games_with_ids(*game_ids, metadata_filter);
 }
 
-auto database_manager::sort_positions() -> result<void>
+auto database_manager::find_games_by_position(zobrist_hash const hash, std::size_t const limit)
+    -> result<std::pair<game_list_result, std::vector<position_match>>>
+{
+    if (!positions_ || !store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto ply_matches = positions_->query_min_ply_by_game(hash, limit);
+    if (!ply_matches) {
+        return tl::unexpected {ply_matches.error()};
+    }
+
+    std::vector<game_id> ids;
+    ids.reserve(ply_matches->size());
+    for (auto const& match : *ply_matches) {
+        ids.push_back(match.game_id);
+    }
+
+    search_filter filter;
+    filter.limit = ids.size();
+    auto games = store_->find_games_with_ids(ids, filter);
+    if (!games) {
+        return tl::unexpected {games.error()};
+    }
+
+    auto total = positions_->count_distinct_games_by_zobrist(hash);
+    if (!total) {
+        return tl::unexpected {total.error()};
+    }
+    games->total_count = *total;
+
+    return std::make_pair(std::move(*games), std::move(*ply_matches));
+}
+
+auto database_manager::sort_positions(position_rebuild_timing* const timing) -> result<void>
 {
     if (duck_con_ == nullptr || !positions_) {
         return tl::unexpected {error_code::io_failure};
     }
+    auto const connection_lock = positions_->lock_connection();
 
     duckdb_result tx_res {};
     if (duckdb_query(duck_con_, "BEGIN TRANSACTION", &tx_res) == DuckDBError) {
@@ -650,9 +756,21 @@ auto database_manager::sort_positions() -> result<void>
         duckdb_destroy_result(&rollback_res);
     };
 
+    auto const sort_started = std::chrono::steady_clock::now();
     if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
         rollback();
         return tl::unexpected {error_code::io_failure};
+    }
+    if (timing != nullptr) {
+        timing->sort_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - sort_started);
+    }
+    auto const rollup_started = std::chrono::steady_clock::now();
+    if (auto rollup_res = positions_->rebuild_opening_stats_rollups(); !rollup_res) {
+        rollback();
+        return tl::unexpected {rollup_res.error()};
+    }
+    if (timing != nullptr) {
+        timing->rollup_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rollup_started);
     }
 
     duckdb_result commit_res {};
@@ -667,11 +785,12 @@ auto database_manager::sort_positions() -> result<void>
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> result<void>
+auto database_manager::rebuild_position_store(bool const sort_by_zobrist, position_rebuild_timing* const timing) -> result<void>
 {
     if (duck_con_ == nullptr || !positions_) {
         return tl::unexpected {error_code::io_failure};
     }
+    auto const connection_lock = positions_->lock_connection();
 
     auto log = spdlog::get("motif.db");
     auto log_rss = [&](char const* const phase) -> void
@@ -699,9 +818,19 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
         duckdb_destroy_result(&rollback_res);
     };
 
-    // Drop and recreate so that any schema changes (new columns) are applied.
+    // Drop and recreate so that any schema changes (new columns) are applied,
+    // and so a rebuild always reflects the current SQLite game.result/elo --
+    // game_result's insert path uses ON CONFLICT DO NOTHING (see
+    // insert_game_results_for_batch), which would otherwise silently keep a
+    // stale row from before a patch_game_metadata() edit.
     duckdb_result drop_res {};
     if (duckdb_query(duck_con_, "DROP TABLE IF EXISTS position", &drop_res) == DuckDBError) {
+        duckdb_destroy_result(&drop_res);
+        rollback();
+        return tl::unexpected {error_code::io_failure};
+    }
+    duckdb_destroy_result(&drop_res);
+    if (duckdb_query(duck_con_, "DROP TABLE IF EXISTS game_result", &drop_res) == DuckDBError) {
         duckdb_destroy_result(&drop_res);
         rollback();
         return tl::unexpected {error_code::io_failure};
@@ -712,53 +841,73 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
         return tl::unexpected {error_code::io_failure};
     }
 
-    // Collect all game IDs from SQLite
+    // Stream exactly the fields required for replay. game_store::get() also
+    // loads event, player, provenance, and tag metadata, none of which is
+    // needed to reconstruct positions.
     sqlite3_stmt* raw = nullptr;
-    if (sqlite3_prepare_v2(conn_, "SELECT id FROM game ORDER BY id", -1, &raw, nullptr) != SQLITE_OK) {
+    constexpr auto replay_games_sql = R"sql(
+        SELECT g.id, g.result, w.elo, b.elo, g.moves
+        FROM game AS g
+        JOIN player AS w ON w.id = g.white_id
+        JOIN player AS b ON b.id = g.black_id
+        ORDER BY g.id
+    )sql";
+    if (sqlite3_prepare_v2(conn_, replay_games_sql, -1, &raw, nullptr) != SQLITE_OK) {
         rollback();
         return tl::unexpected {error_code::io_failure};
     }
     auto const stmt_guard = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> {raw, sqlite3_finalize};
 
-    std::vector<game_id> game_ids;
-    int step_result = sqlite3_step(stmt_guard.get());
-    while (step_result == SQLITE_ROW) {
-        game_ids.push_back(game_id {static_cast<std::uint32_t>(sqlite3_column_int(stmt_guard.get(), 0))});
-        step_result = sqlite3_step(stmt_guard.get());
-    }
-    if (step_result != SQLITE_DONE) {
-        rollback();
-        return tl::unexpected {error_code::io_failure};
-    }
-    log_rss("after_collect_game_ids");
     std::vector<position_row> pending_rows;
     pending_rows.reserve(rebuild_batch_rows);
+    auto position_insert_elapsed = std::chrono::steady_clock::duration {};
 
     auto flush_pending_rows = [&]() -> result<void>
     {
         if (pending_rows.empty()) {
             return {};
         }
+        auto const insert_started = std::chrono::steady_clock::now();
         if (auto ins_res = positions_->insert_batch(pending_rows); !ins_res) {
             return tl::unexpected {ins_res.error()};
         }
+        position_insert_elapsed += std::chrono::steady_clock::now() - insert_started;
         pending_rows.clear();
         log_rss("after_flush_batch");
         return {};
     };
 
-    for (auto const game_id : game_ids) {
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        auto game_res = store_->get(game_id);
-        if (!game_res) {
+    auto const replay_started = std::chrono::steady_clock::now();
+    auto position_row_build_elapsed = std::chrono::steady_clock::duration {};
+    int step_result = sqlite3_step(stmt_guard.get());
+    while (step_result == SQLITE_ROW) {
+        auto const game_id = motif::db::game_id {static_cast<std::uint32_t>(sqlite3_column_int64(stmt_guard.get(), 0))};
+        auto const* result =
+            reinterpret_cast<char const*>(sqlite3_column_text(stmt_guard.get(), 1));  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto const white_elo = sqlite3_column_type(stmt_guard.get(), 2) == SQLITE_NULL
+            ? std::optional<std::int32_t> {}
+            : std::optional<std::int32_t> {static_cast<std::int32_t>(sqlite3_column_int(stmt_guard.get(), 2))};
+        auto const black_elo = sqlite3_column_type(stmt_guard.get(), 3) == SQLITE_NULL
+            ? std::optional<std::int32_t> {}
+            : std::optional<std::int32_t> {static_cast<std::int32_t>(sqlite3_column_int(stmt_guard.get(), 3))};
+        auto const* moves_blob = sqlite3_column_blob(stmt_guard.get(), 4);
+        auto const move_bytes = sqlite3_column_bytes(stmt_guard.get(), 4);
+        if (result == nullptr || move_bytes < 0 || move_bytes % static_cast<int>(sizeof(std::uint16_t)) != 0) {
             rollback();
-            return tl::unexpected {game_res.error()};
+            return tl::unexpected {error_code::io_failure};
         }
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        auto const& game = *game_res;
 
-        auto const result_code = map_result(game.result);
-        auto batch = build_position_rows(game, game_id, result_code);
+        std::vector<std::uint16_t> moves(static_cast<std::size_t>(move_bytes) / sizeof(std::uint16_t));
+        if (!moves.empty() && moves_blob == nullptr) {
+            rollback();
+            return tl::unexpected {error_code::io_failure};
+        }
+        if (!moves.empty()) {
+            std::memcpy(moves.data(), moves_blob, static_cast<std::size_t>(move_bytes));
+        }
+
+        auto const build_started = std::chrono::steady_clock::now();
+        auto batch = build_position_rows(moves, game_id, map_result(result), white_elo, black_elo);
         if (!batch) {
             rollback();
             return tl::unexpected {batch.error()};
@@ -766,27 +915,52 @@ auto database_manager::rebuild_position_store(bool const sort_by_zobrist) -> res
 
         if (!batch->empty()) {
             pending_rows.insert(pending_rows.end(), batch->begin(), batch->end());
-            if (pending_rows.size() >= rebuild_batch_rows) {
-                auto flush_res = flush_pending_rows();
-                if (!flush_res) {
-                    rollback();
-                    return tl::unexpected {flush_res.error()};
-                }
+        }
+        position_row_build_elapsed += std::chrono::steady_clock::now() - build_started;
+        if (pending_rows.size() >= rebuild_batch_rows) {
+            auto flush_res = flush_pending_rows();
+            if (!flush_res) {
+                rollback();
+                return tl::unexpected {flush_res.error()};
             }
         }
+        step_result = sqlite3_step(stmt_guard.get());
+    }
+    if (step_result != SQLITE_DONE) {
+        rollback();
+        return tl::unexpected {error_code::io_failure};
     }
 
     if (auto flush_res = flush_pending_rows(); !flush_res) {
         rollback();
         return tl::unexpected {flush_res.error()};
     }
+    if (timing != nullptr) {
+        timing->position_replay_elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - replay_started);
+        timing->position_row_build_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(position_row_build_elapsed);
+        timing->position_insert_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(position_insert_elapsed);
+    }
 
     if (sort_by_zobrist) {
+        auto const sort_started = std::chrono::steady_clock::now();
         if (auto sort_res = positions_->sort_by_zobrist(); !sort_res) {
             rollback();
             return tl::unexpected {sort_res.error()};
         }
+        if (timing != nullptr) {
+            timing->sort_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - sort_started);
+        }
         log_rss("after_sort_by_zobrist");
+    }
+
+    auto const rollup_started = std::chrono::steady_clock::now();
+    if (auto rollup_res = positions_->rebuild_opening_stats_rollups(); !rollup_res) {
+        rollback();
+        return tl::unexpected {rollup_res.error()};
+    }
+    if (timing != nullptr) {
+        timing->rollup_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rollup_started);
     }
 
     duckdb_result commit_res {};

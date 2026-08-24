@@ -217,6 +217,41 @@ TEST_CASE("game_store: get_game_contexts returns all requested contexts", "[moti
     CHECK(contexts->at(*second_id).moves == second.moves);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this focused record-contract test.
+TEST_CASE("game_store: for_each_replay_game streams minimal rows in ID order", "[motif_db][game_store]")
+{
+    db_fixture fix;
+    constexpr auto first_elo = 2500;
+    constexpr auto second_elo = 2300;
+    auto first = make_game("First", "First Opponent");
+    first.white.elo = first_elo;
+    auto second = make_game("Second", "Second Opponent");
+    second.black.elo = second_elo;
+
+    auto const first_id = fix.store.insert(first);
+    auto const second_id = fix.store.insert(second);
+    REQUIRE(first_id.has_value());
+    REQUIRE(second_id.has_value());
+
+    std::vector<motif::db::replay_game_record> records;
+    auto const stream_res = fix.store.for_each_replay_game(
+        [&](motif::db::replay_game_record const& record) -> motif::db::result<void>
+        {
+            records.push_back(record);
+            return {};
+        });
+    REQUIRE(stream_res.has_value());
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].id == *first_id);
+    CHECK(records[0].result == first.result);
+    CHECK(records[0].white_elo == first.white.elo);
+    CHECK(records[0].black_elo == first.black.elo);
+    CHECK(records[0].moves == first.moves);
+    CHECK(records[1].id == *second_id);
+    CHECK(records[1].white_elo == second.white.elo);
+    CHECK(records[1].black_elo == second.black.elo);
+}
+
 TEST_CASE("game_store: find_games returns summary fields in id order", "[motif_db][game_store]")
 {
     db_fixture fix;
@@ -277,7 +312,14 @@ TEST_CASE("game_store: find_games filters by player substring and result", "[mot
 
     auto const games = fix.store.find_games(motif::db::search_filter {
         .player_name = "Carlsen",
+        .player_color = motif::db::player_color::either,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
         .result = "0-1",
+        .eco_prefix = std::nullopt,
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(games.has_value());
     REQUIRE(games->games.size() == 1);
@@ -309,7 +351,14 @@ TEST_CASE("game_store: find_game_ids_with_filter returns all matching ids withou
     auto const filtered = fix.store.find_game_ids_with_filter(ids,
                                                               motif::db::search_filter {
                                                                   .player_name = "Magnus",
+                                                                  .player_color = motif::db::player_color::either,
+                                                                  .min_elo = std::nullopt,
+                                                                  .max_elo = std::nullopt,
                                                                   .result = "1-0",
+                                                                  .eco_prefix = std::nullopt,
+                                                                  .position = std::nullopt,
+                                                                  .offset = 0,
+                                                                  .limit = motif::db::default_search_limit,
                                                               });
 
     REQUIRE(filtered.has_value());
@@ -331,8 +380,15 @@ TEST_CASE("game_store: find_games applies stable limit and offset", "[motif_db][
     REQUIRE(third_id.has_value());
 
     auto const games = fix.store.find_games(motif::db::search_filter {
-        .limit = 1,
+        .player_name = std::nullopt,
+        .player_color = motif::db::player_color::either,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .position = std::nullopt,
         .offset = 1,
+        .limit = 1,
     });
     REQUIRE(games.has_value());
     REQUIRE(games->games.size() == 1);
@@ -353,6 +409,14 @@ TEST_CASE("game_store: find_games returns empty results", "[motif_db][game_store
 
     auto const unmatched_games = filtered_fix.store.find_games(motif::db::search_filter {
         .player_name = "Carlsen",
+        .player_color = motif::db::player_color::either,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(unmatched_games.has_value());
     CHECK(unmatched_games->games.empty());
@@ -547,7 +611,15 @@ TEST_CASE("game_store: find_games filters by ECO prefix", "[motif_db][game_store
     REQUIRE(c10_id.has_value());
 
     auto const narrow = fix.store.find_games(motif::db::search_filter {
+        .player_name = std::nullopt,
+        .player_color = motif::db::player_color::either,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+        .result = std::nullopt,
         .eco_prefix = "C6",
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(narrow.has_value());
     REQUIRE(narrow->games.size() == 1);
@@ -556,7 +628,15 @@ TEST_CASE("game_store: find_games filters by ECO prefix", "[motif_db][game_store
     CHECK(narrow->games.front().eco == "C65");
 
     auto const broad = fix.store.find_games(motif::db::search_filter {
+        .player_name = std::nullopt,
+        .player_color = motif::db::player_color::either,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+        .result = std::nullopt,
         .eco_prefix = "C",
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(broad.has_value());
     CHECK(broad->games.size() == 2);
@@ -580,6 +660,13 @@ TEST_CASE("game_store: find_games restricts player substring by player_color", "
     auto const white_games = fix.store.find_games(motif::db::search_filter {
         .player_name = "Carlsen",
         .player_color = motif::db::player_color::white,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(white_games.has_value());
     REQUIRE(white_games->games.size() == 1);
@@ -588,6 +675,13 @@ TEST_CASE("game_store: find_games restricts player substring by player_color", "
     auto const black_games = fix.store.find_games(motif::db::search_filter {
         .player_name = "Carlsen",
         .player_color = motif::db::player_color::black,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(black_games.has_value());
     REQUIRE(black_games->games.size() == 1);
@@ -618,7 +712,15 @@ TEST_CASE("game_store: find_games filters by min_elo", "[motif_db][game_store]")
     REQUIRE(fix.store.insert(mixed).has_value());
 
     auto const games = fix.store.find_games(motif::db::search_filter {
+        .player_name = std::nullopt,
+        .player_color = motif::db::player_color::either,
         .min_elo = elo_filter_strong,
+        .max_elo = std::nullopt,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(games.has_value());
     REQUIRE(games->games.size() == 1);
@@ -647,7 +749,15 @@ TEST_CASE("game_store: find_games filters by max_elo", "[motif_db][game_store]")
     REQUIRE(fix.store.insert(mixed).has_value());
 
     auto const games = fix.store.find_games(motif::db::search_filter {
+        .player_name = std::nullopt,
+        .player_color = motif::db::player_color::either,
+        .min_elo = std::nullopt,
         .max_elo = elo_filter_club,
+        .result = std::nullopt,
+        .eco_prefix = std::nullopt,
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(games.has_value());
     REQUIRE(games->games.size() == 1);
@@ -692,8 +802,15 @@ TEST_CASE("game_store: find_games combines active filters with AND semantics", "
     REQUIRE(fix.store.insert(game_wrong_result).has_value());
 
     auto const games = fix.store.find_games(motif::db::search_filter {
+        .player_name = std::nullopt,
+        .player_color = motif::db::player_color::either,
+        .min_elo = std::nullopt,
+        .max_elo = std::nullopt,
         .result = "1-0",
         .eco_prefix = "D",
+        .position = std::nullopt,
+        .offset = 0,
+        .limit = motif::db::default_search_limit,
     });
     REQUIRE(games.has_value());
     REQUIRE(games->games.size() == 1);
