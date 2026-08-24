@@ -24,6 +24,8 @@ export component WorkspaceWindow inherits Window {
     in property <int> import-processed: 0;
     in property <int> import-total: 0;
     in property <int> import-committed: 0;
+    in property <int> import-skipped: 0;
+
     in property <int> import-errors: 0;
 
     callback create-requested(string, string);
@@ -181,7 +183,7 @@ export component WorkspaceWindow inherits Window {
                     Text {
                         text: root.import-processed + " / " + root.import-total
                             + " processed · " + root.import-committed + " committed · "
-                            + root.import-errors + " errors";
+                            + root.import-skipped + " skipped · " + root.import-errors + " errors";
                         color: #91a4c4;
                     }
                     if root.import-active: Button {
