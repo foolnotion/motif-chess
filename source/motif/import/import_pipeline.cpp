@@ -301,7 +301,6 @@ auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_pa
     if (*current_hash != checkpoint.source_content_hash) {
         return tl::unexpected {error_code::invalid_state};
     }
-
     auto const index_exists = db_.writer().identity_index_exists();
     if (!index_exists) {
         return tl::unexpected {error_code::io_failure};
@@ -367,18 +366,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
     if (auto game_count = count_games(pgn_path, start_offset); game_count.has_value()) {
         total_games_.store(*game_count, std::memory_order_relaxed);
-    }
-
-    // Captured once per run and embedded in every checkpoint written below so
-    // a later resume() can detect the source file being edited or replaced
-    // at the same path in the meantime.
-    auto const source_stat_res = stat_source(pgn_path);
-    if (!source_stat_res) {
-        return tl::unexpected {source_stat_res.error()};
-    }
-    auto const source_hash_res = hash_source(pgn_path);
-    if (!source_hash_res) {
-        return tl::unexpected {source_hash_res.error()};
     }
 
     pgn_reader reader {pgn_path};
@@ -449,9 +436,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             .byte_offset = checkpoint_offset,
             .games_committed = committed,
             .last_game_id = last_game_id,
-            .source_size = source_stat_res->size,
-            .source_mtime_ns = source_stat_res->mtime_ns,
-            .source_content_hash = *source_hash_res,
         };
         if (auto wres = write_checkpoint(db_.dir(), chk); !wres) {
             if (log) {
@@ -466,24 +450,11 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     // landed, with potential unreconciled duplicates -- until deduplicate()
     // runs. deduplicate() is safe to call even with zero raw-mode inserts
     // pending (it's a no-op DELETE/UPDATE followed by CREATE INDEX).
-    // A failure here leaves the DB without its identity index and with
-    // possible unreconciled raw duplicates -- log it rather than discarding
-    // it, so the state is diagnosable instead of silently indistinguishable
-    // from a clean repair. The next database_manager::open() will detect the
-    // still-missing index and retry the repair.
-    auto restore_identity_index = [&]() -> bool
+    auto restore_identity_index = [&]() -> void
     {
-        if (!raw_mode) {
-            return true;
+        if (raw_mode) {
+            (void)db_.writer().deduplicate();
         }
-        if (auto repair_res = db_.writer().deduplicate(); !repair_res) {
-            if (log) {
-                log->error("failed to restore game_identity_lookup after aborting raw ingest: {}",
-                           motif::db::to_string(repair_res.error()));
-            }
-            return false;
-        }
-        return true;
     };
 
     if (raw_mode) {
@@ -493,9 +464,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     }
 
     if (!begin_sqlite_batch()) {
-        if (!restore_identity_index()) {
-            return tl::unexpected {error_code::io_failure};
-        }
+        restore_identity_index();
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -674,17 +643,13 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
     if (fatal_error.has_value() && *fatal_error != error_code::eof) {
         rollback_sqlite_batch();
-        if (!restore_identity_index()) {
-            return tl::unexpected {error_code::io_failure};
-        }
+        restore_identity_index();
         return tl::unexpected {*fatal_error};
     }
 
     if (!commit_sqlite_batch()) {
         rollback_sqlite_batch();
-        if (!restore_identity_index()) {
-            return tl::unexpected {error_code::io_failure};
-        }
+        restore_identity_index();
         return tl::unexpected {error_code::io_failure};
     }
     auto const ingest_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ingest_started);
