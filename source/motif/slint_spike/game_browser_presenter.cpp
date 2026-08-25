@@ -14,7 +14,7 @@ namespace motif::slint_spike
 {
 
 game_browser_presenter::game_browser_presenter(motif::db::database_manager& database) noexcept
-    : database_(database)
+    : database_(&database)
 {
 }
 
@@ -23,7 +23,7 @@ auto game_browser_presenter::load_games() -> result<void>
     auto filter = motif::db::search_filter {};
     filter.limit = motif::db::max_search_limit;
 
-    auto result = database_.store().find_games(filter);
+    auto result = database_->store().find_games(filter);
     if (!result) {
         return fail_database(result.error());
     }
@@ -37,11 +37,11 @@ auto game_browser_presenter::load_games() -> result<void>
 auto game_browser_presenter::select_game(std::size_t const row) -> result<void>
 {
     if (row >= state_.games.size()) {
-        return fail({error_code::invalid_argument, "Selected game row is out of range"});
+        return fail({.code = error_code::invalid_argument, .message = "Selected game row is out of range"});
     }
 
     auto const& entry = state_.games[row];
-    auto game = database_.store().get(entry.id);
+    auto game = database_->store().get(entry.id);
     if (!game) {
         return fail_database(game.error());
     }
@@ -62,8 +62,8 @@ auto game_browser_presenter::select_game(std::size_t const row) -> result<void>
 
 auto game_browser_presenter::sort_games(std::size_t const column, bool const ascending) -> result<void>
 {
-    if (column > 5) {
-        return fail({error_code::invalid_argument, "Selected sort column is out of range"});
+    if (column >= sort_column_count) {
+        return fail({.code = error_code::invalid_argument, .message = "Selected sort column is out of range"});
     }
 
     auto value = [column](motif::db::game_list_entry const& game) -> std::string const&
@@ -79,14 +79,15 @@ auto game_browser_presenter::sort_games(std::size_t const column, bool const asc
                 return game.event;
             case 4:
                 return game.date;
-            case 5:
+            case sort_column_count - 1:
                 return game.eco;
             default:
                 return game.white;
         }
     };
-    std::ranges::stable_sort(
-        state_.games, [&](auto const& lhs, auto const& rhs) { return ascending ? value(lhs) < value(rhs) : value(rhs) < value(lhs); });
+    std::ranges::stable_sort(state_.games,
+                             [&](auto const& lhs, auto const& rhs) -> bool
+                             { return ascending ? value(lhs) < value(rhs) : value(rhs) < value(lhs); });
 
     navigator_.clear();
     state_.has_selection = false;
@@ -106,7 +107,7 @@ auto game_browser_presenter::sort_games(std::size_t const column, bool const asc
 auto game_browser_presenter::advance() -> result<void>
 {
     if (!state_.has_selection) {
-        return fail({error_code::invalid_argument, "Select a game before navigating moves"});
+        return fail({.code = error_code::invalid_argument, .message = "Select a game before navigating moves"});
     }
 
     navigator_.advance();
@@ -118,7 +119,7 @@ auto game_browser_presenter::advance() -> result<void>
 auto game_browser_presenter::retreat() -> result<void>
 {
     if (!state_.has_selection) {
-        return fail({error_code::invalid_argument, "Select a game before navigating moves"});
+        return fail({.code = error_code::invalid_argument, .message = "Select a game before navigating moves"});
     }
 
     navigator_.retreat();
@@ -147,7 +148,7 @@ auto game_browser_presenter::fail(error error_value) -> result<void>
 auto game_browser_presenter::fail_database(motif::db::error const& database_error) -> result<void>
 {
     auto message = database_error.message.empty() ? std::string {motif::db::to_string(database_error)} : database_error.message;
-    return fail({error_code::database_failure, std::move(message)});
+    return fail({.code = error_code::database_failure, .message = std::move(message)});
 }
 
 }  // namespace motif::slint_spike

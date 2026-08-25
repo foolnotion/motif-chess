@@ -29,6 +29,8 @@ struct error
 template<typename T>
 using result = tl::expected<T, error>;
 
+inline constexpr std::size_t sort_column_count {6};
+
 struct game_browser_state
 {
     std::vector<motif::db::game_list_entry> games;
@@ -59,7 +61,7 @@ class game_browser_presenter
     [[nodiscard]] auto state() const noexcept -> game_browser_state const&;
 
   private:
-    motif::db::database_manager& database_;
+    motif::db::database_manager* database_;
     motif::app::game_navigator navigator_;
     game_browser_state state_;
 

@@ -44,7 +44,7 @@ auto make_repetition_game(std::size_t const plies) -> motif::db::game
     sans.reserve(plies);
     constexpr auto cycle = std::array<std::string_view, 4> {"Nf3", "Nf6", "Ng1", "Ng8"};
     for (std::size_t ply = 0; ply < plies; ++ply) {
-        sans.emplace_back(cycle[ply % cycle.size()]);
+        sans.emplace_back(cycle.at(ply % cycle.size()));
     }
     return make_game("Long White", "Long Black", sans);
 }
@@ -120,11 +120,13 @@ TEST_CASE("game_browser_presenter: invalid actions are presented safely", "[slin
     CHECK_FALSE(navigation);
     CHECK(presenter.state().error_text == "Select a game before navigating moves");
 
-    auto sorting = presenter.sort_games(6, true);
+    auto sorting = presenter.sort_games(motif::slint_spike::sort_column_count, /*ascending=*/true);
     CHECK_FALSE(sorting);
     CHECK(presenter.state().error_text == "Selected sort column is out of range");
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("game_browser_presenter: long game exposes and navigates all plies", "[slint-spike]")
 {
     constexpr std::size_t long_game_plies {300};
