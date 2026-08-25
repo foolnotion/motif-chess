@@ -132,7 +132,7 @@ auto make_game_named(game_spec const& spec, std::string const& white_name, std::
 void insert_games_and_rebuild(motif::db::database_manager& manager, std::initializer_list<motif::db::game> games)
 {
     for (auto const& game : games) {
-        auto inserted = manager.store().insert(game);
+        auto inserted = manager.insert_game(game);
         REQUIRE(inserted.has_value());
     }
 

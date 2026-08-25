@@ -1407,7 +1407,7 @@ TEST_CASE("import_pipeline: literal-default bundle reopens from postings", "[mot
 
         // Canonical growth without a postings rebuild makes exact queries
         // fail closed rather than silently serving stale data.
-        REQUIRE(reopened->store().insert(game_from_sans("White Four", "Black Four", "1-0", {"e4", "c5"})).has_value());
+        REQUIRE(reopened->insert_game(game_from_sans("White Four", "Black Four", "1-0", {"e4", "c5"})).has_value());
         auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
         auto const stale = reopened->query_position_matches(start_hash);
         REQUIRE_FALSE(stale.has_value());
@@ -1441,7 +1441,7 @@ TEST_CASE("import_pipeline: mutation on a postings-only bundle fails closed and 
         motif::import::import_pipeline pipeline {*mgr};
         REQUIRE(pipeline.run(pgn_file, motif::import::import_config {}).has_value());
 
-        REQUIRE(mgr->store().set_manual_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
+        REQUIRE(mgr->set_manual_game_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
         auto patch = motif::db::game_patch {};
         patch.result = "0-1";
         REQUIRE(mgr->patch_game_metadata(motif::db::game_id {1U}, patch).has_value());

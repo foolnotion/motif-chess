@@ -17,6 +17,10 @@
 #include <chesslib/core/types.hpp>
 #include <fmt/format.h>
 #include <sqlite3.h>
+#ifndef _WIN32
+#    include <sys/wait.h>
+#    include <unistd.h>
+#endif
 
 #include "motif/db/error.hpp"
 #include "motif/db/manifest.hpp"
@@ -111,6 +115,34 @@ TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db]
     CHECK(second.error() == motif::db::error_code::io_failure);
 }
 
+TEST_CASE("database_manager::open rejects a concurrent writer process for the same bundle", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"bundle_lock"};
+    auto first = motif::db::database_manager::create(tdir.path, "lock-test");
+    REQUIRE(first.has_value());
+
+#ifdef _WIN32
+    auto second = motif::db::database_manager::open(tdir.path);
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error() == motif::db::error_code::io_failure);
+#else
+    auto const child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        auto second = motif::db::database_manager::open(tdir.path);
+        ::_exit(second.has_value() ? 1 : 0);
+    }
+    int status {};
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+#endif
+
+    first->close();
+    auto after_close = motif::db::database_manager::open(tdir.path);
+    REQUIRE(after_close.has_value());
+}
+
 TEST_CASE("database_manager::create initializes SQLite with correct schema version", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"schema_ver"};
@@ -174,7 +206,7 @@ TEST_CASE("database_manager::open does not recreate tables (idempotent open)", "
         auto mgr = motif::db::database_manager::create(tdir.path, "persist-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        auto insert_res = mgr->store().insert(inserted_game);
+        auto insert_res = mgr->insert_game(inserted_game);
         REQUIRE(insert_res.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         game_id = *insert_res;
@@ -214,7 +246,7 @@ TEST_CASE("database_manager: bundle copied to another directory opens successful
         auto mgr = motif::db::database_manager::create(src_dir.path, "portable-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        auto insert_res = mgr->store().insert(test_game);
+        auto insert_res = mgr->insert_game(test_game);
         REQUIRE(insert_res.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         game_id = *insert_res;
@@ -290,7 +322,7 @@ TEST_CASE("database_manager::open ignores a leftover positions.duckdb file and l
         auto mgr = motif::db::database_manager::create(tdir.path, "dual-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("White", "Black")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         REQUIRE(mgr->rebuild_position_postings().has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -384,7 +416,7 @@ TEST_CASE("database_manager::rebuild_position_postings after N-move game indexes
     auto mgr = motif::db::database_manager::create(tdir.path, "nmove-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game).has_value());
+    REQUIRE(mgr->insert_game(test_game).has_value());
 
     auto metrics = motif::db::position_postings_build_metrics {};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -419,7 +451,7 @@ TEST_CASE("database_manager::rebuild_position_postings is idempotent", "[motif-d
     auto mgr = motif::db::database_manager::create(tdir.path, "idem-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game).has_value());
+    REQUIRE(mgr->insert_game(test_game).has_value());
 
     auto first_metrics = motif::db::position_postings_build_metrics {};
     auto second_metrics = motif::db::position_postings_build_metrics {};
@@ -456,7 +488,7 @@ TEST_CASE("database_manager::rebuild_position_postings rejects out-of-range elo"
     auto mgr = motif::db::database_manager::create(tdir.path, "elo-range-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game).has_value());
+    REQUIRE(mgr->insert_game(test_game).has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto rebuild_res = mgr->rebuild_position_postings();
@@ -505,9 +537,9 @@ TEST_CASE("database_manager::rebuild_position_postings indexes every distinct ha
     auto mgr = motif::db::database_manager::create(tdir.path, "distinct-hashes-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game_a).has_value());
+    REQUIRE(mgr->insert_game(test_game_a).has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game_b).has_value());
+    REQUIRE(mgr->insert_game(test_game_b).has_value());
 
     auto metrics = motif::db::position_postings_build_metrics {};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -539,7 +571,7 @@ TEST_CASE("database_manager::remove_game deletes the SQLite row and marks postin
     REQUIRE(mgr.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const gid = mgr->store().insert(make_one_move_game("White", "Black"));
+    auto const gid = mgr->insert_game(make_one_move_game("White", "Black"));
     REQUIRE(gid.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
@@ -586,7 +618,7 @@ TEST_CASE("database_manager::remove_user_game rejects imported games without cha
     auto mgr = motif::db::database_manager::create(tdir.path, "remove-imported-db");
     REQUIRE(mgr.has_value());
 
-    auto const gid = mgr->store().insert(make_one_move_game("White", "Black"));
+    auto const gid = mgr->insert_game(make_one_move_game("White", "Black"));
     REQUIRE(gid.has_value());
     REQUIRE(mgr->rebuild_position_postings().has_value());
     auto const postings_before = mgr->manifest().position_postings;
@@ -609,9 +641,9 @@ TEST_CASE("database_manager::remove_user_game deletes a manual game and marks po
     auto mgr = motif::db::database_manager::create(tdir.path, "remove-manual-db");
     REQUIRE(mgr.has_value());
 
-    auto const gid = mgr->store().insert(make_one_move_game("White", "Black"));
+    auto const gid = mgr->insert_game(make_one_move_game("White", "Black"));
     REQUIRE(gid.has_value());
-    REQUIRE(mgr->store().set_manual_provenance(*gid, std::nullopt, "pending").has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*gid, std::nullopt, "pending").has_value());
     REQUIRE(mgr->rebuild_position_postings().has_value());
     REQUIRE(mgr->remove_user_game(*gid).has_value());
 
@@ -681,10 +713,10 @@ TEST_CASE("database_manager::find_games intersects position and metadata filters
         .provenance = {},
     };
 
-    auto const matching_id = mgr->store().insert(matching_game);
+    auto const matching_id = mgr->insert_game(matching_game);
     REQUIRE(matching_id.has_value());
-    REQUIRE(mgr->store().insert(wrong_player).has_value());
-    REQUIRE(mgr->store().insert(wrong_position).has_value());
+    REQUIRE(mgr->insert_game(wrong_player).has_value());
+    REQUIRE(mgr->insert_game(wrong_position).has_value());
     REQUIRE(mgr->rebuild_position_postings().has_value());
 
     auto board = chesslib::board {};
@@ -736,7 +768,7 @@ TEST_CASE("database_manager::find_games handles >999 position IDs via batched IN
             .extra_tags = {},
             .provenance = {},
         };
-        REQUIRE(mgr->store().insert(game_rec).has_value());
+        REQUIRE(mgr->insert_game(game_rec).has_value());
     };
 
     for (std::size_t index = 0; index < game_count; ++index) {
@@ -774,9 +806,9 @@ TEST_CASE("database_manager::close persists game_count in manifest", "[motif-db]
         auto mgr = motif::db::database_manager::create(tdir.path, "count-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("A", "B")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("A", "B")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("C", "D")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("C", "D")).has_value());
     }  // close() called here
 
     auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
@@ -826,7 +858,7 @@ TEST_CASE("database_manager::open rebuilds postings automatically when they do n
         // rebuild_position_postings(): the bundle now has 1 game but its
         // published postings generation still describes 0.
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("W", "B")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("W", "B")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         mgr->close();
     }
@@ -868,7 +900,7 @@ TEST_CASE("database_manager::open migrates a legacy bundle with a leftover posit
         auto mgr = motif::db::database_manager::create(tdir.path, "legacy-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("White", "Black")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
         // Shape a bundle "from before postings existed": no postings entry
         // in the manifest at all, matching a genuinely legacy bundle.
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -926,7 +958,7 @@ TEST_CASE("database_manager::open fails closed and is retryable when postings mi
         auto mgr = motif::db::database_manager::create(tdir.path, "legacy-fail-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("White", "Black")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         REQUIRE(mgr->prepare_canonical_mutation().has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -987,7 +1019,7 @@ TEST_CASE("database_manager::open fails closed when postings-only repair cannot 
         auto mgr = motif::db::database_manager::create(tdir.path, "repair-fail-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("White", "Black")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         REQUIRE(mgr->rebuild_position_postings().has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -1055,10 +1087,10 @@ TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebu
     };
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const game_id = mgr->store().insert(game);
+    auto const game_id = mgr->insert_game(game);
     REQUIRE(game_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*game_id, {}, "new").has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
 
@@ -1129,10 +1161,10 @@ TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebu
     };
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const game_id = mgr->store().insert(game);
+    auto const game_id = mgr->insert_game(game);
     REQUIRE(game_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*game_id, {}, "new").has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
 
@@ -1197,10 +1229,10 @@ TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other 
     };
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const game_id = mgr->store().insert(game);
+    auto const game_id = mgr->insert_game(game);
     REQUIRE(game_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*game_id, {}, "new").has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
 

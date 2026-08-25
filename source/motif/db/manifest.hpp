@@ -40,10 +40,31 @@ struct db_manifest
     std::optional<derived_index_manifest_entry> opening_tree_index;
 };
 
+enum class manifest_write_state : std::uint8_t
+{
+    not_published,
+    published,
+    published_not_durable,
+};
+
+struct manifest_write_result
+{
+    manifest_write_state state {manifest_write_state::not_published};
+    motif::db::error failure {error_code::ok};
+
+    [[nodiscard]] auto has_value() const noexcept -> bool { return state == manifest_write_state::published; }
+
+    explicit operator bool() const noexcept { return has_value(); }
+
+    [[nodiscard]] auto was_published() const noexcept -> bool { return state != manifest_write_state::not_published; }
+
+    [[nodiscard]] auto error() const noexcept -> motif::db::error const& { return failure; }
+};
+
 // Create a new manifest with current UTC timestamp and game_count = 0.
 auto make_manifest(std::string const& name) -> db_manifest;
 
-auto write_manifest(std::filesystem::path const& path, db_manifest const& manifest) -> result<void>;
+auto write_manifest(std::filesystem::path const& path, db_manifest const& manifest) -> manifest_write_result;
 
 auto read_manifest(std::filesystem::path const& path) -> result<db_manifest>;
 

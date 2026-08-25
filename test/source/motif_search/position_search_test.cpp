@@ -242,13 +242,13 @@ TEST_CASE("position_search::find returns matching position rows", "[motif-search
     REQUIRE(manager.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const first_id = manager->store().insert(make_game({"e4", "e5"}, "1-0", 2700, 2650));
+    auto const first_id = manager->insert_game(make_game({"e4", "e5"}, "1-0", 2700, 2650));
     REQUIRE(first_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const second_id = manager->store().insert(make_game({"e4", "e5"}, "1/2-1/2", 2500, std::nullopt));
+    auto const second_id = manager->insert_game(make_game({"e4", "e5"}, "1/2-1/2", 2500, std::nullopt));
     REQUIRE(second_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(manager->store().insert(make_game({"d4"}, "0-1", 2400, 2450)).has_value());
+    REQUIRE(manager->insert_game(make_game({"d4"}, "0-1", 2400, 2450)).has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(manager->rebuild_position_postings().has_value());
 
@@ -281,7 +281,7 @@ TEST_CASE("position_search::find returns empty result for missing hash", "[motif
     REQUIRE(manager.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(manager->store().insert(make_game({"e4"}, "1-0", 2200, 2100)).has_value());
+    REQUIRE(manager->insert_game(make_game({"e4"}, "1-0", 2200, 2100)).has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(manager->rebuild_position_postings().has_value());
 

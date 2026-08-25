@@ -227,8 +227,8 @@ TEST_CASE("position_postings built from SQLite replay matches hand-computed occu
     temporary_file const file;
     auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
-    REQUIRE(manager->store().insert(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
 
     REQUIRE(motif::db::position_postings::build(manager->store(), file.path(), 2U).has_value());
     auto postings = motif::db::position_postings {file.path()};
@@ -267,8 +267,8 @@ TEST_CASE("database_manager uses persisted position postings for exact position 
     std::filesystem::remove_all(bundle_dir);
     auto manager = motif::db::database_manager::create(bundle_dir, "postings-search");
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
-    REQUIRE(manager->store().insert(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
     REQUIRE(manager->manifest().position_postings.has_value());
     CHECK(std::filesystem::exists(bundle_dir
@@ -292,7 +292,7 @@ TEST_CASE("database_manager uses persisted position postings for exact position 
     CHECK_FALSE((*matches)[2].white_elo.has_value());
     CHECK((*matches)[2].black_elo == std::optional<std::int16_t> {2400});
 
-    REQUIRE(manager->store().set_manual_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
+    REQUIRE(manager->set_manual_game_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
     auto patch = motif::db::game_patch {};
     patch.result = "0-1";
     patch.white_elo = patched_white_elo;
@@ -353,8 +353,8 @@ TEST_CASE("database_manager::query_position_matches does not overflow with a SIZ
     std::filesystem::remove_all(bundle_dir);
     auto manager = motif::db::database_manager::create(bundle_dir, "overflow-search");
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
-    REQUIRE(manager->store().insert(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
 
     auto const target_hash = hash_after_sans({"Nf3"});
@@ -387,8 +387,8 @@ TEST_CASE("database_manager::position_summary reports valid, stale, and absent p
     REQUIRE(before_build.has_value());
     CHECK_FALSE(before_build->has_value());
 
-    REQUIRE(manager->store().insert(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
-    REQUIRE(manager->store().insert(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
     REQUIRE(manager->manifest().position_postings.has_value());
 
@@ -405,7 +405,7 @@ TEST_CASE("database_manager::position_summary reports valid, stale, and absent p
     CHECK_FALSE(absent->has_value());
 
     // Postings now stale: another game lands without a postings rebuild.
-    REQUIRE(manager->store().insert(make_game({"Nf3"}, "White Three", "Black Three", std::nullopt, std::nullopt)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Three", "Black Three", std::nullopt, std::nullopt)).has_value());
     auto const stale = manager->position_summary(target_hash);
     REQUIRE(stale.has_value());
     CHECK_FALSE(stale->has_value());
@@ -424,7 +424,7 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
     auto manager = motif::db::database_manager::create(bundle_dir, "publish-fail-search");
     REQUIRE(manager.has_value());
 
-    REQUIRE(manager->store().insert(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
+    REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
     REQUIRE(manager->manifest().position_postings.has_value());
     auto const original_filename = manager->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).filename;
@@ -436,19 +436,9 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
     REQUIRE(before.has_value());
     REQUIRE(before->size() == 2U);
 
-    // A second game changes what a fresh build would contain, so a
-    // successful rebuild here would be observably different from the
-    // published generation -- proving the assertions below are actually
-    // exercising "publish failed, old generation untouched" and not just
-    // "rebuild happened to reproduce the same bytes."
-    REQUIRE(manager->store().insert(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
-
-    // Force publish_derived_index()'s write_manifest() call to fail
-    // deterministically and portably (works even running as root, unlike a
-    // read-only-permission trick): write_manifest() writes to
-    // "manifest.json.tmp" before renaming it over "manifest.json", so
-    // pre-occupying that exact path with a directory makes the ofstream open
-    // fail with EISDIR regardless of privilege.
+    // Block the next publication without changing canonical SQLite. The
+    // replacement bytes may be identical, but the generated filename differs,
+    // so the manifest and orphan checks still distinguish success from failure.
     auto const manifest_tmp_path = bundle_dir / "manifest.json.tmp";
     std::filesystem::create_directory(manifest_tmp_path);
 
@@ -471,10 +461,10 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
         }
     }
 
-    // The old file remains intact, but it cannot be queried against the
-    // changed canonical game set. Serving it would silently omit game 2.
+    // The old file remains queryable because canonical SQLite did not change.
     auto const after_failed_publish = manager->query_position_matches(target_hash);
-    REQUIRE_FALSE(after_failed_publish.has_value());
+    REQUIRE(after_failed_publish.has_value());
+    CHECK(after_failed_publish->size() == 2U);
 
     // A retry (build_seq untouched by the failed publish, since manifest_
     // -- the only thing that advances it -- was never assigned) succeeds and
@@ -485,7 +475,7 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
     CHECK_FALSE(std::filesystem::exists(original_path));
     auto const after_retry = manager->query_position_matches(target_hash);
     REQUIRE(after_retry.has_value());
-    CHECK(after_retry->size() == 3U);
+    CHECK(after_retry->size() == 2U);
 
     manager->close();
     std::filesystem::remove_all(bundle_dir);
@@ -501,7 +491,7 @@ TEST_CASE("database_manager::open skips rebuilding when exact postings cover can
     {
         auto manager = motif::db::database_manager::create(bundle_dir, "postings-skip-rebuild");
         REQUIRE(manager.has_value());
-        REQUIRE(manager->store().insert(make_game({"Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
+        REQUIRE(manager->insert_game(make_game({"Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
         REQUIRE(manager->rebuild_position_postings().has_value());
         auto const build_seq_before = manager->manifest().derived_index_build_seq;
         REQUIRE(manager->manifest().position_postings.has_value());

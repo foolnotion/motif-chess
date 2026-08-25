@@ -31,6 +31,7 @@
 #    include <windows.h>
 #else
 #    include <fcntl.h>
+#    include <sys/types.h>
 #    include <unistd.h>
 #endif
 
@@ -51,6 +52,14 @@ namespace motif::db
 namespace
 {
 constexpr std::size_t checksum_buffer_bytes = 65'536;
+constexpr auto bundle_lock_permissions = mode_t {0600};
+#ifndef _WIN32
+auto open_bundle_lock_file(std::filesystem::path const& path) noexcept -> int
+{
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) -- POSIX open creates the advisory-lock file.
+    return ::open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, bundle_lock_permissions);
+}
+#endif
 
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto open_sqlite(std::filesystem::path const& db_path) -> result<sqlite3*>
@@ -452,6 +461,95 @@ auto cleanup_failed_create(std::filesystem::path const& dir,
 
 }  // namespace
 
+class bundle_lock
+{
+  public:
+    explicit bundle_lock(std::filesystem::path const& path) noexcept
+#ifndef _WIN32
+        : descriptor_ {open_bundle_lock_file(path)}
+#endif
+    {
+#ifdef _WIN32
+        handle_ = CreateFileW(path.c_str(),
+                              GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr,
+                              OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            return;
+        }
+        OVERLAPPED overlapped {};
+        if (LockFileEx(handle_, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &overlapped) == 0) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+            return;
+        }
+#else
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) -- POSIX advisory lock coordinates bundle writers.
+        // descriptor_ is opened in the initializer so ownership is valid for every return path.
+        if (descriptor_ < 0) {
+            return;
+        }
+        auto lock = flock {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0, .l_pid = 0};
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) -- fcntl is the portable POSIX advisory-lock API.
+        if (::fcntl(descriptor_, F_SETLK, &lock) != 0) {
+            ::close(descriptor_);
+            descriptor_ = -1;
+            return;
+        }
+#endif
+        locked_ = true;
+    }
+
+    ~bundle_lock()
+    {
+#ifdef _WIN32
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped {};
+            UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped);
+            CloseHandle(handle_);
+        }
+#else
+        if (descriptor_ >= 0) {
+            auto lock = flock {.l_type = F_UNLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0, .l_pid = 0};
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) -- fcntl is the portable POSIX advisory-lock API.
+            static_cast<void>(::fcntl(descriptor_, F_SETLK, &lock));
+            ::close(descriptor_);
+        }
+#endif
+    }
+
+    bundle_lock(bundle_lock const&) = delete;
+    auto operator=(bundle_lock const&) -> bundle_lock& = delete;
+    bundle_lock(bundle_lock&&) = delete;
+    auto operator=(bundle_lock&&) -> bundle_lock& = delete;
+
+    [[nodiscard]] auto locked() const noexcept -> bool { return locked_; }
+
+  private:
+    bool locked_ {false};
+#ifdef _WIN32
+    HANDLE handle_ {INVALID_HANDLE_VALUE};
+#else
+    int descriptor_ {-1};
+#endif
+};
+
+namespace
+{
+auto acquire_bundle_lock(std::filesystem::path const& dir) -> result<std::unique_ptr<bundle_lock>>
+{
+    auto lock = std::make_unique<bundle_lock>(dir / ".motif.lock");
+    if (!lock->locked()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return lock;
+}
+
+}  // namespace
+
 // ── Lifecycle
 // ─────────────────────────────────────────────────────────────────
 
@@ -469,6 +567,7 @@ database_manager::database_manager(database_manager&& other) noexcept
     , position_postings_ {std::move(other.position_postings_)}
     , opening_tree_index_ {std::move(other.opening_tree_index_)}
     , is_scratch_ {std::exchange(other.is_scratch_, false)}
+    , bundle_lock_ {std::move(other.bundle_lock_)}
 {
     other.store_.reset();
     other.writer_.reset();
@@ -488,6 +587,7 @@ auto database_manager::operator=(database_manager&& other) noexcept -> database_
         position_postings_ = std::move(other.position_postings_);
         opening_tree_index_ = std::move(other.opening_tree_index_);
         is_scratch_ = std::exchange(other.is_scratch_, false);
+        bundle_lock_ = std::move(other.bundle_lock_);
         other.store_.reset();
         other.writer_.reset();
         other.position_postings_.reset();
@@ -521,6 +621,7 @@ void database_manager::close() noexcept
         sqlite3_close(conn_);
         conn_ = nullptr;
     }
+    bundle_lock_.reset();
 
     if (is_scratch_ && !dir_.empty()) {
         std::error_code fs_err;
@@ -536,22 +637,36 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     auto const db_path = dir / "games.db";
     auto const manifest_path = dir / "manifest.json";
 
-    auto db_exists = path_exists(db_path);
-    if (!db_exists) {
-        return tl::unexpected {db_exists.error()};
-    }
-    if (*db_exists) {
-        return tl::unexpected {error_code::io_failure};
-    }
-
     std::error_code fs_err;
     auto const created_dir = std::filesystem::create_directories(dir, fs_err);
     if (fs_err) {
         return tl::unexpected {error_code::io_failure};
     }
 
+    auto bundle_lock = acquire_bundle_lock(dir);
+    if (!bundle_lock) {
+        if (created_dir) {
+            fs_err.clear();
+            std::filesystem::remove(dir, fs_err);
+        }
+        return tl::unexpected {bundle_lock.error()};
+    }
+
+    auto db_exists = path_exists(db_path);
+    if (!db_exists || *db_exists) {
+        if (created_dir) {
+            fs_err.clear();
+            std::filesystem::remove(dir, fs_err);
+        }
+        return tl::unexpected {db_exists ? error {error_code::io_failure} : db_exists.error()};
+    }
+
     auto conn_res = open_sqlite(db_path);
     if (!conn_res) {
+        if (created_dir) {
+            fs_err.clear();
+            std::filesystem::remove(dir, fs_err);
+        }
         return tl::unexpected {conn_res.error()};
     }
     sqlite3* conn = *conn_res;
@@ -577,6 +692,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     mgr.writer_.emplace(conn);
     mgr.manifest_ = std::move(new_manifest);
     mgr.dir_ = dir;
+    mgr.bundle_lock_ = std::move(*bundle_lock);
 
     // Publish a trivial empty (0-game) postings generation immediately so
     // postings_cover_canonical_games() is trivially true for the lifetime of
@@ -617,6 +733,11 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
     }
     if (!*manifest_exists) {
         return tl::unexpected {error_code::not_found};
+    }
+
+    auto bundle_lock = acquire_bundle_lock(dir);
+    if (!bundle_lock) {
+        return tl::unexpected {bundle_lock.error()};
     }
 
     auto conn_res = open_sqlite(db_path);
@@ -660,6 +781,7 @@ auto database_manager::open(std::filesystem::path const& dir) -> result<database
     mgr.writer_.emplace(conn);
     mgr.manifest_ = std::move(*mf_res);
     mgr.dir_ = dir;
+    mgr.bundle_lock_ = std::move(*bundle_lock);
 
     // Load checksum-verified immutable derived indexes before deciding
     // whether a rebuild is needed at all.
@@ -724,13 +846,6 @@ auto database_manager::create_scratch() -> result<database_manager>
 // ── Accessors
 // ─────────────────────────────────────────────────────────────────
 
-auto database_manager::store() noexcept -> game_store&
-{
-    assert(store_.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
-    return *store_;
-}
-
 auto database_manager::store() const noexcept -> game_store const&
 {
     assert(store_.has_value());
@@ -743,6 +858,30 @@ auto database_manager::writer() noexcept -> game_writer&
     assert(writer_.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *writer_;
+}
+
+auto database_manager::insert_game(game const& src_game) -> result<game_id>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (auto stale_res = prepare_canonical_mutation(); !stale_res) {
+        return tl::unexpected {stale_res.error()};
+    }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- store_ presence is checked at function entry.
+    return store_->insert(src_game);
+}
+
+auto database_manager::set_manual_game_provenance(game_id const game_key,
+                                                  std::optional<std::string> const& source_label,
+                                                  std::string const& review_status) -> result<void>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return store_->set_manual_provenance(game_key, source_label, review_status);
 }
 
 auto database_manager::manifest() const noexcept -> db_manifest const&
@@ -787,8 +926,9 @@ auto database_manager::mark_derived_indexes_stale() -> result<void>
     ++candidate.source_generation;
     candidate.position_postings.reset();
     candidate.opening_tree_index.reset();
-    if (auto write_res = write_manifest(dir_ / "manifest.json", candidate); !write_res) {
-        return write_res;
+    auto const write_res = write_manifest(dir_ / "manifest.json", candidate);
+    if (!write_res.was_published()) {
+        return tl::unexpected {write_res.error()};
     }
     manifest_ = std::move(candidate);
     position_postings_.reset();
@@ -803,6 +943,9 @@ auto database_manager::mark_derived_indexes_stale() -> result<void>
     if (stale_tree) {
         fs_err.clear();
         std::filesystem::remove(dir_ / stale_tree->filename, fs_err);
+    }
+    if (!write_res) {
+        return tl::unexpected {write_res.error()};
     }
     return {};
 }
@@ -821,29 +964,25 @@ auto database_manager::prepare_canonical_mutation() -> result<void>
     return mark_derived_indexes_stale();
 }
 
-// Builds the new manifest entry (referencing a generation-qualified filename
-// that was written to but never previously published -- see
-// rebuild_position_postings()/rebuild_opening_tree_index()) on a copy of
-// manifest_ and only assigns it to the live member once write_manifest()
-// succeeds. A failed write leaves manifest_ -- in memory and on disk --
-// completely untouched, still pointing at whatever artifact was already
-// published: the caller is responsible for cleaning up the unpublished file
-// at `filename`, never the previously-published one.
+// Builds a candidate manifest around a fully-synced generation-qualified
+// artifact. A pre-rename manifest failure leaves the candidate unpublished;
+// a post-rename directory-sync failure reports that publication happened so
+// callers retain the artifact and install the matching in-memory reader.
 auto database_manager::publish_derived_index(std::string const& filename, bool const is_postings, std::uint64_t const next_build_seq)
-    -> result<void>
+    -> manifest_write_result
 {
     if (auto sync_res = sync_file(dir_ / filename); !sync_res) {
-        return sync_res;
+        return manifest_write_result {.state = manifest_write_state::not_published, .failure = sync_res.error()};
     }
     auto checksum = file_checksum(dir_ / filename);
     if (!checksum) {
-        return tl::unexpected {checksum.error()};
+        return manifest_write_result {.state = manifest_write_state::not_published, .failure = checksum.error()};
     }
     assert(store_.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     auto game_count = store_->count_games();
     if (!game_count || *game_count < 0) {
-        return tl::unexpected {error_code::io_failure};
+        return manifest_write_result {.state = manifest_write_state::not_published, .failure = error {error_code::io_failure}};
     }
     auto entry = derived_index_manifest_entry {.filename = filename,
                                                .source_generation = manifest_.source_generation,
@@ -857,11 +996,11 @@ auto database_manager::publish_derived_index(std::string const& filename, bool c
     } else {
         candidate.opening_tree_index = std::move(entry);
     }
-    if (auto write_res = write_manifest(dir_ / "manifest.json", candidate); !write_res) {
-        return tl::unexpected {write_res.error()};
+    auto write_res = write_manifest(dir_ / "manifest.json", candidate);
+    if (write_res.was_published()) {
+        manifest_ = std::move(candidate);
     }
-    manifest_ = std::move(candidate);
-    return {};
+    return write_res;
 }
 
 auto database_manager::query_position_matches(zobrist_hash const hash, std::size_t const limit, std::size_t const offset) const
@@ -968,12 +1107,16 @@ auto database_manager::rebuild_position_postings(position_postings_build_metrics
     }
 
     auto const previous_entry = manifest_.position_postings;
-    if (auto publish_res = publish_derived_index(new_filename, /*is_postings=*/true, build_seq + 1); !publish_res) {
+    auto const publish_res = publish_derived_index(new_filename, /*is_postings=*/true, build_seq + 1);
+    if (!publish_res.was_published()) {
         fs_err.clear();
         std::filesystem::remove(new_path, fs_err);
         return tl::unexpected {publish_res.error()};
     }
     position_postings_ = std::move(live_reader);
+    if (!publish_res) {
+        return tl::unexpected {publish_res.error()};
+    }
 
     // Only remove the previous generation's file after the new one is
     // durably published -- if this process crashes before this point, the
@@ -1050,12 +1193,16 @@ auto database_manager::rebuild_opening_tree_index(opening_tree_index_build_metri
     }
 
     auto const previous_entry = manifest_.opening_tree_index;
-    if (auto publish_res = publish_derived_index(new_filename, /*is_postings=*/false, build_seq + 1); !publish_res) {
+    auto const publish_res = publish_derived_index(new_filename, /*is_postings=*/false, build_seq + 1);
+    if (!publish_res.was_published()) {
         fs_err.clear();
         std::filesystem::remove(new_path, fs_err);
         return tl::unexpected {publish_res.error()};
     }
     opening_tree_index_ = std::move(*live_index);
+    if (!publish_res) {
+        return tl::unexpected {publish_res.error()};
+    }
 
     if (previous_entry && previous_entry->filename != new_filename) {
         fs_err.clear();
