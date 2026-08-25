@@ -1,0 +1,215 @@
+import { Button, ComboBox, LineEdit, ListView } from "std-widgets.slint";
+
+export struct GameRow {
+    white: string,
+    black: string,
+    result: string,
+    event: string,
+    date: string,
+    eco: string,
+}
+
+component TableHeader inherits Rectangle {
+    in property <string> title;
+    in property <int> column;
+    in property <length> column-width;
+    callback sort(int, bool);
+    callback resize(int, int);
+    property <bool> ascending: true;
+
+    height: 36px;
+    width: root.column-width;
+    background: #202633;
+    Text {
+        x: 10px;
+        width: parent.width - 18px;
+        height: parent.height;
+        vertical-alignment: center;
+        color: #d7deea;
+        text: root.title + (root.ascending ? "  ^" : "  v");
+        font-weight: 600;
+    }
+    TouchArea {
+        width: parent.width - 5px;
+        clicked => {
+            root.ascending = !root.ascending;
+            root.sort(root.column, root.ascending);
+        }
+    }
+    resize-handle := TouchArea {
+        property <length> start-mouse-x;
+        property <length> start-width;
+        x: parent.width - 5px;
+        width: 10px;
+        mouse-cursor: col-resize;
+        changed pressed => {
+            if (self.pressed) {
+                self.start-mouse-x = self.mouse-x;
+                self.start-width = root.column-width;
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.resize(root.column, max(70, (self.start-width + self.mouse-x - self.start-mouse-x) / 1px));
+            }
+        }
+    }
+}
+
+export component GameBrowser inherits Rectangle {
+    in property <[GameRow]> games;
+    in property <int> total-count;
+    in property <int> page-index;
+    in property <bool> has-previous-page;
+    in property <bool> has-next-page;
+    in property <bool> busy;
+    in property <string> active-game-title;
+    in-out property <int> selected-row: -1;
+    in-out property <string> player-filter;
+    in-out property <string> result-filter;
+    in property <[int]> column-widths;
+    callback filters-changed(string, string);
+    callback page-requested(int);
+    callback select-row(int);
+    callback move-selection(int);
+    callback activate-selected();
+    callback sort-requested(int, bool);
+    callback column-resized(int, int);
+
+    property <length> white-width: root.column-widths.length == 6 ? root.column-widths[0] * 1px : 145px;
+    property <length> black-width: root.column-widths.length == 6 ? root.column-widths[1] * 1px : 145px;
+    property <length> result-width: root.column-widths.length == 6 ? root.column-widths[2] * 1px : 85px;
+    property <length> event-width: root.column-widths.length == 6 ? root.column-widths[3] * 1px : 170px;
+    property <length> date-width: root.column-widths.length == 6 ? root.column-widths[4] * 1px : 105px;
+    property <length> eco-width: root.column-widths.length == 6 ? root.column-widths[5] * 1px : 70px;
+    property <length> table-width: white-width + black-width + result-width + event-width + date-width + eco-width;
+
+
+    background: #171c26;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                horizontal-stretch: 1;
+                input-type: search;
+                placeholder-text: "Filter by player";
+                text <=> root.player-filter;
+                enabled: !root.busy;
+                edited(value) => { root.filters-changed(value, root.result-filter); }
+            }
+            ComboBox {
+                model: ["All results", "1-0", "0-1", "1/2-1/2"];
+                current-value: root.result-filter == "" ? "All results" : root.result-filter;
+                enabled: !root.busy;
+                selected(value) => {
+                    root.result-filter = value == "All results" ? "" : value;
+                    root.filters-changed(root.player-filter, root.result-filter);
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            border-width: 1px;
+            border-color: #313949;
+            background: #171c26;
+
+            VerticalLayout {
+                spacing: 0px;
+                HorizontalLayout {
+                    height: 36px;
+                    spacing: 0px;
+                    TableHeader { title: "White"; column: 0; column-width: root.white-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Black"; column: 1; column-width: root.black-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Result"; column: 2; column-width: root.result-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Event"; column: 3; column-width: root.event-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Date"; column: 4; column-width: root.date-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "ECO"; column: 5; column-width: root.eco-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                }
+                list := ListView {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    viewport-width: max(self.width, root.table-width);
+                    for row[index] in root.games: row-scope := FocusScope {
+                        width: root.table-width;
+                        height: 34px;
+                        focus-on-tab-navigation: index == root.selected-row;
+                        key-pressed(event) => {
+                            if (event.text == Key.DownArrow) {
+                                root.move-selection(1);
+                                return accept;
+                            }
+                            if (event.text == Key.UpArrow) {
+                                root.move-selection(-1);
+                                return accept;
+                            }
+                            if (event.text == Key.Return) {
+                                root.activate-selected();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: index == root.selected-row ? #315d86 : (Math.mod(index, 2) == 0 ? #1b2230 : #171c26);
+                            HorizontalLayout {
+                                spacing: 0px;
+                                Text { width: root.white-width; text: "  " + row.white; color: #e5eaf2; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.black-width; text: "  " + row.black; color: #e5eaf2; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.result-width; text: "  " + row.result; color: #d4bc78; vertical-alignment: center; }
+                                Text { width: root.event-width; text: "  " + row.event; color: #bbc5d6; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.date-width; text: "  " + row.date; color: #bbc5d6; vertical-alignment: center; }
+                                Text { width: root.eco-width; text: "  " + row.eco; color: #91a4c4; vertical-alignment: center; }
+                            }
+                            TouchArea {
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.select-row(index);
+                                    row-scope.focus();
+                                }
+                                double-clicked => {
+                                    root.select-row(index);
+                                    root.activate-selected();
+                                }
+                                pointer-event(event) => {
+                                    if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                        root.select-row(index);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                horizontal-stretch: 1;
+                text: root.total-count == 0 ? "No games" : "Games " + (root.page-index * 100 + 1) + "–" + min(root.total-count, (root.page-index + 1) * 100) + " of " + root.total-count;
+                color: #91a4c4;
+                vertical-alignment: center;
+            }
+            if root.active-game-title != "": Text { text: "Loaded: " + root.active-game-title; color: #d4bc78; font-size: 11px; }
+            Button {
+                text: "Previous Page";
+                enabled: !root.busy && root.has-previous-page;
+                clicked => { root.page-requested(root.page-index - 1); }
+            }
+            Button {
+                text: "Next Page";
+                enabled: !root.busy && root.has-next-page;
+                clicked => { root.page-requested(root.page-index + 1); }
+            }
+            Button {
+                text: "Open Game";
+                enabled: !root.busy && root.selected-row >= 0;
+                clicked => { root.activate-selected(); }
+            }
+        }
+    }
+}

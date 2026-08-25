@@ -174,6 +174,37 @@ auto has_metadata_filter(search_filter const& filter) noexcept -> bool
         || filter.max_elo.has_value();
 }
 
+auto game_sort_expression(game_sort_column const column) noexcept -> std::string_view
+{
+    switch (column) {
+        case game_sort_column::id:
+            return "g.id";
+        case game_sort_column::white:
+            return "w.name COLLATE NOCASE";
+        case game_sort_column::black:
+            return "b.name COLLATE NOCASE";
+        case game_sort_column::result:
+            return "g.result COLLATE NOCASE";
+        case game_sort_column::event:
+            return "e.name COLLATE NOCASE";
+        case game_sort_column::date:
+            return "g.date COLLATE NOCASE";
+        case game_sort_column::eco:
+            return "g.eco COLLATE NOCASE";
+    }
+    std::unreachable();
+}
+
+auto game_order_clause(search_filter const& filter) -> std::string
+{
+    auto order = std::string {game_sort_expression(filter.sort_column)};
+    order += filter.sort_ascending ? " ASC" : " DESC";
+    if (filter.sort_column != game_sort_column::id) {
+        order += filter.sort_ascending ? ", g.id ASC" : ", g.id DESC";
+    }
+    return order;
+}
+
 // NOLINT(llvm-prefer-static-over-anonymous-namespace): conflicts with
 // misc-use-anonymous-namespace
 [[nodiscard]] auto prepare(sqlite3* conn, char const* sql) -> result<unique_stmt>
@@ -946,7 +977,7 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
     }
 
     // language=sql
-    constexpr auto data_sql = R"sql(
+    constexpr auto data_sql_prefix = R"sql(
         SELECT
             g.id,
             w.name,
@@ -975,11 +1006,14 @@ auto game_store::find_games(search_filter const& filter) const -> result<game_li
           AND (? IS NULL OR g.eco LIKE ? || '%')
           AND (? IS NULL OR (g.white_elo >= ? AND g.black_elo >= ?))
           AND (? IS NULL OR (g.white_elo <= ? AND g.black_elo <= ?))
-        ORDER BY g.id ASC
+        ORDER BY
+    )sql";
+    constexpr auto data_sql_suffix = R"sql(
         LIMIT ? OFFSET ?
     )sql";
+    auto const data_sql = std::string {data_sql_prefix} + game_order_clause(filter) + data_sql_suffix;
 
-    auto data_stmt = prepare(db_, data_sql);
+    auto data_stmt = prepare(db_, data_sql.c_str());
     if (!data_stmt) {
         return tl::unexpected {data_stmt.error()};
     }
@@ -1075,7 +1109,7 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
     }
 
     // language=sql
-    constexpr auto data_sql = R"sql(
+    constexpr auto data_sql_prefix = R"sql(
         SELECT
             g.id,
             w.name,
@@ -1105,11 +1139,14 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
           AND (? IS NULL OR g.eco LIKE ? || '%')
           AND (? IS NULL OR (g.white_elo >= ? AND g.black_elo >= ?))
           AND (? IS NULL OR (g.white_elo <= ? AND g.black_elo <= ?))
-        ORDER BY g.id ASC
+        ORDER BY
+    )sql";
+    constexpr auto data_sql_suffix = R"sql(
         LIMIT ? OFFSET ?
     )sql";
+    auto const data_sql = std::string {data_sql_prefix} + game_order_clause(filter) + data_sql_suffix;
 
-    auto data_stmt = prepare(db_, data_sql);
+    auto data_stmt = prepare(db_, data_sql.c_str());
     if (!data_stmt) {
         return tl::unexpected {data_stmt.error()};
     }

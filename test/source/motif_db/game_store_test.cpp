@@ -396,6 +396,35 @@ TEST_CASE("game_store: find_games applies stable limit and offset", "[motif_db][
     CHECK(games->games.front().id == *second_id);
 }
 
+TEST_CASE("game_store: find_games sorts globally before pagination", "[motif_db][game_store]")
+{
+    db_fixture fix;
+    auto zulu = make_game("Zulu", "Beta");
+    auto alpha = make_game("alpha", "Gamma");
+    auto mike = make_game("Mike", "Delta");
+    REQUIRE(fix.store.insert(zulu).has_value());
+    REQUIRE(fix.store.insert(alpha).has_value());
+    REQUIRE(fix.store.insert(mike).has_value());
+
+    auto first_filter = motif::db::search_filter {};
+    first_filter.limit = 2;
+    first_filter.sort_column = motif::db::game_sort_column::white;
+    auto first_page = fix.store.find_games(first_filter);
+    REQUIRE(first_page.has_value());
+    REQUIRE(first_page->games.size() == 2);
+    CHECK(first_page->games.at(0).white == "alpha");
+    CHECK(first_page->games.at(1).white == "Mike");
+
+    auto second_filter = motif::db::search_filter {};
+    second_filter.offset = 2;
+    second_filter.limit = 2;
+    second_filter.sort_column = motif::db::game_sort_column::white;
+    auto second_page = fix.store.find_games(second_filter);
+    REQUIRE(second_page.has_value());
+    REQUIRE(second_page->games.size() == 1);
+    CHECK(second_page->games.front().white == "Zulu");
+}
+
 TEST_CASE("game_store: find_games returns empty results", "[motif_db][game_store]")
 {
     db_fixture const empty_fix;
