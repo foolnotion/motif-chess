@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -73,7 +74,9 @@ auto main(int const argc, char const* const* argv) -> int
         return 2;
     }
 
-    auto database = motif::db::database_manager::open(std::filesystem::path {argv[1]});
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto const args = std::span<char const* const> {argv, static_cast<std::size_t>(argc)};
+    auto database = motif::db::database_manager::open(std::filesystem::path {args[1]});
     if (!database) {
         fmt::print(stderr, "failed to open database bundle: {}\n", database.error().message);
         return 1;
@@ -89,7 +92,7 @@ auto main(int const argc, char const* const* argv) -> int
     update_window(*window, presenter.state());
 
     window->on_select_row(
-        [&](std::int32_t const row)
+        [&](std::int32_t const row) -> void
         {
             if (row >= 0) {
                 static_cast<void>(presenter.select_game(static_cast<std::size_t>(row)));
@@ -97,7 +100,7 @@ auto main(int const argc, char const* const* argv) -> int
             }
         });
     window->on_sort_requested(
-        [&](std::int32_t const column, bool const ascending)
+        [&](std::int32_t const column, bool const ascending) -> void
         {
             if (column >= 0) {
                 static_cast<void>(presenter.sort_games(static_cast<std::size_t>(column), ascending));
@@ -105,13 +108,13 @@ auto main(int const argc, char const* const* argv) -> int
             }
         });
     window->on_previous(
-        [&]
+        [&]() -> void
         {
             static_cast<void>(presenter.retreat());
             update_window(*window, presenter.state());
         });
     window->on_next(
-        [&]
+        [&]() -> void
         {
             static_cast<void>(presenter.advance());
             update_window(*window, presenter.state());
