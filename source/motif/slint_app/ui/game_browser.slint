@@ -44,6 +44,7 @@ component TableHeader inherits Rectangle {
         x: parent.width - 5px;
         width: 10px;
         mouse-cursor: col-resize;
+        enabled: !root.busy;
         changed pressed => {
             if (self.pressed) {
                 self.start-mouse-x = self.mouse-x;

@@ -131,6 +131,8 @@ void clear_browser(WorkspaceWindow& window)
     window.set_game_selected_row(-1);
     window.set_game_player_filter("");
     window.set_game_result_filter("");
+    window.set_game_sort_column(0);
+    window.set_game_sort_ascending(true);
     window.set_game_active_title("");
     window.set_game_column_widths(std::make_shared<slint::VectorModel<std::int32_t>>());
     window.set_browser_busy(false);
@@ -663,12 +665,15 @@ void register_workspace_callbacks(WorkspaceWindow& window,
         });
 }
 
-void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& browser, motif::slint_app::import_service const& importer)
+void register_browser_callbacks(WorkspaceWindow& window,
+                                async_browser_runner& browser,
+                                motif::slint_app::import_service const& importer,
+                                async_workspace_runner const& runner)
 {
     window.on_game_filters_changed(
         [&](slint::SharedString const& player, slint::SharedString const& result) -> void
         {
-            if (importer.active()) {
+            if (importer.active() || runner.is_busy()) {
                 return;
             }
             browser.set_filters(std::string {player}, std::string {result});
@@ -676,7 +681,7 @@ void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& b
     window.on_game_page_requested(
         [&](std::int32_t page) -> void
         {
-            if (importer.active() || page < 0) {
+            if (importer.active() || runner.is_busy() || page < 0) {
                 return;
             }
             browser.set_page(static_cast<std::size_t>(page));
@@ -684,7 +689,7 @@ void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& b
     window.on_game_selected(
         [&](std::int32_t row) -> void
         {
-            if (importer.active() || row < 0) {
+            if (importer.active() || runner.is_busy() || row < 0) {
                 return;
             }
             browser.select(static_cast<std::size_t>(row));
@@ -692,7 +697,7 @@ void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& b
     window.on_game_move_selection(
         [&](std::int32_t delta) -> void
         {
-            if (importer.active()) {
+            if (importer.active() || runner.is_busy()) {
                 return;
             }
             browser.move_selection(delta);
@@ -700,7 +705,7 @@ void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& b
     window.on_game_activate_requested(
         [&]() -> void
         {
-            if (importer.active()) {
+            if (importer.active() || runner.is_busy()) {
                 return;
             }
             browser.activate();
@@ -708,7 +713,7 @@ void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& b
     window.on_game_sort_requested(
         [&](std::int32_t column, bool ascending) -> void
         {
-            if (importer.active() || column < 0) {
+            if (importer.active() || runner.is_busy() || column < 0) {
                 return;
             }
             browser.sort(static_cast<std::size_t>(column), ascending);
@@ -716,7 +721,7 @@ void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& b
     window.on_game_column_resized(
         [&](std::int32_t column, std::int32_t width) -> void
         {
-            if (importer.active() || column < 0) {
+            if (importer.active() || runner.is_busy() || column < 0) {
                 return;
             }
             browser.resize_column(static_cast<std::size_t>(column), width);
@@ -770,7 +775,7 @@ auto main() -> int
     publish_workspace(*window, service);
     clear_browser(*window);
     register_workspace_callbacks(*window, service, importer, runner, browser);
-    register_browser_callbacks(*window, browser, importer);
+    register_browser_callbacks(*window, browser, importer, runner);
     register_import_callbacks(*window, service, importer, runner, browser, import_timer);
 
     window->run();

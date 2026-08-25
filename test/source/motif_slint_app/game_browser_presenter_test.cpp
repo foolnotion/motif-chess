@@ -341,6 +341,7 @@ TEST_CASE("game_browser_presenter: move_selection starts fresh when the selectio
     auto second_page = presenter.set_page(1);
     REQUIRE(second_page.has_value());
     REQUIRE(load(presenter, *second_page).value_or(false));
+    REQUIRE(presenter.state().games.size() > 1);
     CHECK(presenter.state().has_selection);
     CHECK(presenter.state().selected_game_id == selected_id);
     CHECK_FALSE(presenter.state().selected_row.has_value());
