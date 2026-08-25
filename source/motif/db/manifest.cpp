@@ -86,50 +86,53 @@ auto make_manifest(std::string const& name) -> db_manifest
     };
 }
 
-auto write_manifest(std::filesystem::path const& path, db_manifest const& manifest) -> result<void>
+auto write_manifest(std::filesystem::path const& path, db_manifest const& manifest) -> manifest_write_result
 {
+    auto const failed = [](manifest_write_state const state) -> manifest_write_result
+    { return manifest_write_result {.state = state, .failure = error {error_code::io_failure}}; };
+
     std::string buffer;
     auto const write_err = glz::write_json(manifest, buffer);
     if (write_err) {
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::not_published);
     }
 
     auto const temp_path = path.string() + ".tmp";
     std::ofstream file {temp_path, std::ios::trunc};
     if (!file.is_open()) {
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::not_published);
     }
     file << buffer;
     if (!file) {
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::not_published);
     }
     file.close();
     if (!file) {
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::not_published);
     }
     if (!sync_path(temp_path, /*directory=*/false)) {
         std::error_code ignored;
         std::filesystem::remove(temp_path, ignored);
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::not_published);
     }
     std::error_code fs_err;
 #ifdef _WIN32
     if (MoveFileExW(std::filesystem::path {temp_path}.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
         std::filesystem::remove(temp_path, fs_err);
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::not_published);
     }
 #else
     std::filesystem::rename(temp_path, path, fs_err);
     if (fs_err) {
         std::filesystem::remove(temp_path, fs_err);
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::not_published);
     }
 #endif
     auto const directory_path = path.parent_path().empty() ? std::filesystem::path {"."} : path.parent_path();
     if (!sync_path(directory_path, /*directory=*/true)) {
-        return tl::unexpected {error_code::io_failure};
+        return failed(manifest_write_state::published_not_durable);
     }
-    return {};
+    return manifest_write_result {.state = manifest_write_state::published, .failure = error {error_code::ok}};
 }
 
 auto read_manifest(std::filesystem::path const& path) -> result<db_manifest>

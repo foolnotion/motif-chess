@@ -118,7 +118,7 @@ TEST_CASE("game_list_model data path: single inserted game is retrieved", "[game
     single_game.event_details = motif::db::event {.name = "World Championship", .site = std::nullopt, .date = std::nullopt};
     single_game.date = "2021.11.26";
     single_game.eco = "C65";
-    REQUIRE(mgr->store().insert(single_game).has_value());
+    REQUIRE(mgr->insert_game(single_game).has_value());
 
     motif::db::search_filter filter;
     filter.limit = motif::db::max_search_limit;
@@ -153,9 +153,9 @@ struct player_filter_db
         REQUIRE(workspace.create_database(tmp.path.string(), "FilterDB").has_value());
         auto* mgr = workspace.persistent_db();
         REQUIRE(mgr != nullptr);
-        REQUIRE(mgr->store().insert(make_game("Alice Smith", "Bob Jones", "1-0")).has_value());
-        REQUIRE(mgr->store().insert(make_game("Charlie Brown", "Alice Smith", "0-1")).has_value());
-        REQUIRE(mgr->store().insert(make_game("Dave White", "Eve Black", "1/2-1/2")).has_value());
+        REQUIRE(mgr->insert_game(make_game("Alice Smith", "Bob Jones", "1-0")).has_value());
+        REQUIRE(mgr->insert_game(make_game("Charlie Brown", "Alice Smith", "0-1")).has_value());
+        REQUIRE(mgr->insert_game(make_game("Dave White", "Eve Black", "1/2-1/2")).has_value());
     }
 };
 
@@ -279,10 +279,10 @@ struct result_filter_db
         REQUIRE(workspace.create_database(tmp.path.string(), "ResultDB").has_value());
         auto* mgr = workspace.persistent_db();
         REQUIRE(mgr != nullptr);
-        REQUIRE(mgr->store().insert(make_game("P1", "P2", "1-0")).has_value());
-        REQUIRE(mgr->store().insert(make_game("P3", "P4", "0-1")).has_value());
-        REQUIRE(mgr->store().insert(make_game("P5", "P6", "1/2-1/2")).has_value());
-        REQUIRE(mgr->store().insert(make_game("P7", "P8", "1-0")).has_value());
+        REQUIRE(mgr->insert_game(make_game("P1", "P2", "1-0")).has_value());
+        REQUIRE(mgr->insert_game(make_game("P3", "P4", "0-1")).has_value());
+        REQUIRE(mgr->insert_game(make_game("P5", "P6", "1/2-1/2")).has_value());
+        REQUIRE(mgr->insert_game(make_game("P7", "P8", "1-0")).has_value());
     }
 };
 
@@ -362,10 +362,10 @@ TEST_CASE("game_list_model data path: duplicate player names both appear", "[gam
     auto* mgr = workspace.persistent_db();
     REQUIRE(mgr != nullptr);
 
-    REQUIRE(mgr->store().insert(make_game("Garry Kasparov", "Anatoly Karpov", "1-0")).has_value());
-    REQUIRE(mgr->store().insert(make_game("Anatoly Karpov", "Garry Kasparov", "0-1")).has_value());
-    REQUIRE(mgr->store().insert(make_game("Garry Kasparov", "Bobby Fischer", "1/2-1/2")).has_value());
-    REQUIRE(mgr->store().insert(make_game("Bobby Fischer", "Mikhail Tal", "1-0")).has_value());
+    REQUIRE(mgr->insert_game(make_game("Garry Kasparov", "Anatoly Karpov", "1-0")).has_value());
+    REQUIRE(mgr->insert_game(make_game("Anatoly Karpov", "Garry Kasparov", "0-1")).has_value());
+    REQUIRE(mgr->insert_game(make_game("Garry Kasparov", "Bobby Fischer", "1/2-1/2")).has_value());
+    REQUIRE(mgr->insert_game(make_game("Bobby Fischer", "Mikhail Tal", "1-0")).has_value());
 
     motif::db::search_filter filter;
     filter.player_name = "Kasparov";
@@ -394,9 +394,9 @@ struct combined_filter_db
         REQUIRE(workspace.create_database(tmp.path.string(), "CombDB").has_value());
         auto* mgr = workspace.persistent_db();
         REQUIRE(mgr != nullptr);
-        REQUIRE(mgr->store().insert(make_game("Magnus", "Fabiano", "1-0")).has_value());
-        REQUIRE(mgr->store().insert(make_game("Magnus", "Hikaru", "0-1")).has_value());
-        REQUIRE(mgr->store().insert(make_game("Fabiano", "Magnus", "1/2-1/2")).has_value());
+        REQUIRE(mgr->insert_game(make_game("Magnus", "Fabiano", "1-0")).has_value());
+        REQUIRE(mgr->insert_game(make_game("Magnus", "Hikaru", "0-1")).has_value());
+        REQUIRE(mgr->insert_game(make_game("Fabiano", "Magnus", "1/2-1/2")).has_value());
     }
 };
 
@@ -460,7 +460,7 @@ struct pagination_db
         REQUIRE(mgr != nullptr);
         for (int idx = 0; idx < k_num_test_games; ++idx) {
             auto page_game = make_game("White" + std::to_string(idx), "Black" + std::to_string(idx), "1-0");
-            REQUIRE(mgr->store().insert(page_game).has_value());
+            REQUIRE(mgr->insert_game(page_game).has_value());
         }
     }
 };
@@ -531,13 +531,13 @@ TEST_CASE("game_list_model API: exposes rows, headers, ids and filters via Qt mo
     game_a.event_details = motif::db::event {.name = "Alpha Event", .site = std::nullopt, .date = std::nullopt};
     game_a.date = "2026.05.10";
     game_a.eco = "C20";
-    REQUIRE(mgr->store().insert(game_a).has_value());
+    REQUIRE(mgr->insert_game(game_a).has_value());
 
     auto game_b = make_game("Carol Gamma", "Dave Delta", "0-1");
     game_b.event_details = motif::db::event {.name = "Beta Event", .site = std::nullopt, .date = std::nullopt};
     game_b.date = "2026.05.11";
     game_b.eco = "B01";
-    REQUIRE(mgr->store().insert(game_b).has_value());
+    REQUIRE(mgr->insert_game(game_b).has_value());
 
     motif::app::game_list_model model(&workspace);
 
@@ -597,7 +597,7 @@ TEST_CASE("game_list_model API: supports fetchMore pagination", "[game-list-mode
     constexpr int num_games = 1200;
     for (int idx = 0; idx < num_games; ++idx) {
         auto game = make_game("W" + std::to_string(idx), "B" + std::to_string(idx), "1-0");
-        REQUIRE(mgr->store().insert(game).has_value());
+        REQUIRE(mgr->insert_game(game).has_value());
     }
 
     motif::app::game_list_model model(&workspace);
@@ -628,7 +628,7 @@ TEST_CASE("game_list_model perf: initial model load stays below 100ms for 100k g
     constexpr int num_games = 100000;
     for (int idx = 0; idx < num_games; ++idx) {
         auto game = make_game("W" + std::to_string(idx), "B" + std::to_string(idx), "1-0");
-        REQUIRE(mgr->store().insert(game).has_value());
+        REQUIRE(mgr->insert_game(game).has_value());
     }
 
     auto const start = std::chrono::steady_clock::now();

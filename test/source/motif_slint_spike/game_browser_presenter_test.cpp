@@ -55,8 +55,8 @@ TEST_CASE("game_browser_presenter: loads real rows and selected game navigation"
 {
     auto database = motif::db::database_manager::create_scratch();
     REQUIRE(database);
-    REQUIRE(database->store().insert(make_game("Zed", "Beta", {"e4", "e5", "Nf3"})).has_value());
-    REQUIRE(database->store().insert(make_game("Alpha", "Delta", {"d4", "d5", "c4"})).has_value());
+    REQUIRE(database->insert_game(make_game("Zed", "Beta", {"e4", "e5", "Nf3"})).has_value());
+    REQUIRE(database->insert_game(make_game("Alpha", "Delta", {"d4", "d5", "c4"})).has_value());
 
     auto presenter = motif::slint_spike::game_browser_presenter {*database};
     REQUIRE(presenter.load_games());
@@ -85,8 +85,8 @@ TEST_CASE("game_browser_presenter: sorting resets selection", "[slint-spike]")
 {
     auto database = motif::db::database_manager::create_scratch();
     REQUIRE(database);
-    REQUIRE(database->store().insert(make_game("Zed", "Beta", {"e4"})).has_value());
-    REQUIRE(database->store().insert(make_game("Alpha", "Delta", {"d4"})).has_value());
+    REQUIRE(database->insert_game(make_game("Zed", "Beta", {"e4"})).has_value());
+    REQUIRE(database->insert_game(make_game("Alpha", "Delta", {"d4"})).has_value());
 
     auto presenter = motif::slint_spike::game_browser_presenter {*database};
     REQUIRE(presenter.load_games());
@@ -130,7 +130,7 @@ TEST_CASE("game_browser_presenter: long game exposes and navigates all plies", "
     constexpr std::size_t long_game_plies {300};
     auto database = motif::db::database_manager::create_scratch();
     REQUIRE(database);
-    REQUIRE(database->store().insert(make_repetition_game(long_game_plies)).has_value());
+    REQUIRE(database->insert_game(make_repetition_game(long_game_plies)).has_value());
 
     auto presenter = motif::slint_spike::game_browser_presenter {*database};
     REQUIRE(presenter.load_games());

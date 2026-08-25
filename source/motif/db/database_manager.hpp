@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -38,6 +39,8 @@ namespace motif::db
 // ever writes to a staging file that has never been published (see
 // rebuild_position_postings()).
 //
+class bundle_lock;
+
 // Obtain instances via the create() or open() factory methods.
 class database_manager
 {
@@ -71,11 +74,17 @@ class database_manager
     // user-facing bundle location.
     static auto create_scratch() -> result<database_manager>;
 
-    // Access the SQLite game store for CRUD operations.
-    [[nodiscard]] auto store() noexcept -> game_store&;
+    // Read-only access to the SQLite game store. Canonical writes are exposed
+    // as manager operations so they cannot bypass derived-index invalidation.
     [[nodiscard]] auto store() const noexcept -> game_store const&;
 
+    // Insert a game, persistently invalidating derived indexes before the
+    // canonical SQLite mutation.
+    auto insert_game(game const& src_game) -> result<game_id>;
+
     // Access the SQLite bulk writer used by import and other batched writes.
+    // Callers must hold lock_generation() and call prepare_canonical_mutation()
+    // before the first mutation in the locked batch.
     [[nodiscard]] auto writer() noexcept -> game_writer&;
 
     // Exact occurrence lookup from the immutable postings sidecar. Fails
@@ -95,6 +104,11 @@ class database_manager
 
     // Directory containing the database bundle files.
     [[nodiscard]] auto dir() const noexcept -> std::filesystem::path const&;
+
+    // Set provenance on a just-inserted game. This does not affect derived
+    // indexes because provenance is absent from their persisted records.
+    auto set_manual_game_provenance(game_id game_key, std::optional<std::string> const& source_label, std::string const& review_status)
+        -> result<void>;
 
     // Patch game metadata in SQLite. Only user-added games may be patched;
     // returns error_code::not_editable otherwise. Marks derived indexes
@@ -167,10 +181,10 @@ class database_manager
     // private temporary directory that close() removes entirely, rather
     // than a user-facing persistent bundle location.
     bool is_scratch_ {false};
+    std::unique_ptr<bundle_lock> bundle_lock_;
     mutable std::recursive_mutex generation_mutex_;
-
     auto mark_derived_indexes_stale() -> result<void>;
-    auto publish_derived_index(std::string const& filename, bool is_postings, std::uint64_t next_build_seq) -> result<void>;
+    auto publish_derived_index(std::string const& filename, bool is_postings, std::uint64_t next_build_seq) -> manifest_write_result;
     [[nodiscard]] auto has_valid_derived_index(derived_index_manifest_entry const& entry) const -> bool;
     // Caller must hold generation_mutex_. True when an open, checksum-backed
     // postings generation matches the manifest and indexes every canonical

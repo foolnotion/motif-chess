@@ -325,7 +325,7 @@ auto seed_positions(motif::db::database_manager& dbmgr, std::size_t count) -> st
             .extra_tags = {},
             .provenance = {},
         };
-        REQUIRE(dbmgr.store().insert(game).has_value());
+        REQUIRE(dbmgr.insert_game(game).has_value());
     }
 
     REQUIRE(dbmgr.rebuild_position_postings().has_value());
@@ -417,7 +417,7 @@ auto insert_http_game(motif::db::database_manager& dbmgr, http_game_seed seed) -
         .extra_tags = {},
         .provenance = {},
     };
-    auto inserted = dbmgr.store().insert(game);
+    auto inserted = dbmgr.insert_game(game);
     REQUIRE(inserted.has_value());
     return inserted->value;
 }
@@ -463,7 +463,7 @@ auto insert_detailed_http_game(motif::db::database_manager& dbmgr) -> std::pair<
         .extra_tags = {{"Opening", "Ruy Lopez"}, {"Round", "6"}},
         .provenance = {},
     };
-    auto inserted = dbmgr.store().insert(game);
+    auto inserted = dbmgr.insert_game(game);
     REQUIRE(inserted.has_value());
     return {inserted->value, std::move(moves)};
 }
@@ -1327,7 +1327,7 @@ TEST_CASE("server: opening stats returns continuations for populated DB", "[moti
     test_game.result = "1-0";
     test_game.moves = encode_moves_for_game({"e4", "e5", "Nf3"});
 
-    auto inserted = db_res->store().insert(test_game);
+    auto inserted = db_res->insert_game(test_game);
     REQUIRE(inserted.has_value());
     auto rebuilt = db_res->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
@@ -1390,7 +1390,7 @@ TEST_CASE("server: opening stats includes eco and opening_name when game has the
     test_game.extra_tags = {{"Opening", "French Defense"}};
     test_game.moves = encode_moves_for_game({"e4", "e6", "d4"});
 
-    auto inserted = db_res->store().insert(test_game);
+    auto inserted = db_res->insert_game(test_game);
     REQUIRE(inserted.has_value());
     auto rebuilt = db_res->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
@@ -2015,7 +2015,7 @@ TEST_CASE("server: GET /api/games/{id}/positions empty game returns empty arrays
         .extra_tags = {},
         .provenance = {},
     };
-    auto inserted = db_res->store().insert(game);
+    auto inserted = db_res->insert_game(game);
     REQUIRE(inserted.has_value());
 
     constexpr std::uint16_t test_port {18165};

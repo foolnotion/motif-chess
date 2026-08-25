@@ -1510,7 +1510,7 @@ auto opening_tree_index_builder::metrics() noexcept -> opening_tree_index_build_
     return state_->metrics;
 }
 
-auto opening_tree_index::build(game_store& store,
+auto opening_tree_index::build(game_store const& store,
                                std::filesystem::path const& path,
                                build_options const& opts,
                                opening_tree_index_build_metrics* const metrics) -> result<void>
@@ -1518,7 +1518,7 @@ auto opening_tree_index::build(game_store& store,
     return build(store, path, opts, metrics, {});
 }
 
-auto opening_tree_index::build(game_store& store,
+auto opening_tree_index::build(game_store const& store,
                                std::filesystem::path const& path,
                                build_options const& opts,
                                opening_tree_index_build_metrics* const metrics,

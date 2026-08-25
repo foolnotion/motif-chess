@@ -1207,9 +1207,9 @@ void server::impl::setup_routes()
 
                      // import_worker inserts with source_type='imported' (schema default);
                      // flip to 'manual' provenance now.
-                     auto prov_res = database.store().set_manual_provenance(game_id, req_body.source_label, review_status);
+                     auto prov_res = database.set_manual_game_provenance(game_id, req_body.source_label, review_status);
                      if (!prov_res) {
-                         static_cast<void>(database.store().remove(game_id));
+                         static_cast<void>(database.remove_game(game_id));
                          set_json_error(res, http_internal_error, "game creation failed");
                          return;
                      }

@@ -124,7 +124,7 @@ auto make_game(game_spec const& spec) -> motif::db::game
 void insert_games_and_rebuild(motif::db::database_manager& manager, std::initializer_list<motif::db::game> games)
 {
     for (auto const& game : games) {
-        auto inserted = manager.store().insert(game);
+        auto inserted = manager.insert_game(game);
         REQUIRE(inserted.has_value());
     }
 
@@ -442,20 +442,20 @@ TEST_CASE("opening_stats::query fails closed on a game-count mismatch and recove
     auto manager = motif::db::database_manager::create(tdir.path, "search-db");
     REQUIRE(manager.has_value());
 
-    auto removed_game_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                                                              .result = "1-0",
-                                                              .white_elo = white_elo_high,
-                                                              .black_elo = black_elo_high,
-                                                              .eco = std::string {"C40"},
-                                                              .opening_name = std::string {"King's Knight Opening"}}));
+    auto removed_game_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                                           .result = "1-0",
+                                                           .white_elo = white_elo_high,
+                                                           .black_elo = black_elo_high,
+                                                           .eco = std::string {"C40"},
+                                                           .opening_name = std::string {"King's Knight Opening"}}));
     REQUIRE(removed_game_id.has_value());
 
-    auto surviving_game_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
-                                                                .result = "0-1",
-                                                                .white_elo = white_elo_low,
-                                                                .black_elo = black_elo_other,
-                                                                .eco = std::string {"C25"},
-                                                                .opening_name = std::string {"Vienna Game"}}));
+    auto surviving_game_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                                                             .result = "0-1",
+                                                             .white_elo = white_elo_low,
+                                                             .black_elo = black_elo_other,
+                                                             .eco = std::string {"C25"},
+                                                             .opening_name = std::string {"Vienna Game"}}));
     REQUIRE(surviving_game_id.has_value());
 
     auto rebuilt = manager->rebuild_position_postings();
@@ -467,7 +467,7 @@ TEST_CASE("opening_stats::query fails closed on a game-count mismatch and recove
     // postings at all. The next query must detect the mismatch and fail
     // closed rather than silently serving an index that no longer describes
     // canonical SQLite.
-    auto removed = manager->store().remove(*removed_game_id);
+    auto removed = manager->remove_game(*removed_game_id);
     REQUIRE(removed.has_value());
 
     auto stale_stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
@@ -625,7 +625,7 @@ TEST_CASE("opening_stats::query total_games excludes duplicate position rows", "
     REQUIRE(summary_before->has_value());
     CHECK(summary_before->value_or(motif::db::position_postings_summary {}).distinct_game_count == 1);
 
-    auto const game_id = manager->store().insert(make_game(
+    auto const game_id = manager->insert_game(make_game(
         {.sans = {"e4", "d5"}, .result = "0-1", .white_elo = white_elo_mid, .black_elo = black_elo_other, .eco = {}, .opening_name = {}}));
     REQUIRE(game_id.has_value());
 
@@ -650,20 +650,20 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
-    auto game1_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3"},
-                                                       .result = "1-0",
-                                                       .white_elo = white_elo_high,
-                                                       .black_elo = black_elo_high,
-                                                       .eco = {},
-                                                       .opening_name = {}}));
+    auto game1_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3"},
+                                                    .result = "1-0",
+                                                    .white_elo = white_elo_high,
+                                                    .black_elo = black_elo_high,
+                                                    .eco = {},
+                                                    .opening_name = {}}));
     REQUIRE(game1_id.has_value());
 
-    auto game2_id = manager->store().insert(make_game({.sans = {"e4", "c5", "Nf3"},
-                                                       .result = "0-1",
-                                                       .white_elo = white_elo_mid,
-                                                       .black_elo = std::nullopt,
-                                                       .eco = {},
-                                                       .opening_name = {}}));
+    auto game2_id = manager->insert_game(make_game({.sans = {"e4", "c5", "Nf3"},
+                                                    .result = "0-1",
+                                                    .white_elo = white_elo_mid,
+                                                    .black_elo = std::nullopt,
+                                                    .eco = {},
+                                                    .opening_name = {}}));
     REQUIRE(game2_id.has_value());
 
     auto rebuilt = manager->rebuild_position_postings();
@@ -701,15 +701,15 @@ TEST_CASE("opening_stats::query fails closed for a game removed outside remove_g
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
-    auto game1_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3"},
-                                                       .result = "1-0",
-                                                       .white_elo = white_elo_high,
-                                                       .black_elo = black_elo_high,
-                                                       .eco = {},
-                                                       .opening_name = {}}));
+    auto game1_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3"},
+                                                    .result = "1-0",
+                                                    .white_elo = white_elo_high,
+                                                    .black_elo = black_elo_high,
+                                                    .eco = {},
+                                                    .opening_name = {}}));
     REQUIRE(game1_id.has_value());
 
-    auto game2_id = manager->store().insert(make_game(
+    auto game2_id = manager->insert_game(make_game(
         {.sans = {"e4", "c5"}, .result = "1/2-1/2", .white_elo = white_elo_mid, .black_elo = std::nullopt, .eco = {}, .opening_name = {}}));
     REQUIRE(game2_id.has_value());
 
@@ -721,7 +721,7 @@ TEST_CASE("opening_stats::query fails closed for a game removed outside remove_g
     // immediately -- silently changes the canonical game count under
     // postings' feet. The next query must detect the count mismatch and
     // fail closed rather than serving stale, orphaned data.
-    auto removed = manager->store().remove(*game1_id);
+    auto removed = manager->remove_game(*game1_id);
     REQUIRE(removed.has_value());
 
     auto stale_stats = motif::search::opening_stats::query(*manager, start_hash);
@@ -853,12 +853,12 @@ TEST_CASE("rebuild_position_postings makes total_games consistent with game coun
     constexpr int base_white_elo {2000};
     constexpr int base_black_elo {1900};
     for (int idx = 0; idx < game_count; ++idx) {
-        auto ins = manager->store().insert(make_game({.sans = {"e4", "e5"},
-                                                      .result = "1-0",
-                                                      .white_elo = base_white_elo + idx,
-                                                      .black_elo = base_black_elo + idx,
-                                                      .eco = {},
-                                                      .opening_name = {}}));
+        auto ins = manager->insert_game(make_game({.sans = {"e4", "e5"},
+                                                   .result = "1-0",
+                                                   .white_elo = base_white_elo + idx,
+                                                   .black_elo = base_black_elo + idx,
+                                                   .eco = {},
+                                                   .opening_name = {}}));
         REQUIRE(ins.has_value());
     }
 
@@ -1728,7 +1728,7 @@ TEST_CASE("opening_stats::query fails closed once postings go stale and recovers
     REQUIRE(stats_before.has_value());
     CHECK(stats_before->total_games == 1U);
 
-    auto const second_game_id = manager->store().insert(make_game(
+    auto const second_game_id = manager->insert_game(make_game(
         {.sans = {"d4", "d5"}, .result = "0-1", .white_elo = white_elo_mid, .black_elo = black_elo_other, .eco = {}, .opening_name = {}}));
     REQUIRE(second_game_id.has_value());
 
@@ -1756,12 +1756,12 @@ TEST_CASE("a canonical mutation invalidates same-count postings after replacemen
 
     auto const old_hash = hash_after_sans({"e4", "e5"});
     auto const new_hash = hash_after_sans({"d4", "d5"});
-    auto const old_game = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3"},
-                                                             .result = "1-0",
-                                                             .white_elo = white_elo_high,
-                                                             .black_elo = black_elo_high,
-                                                             .eco = {},
-                                                             .opening_name = {}}));
+    auto const old_game = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3"},
+                                                          .result = "1-0",
+                                                          .white_elo = white_elo_high,
+                                                          .black_elo = black_elo_high,
+                                                          .eco = {},
+                                                          .opening_name = {}}));
     REQUIRE(old_game.has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
     auto const old_summary = manager->position_summary(old_hash);
@@ -1778,13 +1778,13 @@ TEST_CASE("a canonical mutation invalidates same-count postings after replacemen
     // this can never be fooled either, once a rebuild does happen.
     REQUIRE(manager->remove_game(*old_game).has_value());
     CHECK_FALSE(manager->manifest().position_postings.has_value());
-    REQUIRE(manager->store()
-                .insert(make_game({.sans = {"d4", "d5", "c4"},
-                                   .result = "0-1",
-                                   .white_elo = white_elo_mid,
-                                   .black_elo = black_elo_other,
-                                   .eco = {},
-                                   .opening_name = {}}))
+    REQUIRE(manager
+                ->insert_game(make_game({.sans = {"d4", "d5", "c4"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_other,
+                                         .eco = {},
+                                         .opening_name = {}}))
                 .has_value());
 
     auto const old_stats_before_rebuild = motif::search::opening_stats::query(*manager, old_hash);
@@ -1827,7 +1827,7 @@ TEST_CASE("opening_stats::query unfiltered total_games scales with occurrence co
         games.push_back(std::move(game));
     }
     for (auto const& game : games) {
-        REQUIRE(manager->store().insert(game).has_value());
+        REQUIRE(manager->insert_game(game).has_value());
     }
     REQUIRE(manager->rebuild_position_postings().has_value());
     REQUIRE(manager->manifest().position_postings.has_value());

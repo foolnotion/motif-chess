@@ -465,13 +465,20 @@ struct decoded_occurrence
     std::uint16_t ply {};
 };
 
-// Fully decodes and validates one posting block, reconstructing every
-// occurrence and checking the result against the directory entry's
-// aggregate summary.
-auto decode_posting_block(std::span<char const> const bytes, directory_block_entry const& entry) -> result<std::vector<decoded_occurrence>>
+// Decodes and validates one posting block while retaining only the requested
+// occurrence window. The complete byte stream is still checked so pagination
+// cannot hide corruption after the returned rows.
+auto decode_posting_block_window(std::span<char const> const bytes,
+                                 directory_block_entry const& entry,
+                                 std::size_t const limit,
+                                 std::size_t const skip) -> result<std::vector<decoded_occurrence>>
 {
+    auto const begin = std::min(skip, static_cast<std::size_t>(entry.occurrence_count));
+    auto const remaining = static_cast<std::size_t>(entry.occurrence_count) - begin;
+    auto const count = limit == 0U ? remaining : std::min(limit, remaining);
     std::vector<decoded_occurrence> occurrences;
-    occurrences.reserve(entry.occurrence_count);
+    occurrences.reserve(count);
+    auto occurrence_index = std::size_t {0};
     auto offset = std::size_t {0};
     auto previous_game_id = std::uint64_t {0};
     auto min_ply = std::numeric_limits<std::uint16_t>::max();
@@ -496,9 +503,16 @@ auto decode_posting_block(std::span<char const> const bytes, directory_block_ent
             return tl::unexpected {error_code::schema_mismatch};
         }
         auto ply = static_cast<std::uint16_t>(first_ply);
-        occurrences.push_back(decoded_occurrence {.id = game_id {static_cast<std::uint32_t>(current_game_id)}, .ply = ply});
-        min_ply = std::min(min_ply, ply);
-        max_ply = std::max(max_ply, ply);
+        auto append_if_requested = [&]() -> void
+        {
+            if (occurrence_index >= begin && occurrences.size() < count) {
+                occurrences.push_back(decoded_occurrence {.id = game_id {static_cast<std::uint32_t>(current_game_id)}, .ply = ply});
+            }
+            ++occurrence_index;
+            min_ply = std::min(min_ply, ply);
+            max_ply = std::max(max_ply, ply);
+        };
+        append_if_requested();
         for (std::uint64_t index = 1; index < ply_count; ++index) {
             auto ply_delta = std::uint64_t {};
             if (!read_uleb128(bytes, offset, ply_delta) || ply_delta == 0U
@@ -507,12 +521,10 @@ auto decode_posting_block(std::span<char const> const bytes, directory_block_ent
                 return tl::unexpected {error_code::schema_mismatch};
             }
             ply = static_cast<std::uint16_t>(ply + ply_delta);
-            occurrences.push_back(decoded_occurrence {.id = game_id {static_cast<std::uint32_t>(current_game_id)}, .ply = ply});
-            min_ply = std::min(min_ply, ply);
-            max_ply = std::max(max_ply, ply);
+            append_if_requested();
         }
     }
-    if (offset != bytes.size() || occurrences.size() != entry.occurrence_count || min_ply != entry.min_ply || max_ply != entry.max_ply) {
+    if (offset != bytes.size() || occurrence_index != entry.occurrence_count || min_ply != entry.min_ply || max_ply != entry.max_ply) {
         return tl::unexpected {error_code::schema_mismatch};
     }
     return occurrences;
@@ -1655,19 +1667,14 @@ auto position_postings::occurrences(zobrist_hash const hash, std::size_t const l
     if (!input || !input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
         return tl::unexpected {error_code::io_failure};
     }
-    auto decoded = decode_posting_block(bytes, entry);
+    auto decoded = decode_posting_block_window(bytes, entry, limit, offset);
     if (!decoded) {
         return tl::unexpected {decoded.error()};
     }
-    auto const total = decoded->size();
-    auto const begin = std::min(offset, total);
-    auto const remaining = total - begin;
-    auto const count = limit == 0U ? remaining : std::min(limit, remaining);
 
     std::vector<position_match> matches;
-    matches.reserve(count);
-    for (std::size_t index = begin; index < begin + count; ++index) {
-        auto const& occurrence = (*decoded)[index];
+    matches.reserve(decoded->size());
+    for (auto const& occurrence : *decoded) {
         auto const metadata_iterator =
             std::ranges::lower_bound(metadata_, occurrence.id, {}, [](auto const& record) -> game_id { return record.id; });
         if (metadata_iterator == metadata_.end() || metadata_iterator->id != occurrence.id) {

@@ -82,11 +82,11 @@ class opening_tree_index
   public:
     using build_options = opening_tree_index_build_options;
 
-    [[nodiscard]] static auto build(game_store& store,
+    [[nodiscard]] static auto build(game_store const& store,
                                     std::filesystem::path const& path,
                                     build_options const& opts = {},
                                     opening_tree_index_build_metrics* metrics = nullptr) -> result<void>;
-    [[nodiscard]] static auto build(game_store& store,
+    [[nodiscard]] static auto build(game_store const& store,
                                     std::filesystem::path const& path,
                                     build_options const& opts,
                                     opening_tree_index_build_metrics* metrics,

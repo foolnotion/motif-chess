@@ -219,7 +219,7 @@ TEST_CASE("opening_tree_index::build dedupes a within-game repeated edge and agg
     constexpr auto white_elo_a = std::int32_t {2000};
     constexpr auto black_elo_a = std::int32_t {1900};
     auto inserted_a =
-        manager->store().insert(make_game({.sans = {"Nf3"}, .result = "1-0", .white_elo = white_elo_a, .black_elo = black_elo_a}));
+        manager->insert_game(make_game({.sans = {"Nf3"}, .result = "1-0", .white_elo = white_elo_a, .black_elo = black_elo_a}));
     REQUIRE(inserted_a.has_value());
 
     // Game B: both knights shuffle out and home (Nf3 Nc6 Ng1 Nb8), landing
@@ -228,7 +228,7 @@ TEST_CASE("opening_tree_index::build dedupes a within-game repeated edge and agg
     // twice within this one game (root_ply 0 and root_ply 4) and must be
     // counted once, with root_ply = 0 (the minimum).
     constexpr auto white_elo_b = std::int32_t {2200};
-    auto inserted_b = manager->store().insert(
+    auto inserted_b = manager->insert_game(
         make_game({.sans = {"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, .result = "0-1", .white_elo = white_elo_b, .black_elo = std::nullopt}));
     REQUIRE(inserted_b.has_value());
 
@@ -267,8 +267,8 @@ TEST_CASE("opening_tree_index::open is stable across repeated reads of the same 
 
     auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
-    auto inserted = manager->store().insert(
-        make_game({.sans = {"e4", "e5"}, .result = "1/2-1/2", .white_elo = std::nullopt, .black_elo = std::nullopt}));
+    auto inserted =
+        manager->insert_game(make_game({.sans = {"e4", "e5"}, .result = "1/2-1/2", .white_elo = std::nullopt, .black_elo = std::nullopt}));
     REQUIRE(inserted.has_value());
 
     auto const index_path = tdir.path / "opening_tree.idx";
@@ -318,7 +318,7 @@ TEST_CASE("opening_tree_index::query_opening_stats matches deterministic aggrega
              make_game({.sans = {"e4", "e5", "Nc3", "Nc6"}, .result = "0-1", .white_elo = std::nullopt, .black_elo = black_elo_other}),
          })
     {
-        auto inserted = manager->store().insert(game);
+        auto inserted = manager->insert_game(game);
         REQUIRE(inserted.has_value());
     }
 
@@ -387,7 +387,7 @@ TEST_CASE("opening_tree_index::build preserves aggregates across external spill 
                              game_spec {.sans = {"d4", "d5", "c4"}, .result = "1/2-1/2", .white_elo = 2100, .black_elo = 2000},
                              game_spec {.sans = {"e4", "e5", "Nc3"}, .result = "1-0", .white_elo = 2400, .black_elo = 2300}})
     {
-        REQUIRE(manager->store().insert(make_game(spec)).has_value());
+        REQUIRE(manager->insert_game(make_game(spec)).has_value());
     }
     auto const index_path = tdir.path / "opening_tree.idx";
     auto const options = motif::db::opening_tree_index::build_options {.max_root_ply = 20U, .spill_threshold = 2U};
@@ -475,10 +475,11 @@ TEST_CASE("database_manager::rebuild_opening_tree_index reuses exact postings ch
     auto manager = motif::db::database_manager::create(tdir.path / "db", "postings-child-counts");
     REQUIRE(manager.has_value());
 
-    REQUIRE(manager->store().insert(make_game({.sans = {"Nf3"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
-    REQUIRE(manager->store()
-                .insert(make_game({.sans = {"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900}))
-                .has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"Nf3"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(
+        manager
+            ->insert_game(make_game({.sans = {"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900}))
+            .has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
 
     auto metrics = motif::db::opening_tree_index_build_metrics {};
@@ -514,10 +515,10 @@ TEST_CASE("database_manager::rebuild_opening_tree_index rejects a postings game-
     tmp_dir const tdir {"stale-postings"};
     auto manager = motif::db::database_manager::create(tdir.path / "db", "stale-postings");
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
 
-    REQUIRE(manager->store().insert(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
     auto const rebuilt = manager->rebuild_opening_tree_index();
     REQUIRE_FALSE(rebuilt.has_value());
     CHECK(rebuilt.error() == motif::db::error_code::invalid_argument);
@@ -530,11 +531,11 @@ TEST_CASE("database_manager::rebuild_opening_tree_index rejects postings invalid
     tmp_dir const tdir {"invalidated-postings"};
     auto manager = motif::db::database_manager::create(tdir.path / "db", "invalidated-postings");
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
 
     REQUIRE(manager->prepare_canonical_mutation().has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
     CHECK_FALSE(manager->manifest().position_postings.has_value());
     auto const rebuilt = manager->rebuild_opening_tree_index();
     REQUIRE_FALSE(rebuilt.has_value());
@@ -546,7 +547,7 @@ TEST_CASE("opening_tree_index::build rejects an external child-count stream miss
     tmp_dir const tdir {"missing-external-child"};
     auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
 
     auto stream = motif::db::opening_tree_child_count_stream {
         [](motif::db::opening_tree_child_count_visitor const& visitor) -> motif::db::result<void>
@@ -583,8 +584,8 @@ TEST_CASE("opening_tree_index::build rejects an external child count below direc
     tmp_dir const tdir {"external-count-too-small"};
     auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
 
     auto const start_hash = hash_after_sans({});
     auto const e4_hash = hash_after_sans({"e4"});
@@ -610,7 +611,7 @@ TEST_CASE("opening_tree_index::build resolves external child counts through the 
     tmp_dir const tdir {"external-count-disk-fallback"};
     auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"e4", "e5"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4", "e5"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
 
     auto hashes = std::vector<motif::db::zobrist_hash> {hash_after_sans({}), hash_after_sans({"e4"}), hash_after_sans({"e4", "e5"})};
     std::ranges::sort(hashes);
@@ -682,11 +683,11 @@ TEST_CASE("opening_tree_index marks the starting position complete and aggregate
                    .result = "1-0",
                    .white_elo = 2200,
                    .black_elo = 2100});
-    REQUIRE(manager->store().insert(shuffle_and_break_out).has_value());
+    REQUIRE(manager->insert_game(shuffle_and_break_out).has_value());
 
     // A second, ordinary game reaching H = 1.Nf3 at root_ply 0, so the
     // starting position also has a normal shallow edge to compare against.
-    REQUIRE(manager->store().insert(make_game({.sans = {"Nf3"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"Nf3"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
 
     // Sanity: the shuffle really does return to the start position after 24
     // plies, so the "e4" move played next really is root_ply 24. If this
@@ -884,7 +885,7 @@ TEST_CASE("opening_tree_index::open rejects trailing bytes after a valid index",
     tmp_dir const tdir {"trailing-data"};
     auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store().insert(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2000, .black_elo = 1900})).has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2000, .black_elo = 1900})).has_value());
 
     auto const index_path = tdir.path / "opening_tree.idx";
     REQUIRE(motif::db::opening_tree_index::build(manager->store(), index_path).has_value());
@@ -904,9 +905,8 @@ TEST_CASE("opening_tree_index::build writes without continuation staging files",
     tmp_dir const tdir {"continuation-staging"};
     auto manager = motif::db::database_manager::create_scratch();
     REQUIRE(manager.has_value());
-    REQUIRE(manager->store()
-                .insert(make_game({.sans = {"e4", "e5", "Nf3"}, .result = "1-0", .white_elo = 2000, .black_elo = 1900}))
-                .has_value());
+    REQUIRE(
+        manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3"}, .result = "1-0", .white_elo = 2000, .black_elo = 1900})).has_value());
 
     auto const index_path = tdir.path / "opening_tree.idx";
     REQUIRE(motif::db::opening_tree_index::build(manager->store(), index_path).has_value());

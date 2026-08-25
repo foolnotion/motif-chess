@@ -133,11 +133,10 @@ auto database_workspace::recent_with_status() const -> std::vector<recent_status
         std::error_code fs_err;
         auto const root = std::filesystem::path {entry.path};
         auto const has_games = std::filesystem::exists(root / "games.db", fs_err);
-        auto const has_duckdb = !fs_err && std::filesystem::exists(root / "positions.duckdb", fs_err);
         auto const has_manifest = !fs_err && std::filesystem::exists(root / "manifest.json", fs_err);
         result.push_back(recent_status {
             .entry = entry,
-            .available = (!fs_err && has_games && has_duckdb && has_manifest),
+            .available = (!fs_err && has_games && has_manifest),
         });
     }
     return result;
