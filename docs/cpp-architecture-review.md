@@ -4,13 +4,20 @@
 **Reviewer**: AI-assisted review from a modern C++ perspective (C++23, Clang 21)
 **Scope**: Full codebase — all modules, build system, tests
 
+**Historical snapshot**: this review predates the DuckDB removal. `position_store`
+and `duckdb_connection`, referenced throughout as current architecture, no longer
+exist — SQLite is canonical and immutable `positions.postings.N` files are the
+sole durable position index (see `docs/architecture-overview.md` and
+`plans/duckdb-free-query-index.md`). Findings below are kept verbatim as a
+point-in-time record; do not use them to reason about the current storage layer.
+
 ---
 
 ## Strategic Context
 
 ### Why Qt, Not Web Frontend
 
-The long-term product vision is a **Qt desktop application**, not a web frontend over a REST API. The HTTP server was built as an MVP to get something working fast, and the current TypeScript+Vite+Zustand frontend was a means to that end.
+The long-term product vision is a **native desktop application**, not a web frontend over a REST API. This review predates decision D050; Slint has since replaced Qt as the target production presentation layer. The HTTP server was built as an MVP to get something working fast, and the current TypeScript+Vite+Zustand frontend was a means to that end.
 
 Chess database applications are inherently desktop workloads:
 
@@ -22,7 +29,7 @@ Chess database applications are inherently desktop workloads:
 
 Lichess proves web chess *can* be good, but Lichess also has a team of 20+ frontend engineers and still can't match ChessBase/Scid for database-oriented workflows. The current web frontend isn't ugly because web tech is fundamentally incapable — it's ugly because building a polished chess UI in CSS/JS is a massive amount of work that doesn't accumulate toward the product's core value.
 
-The web frontend is retained only for the MVP. The Qt desktop app is the target.
+The web frontend is retained only for the MVP. Slint is the production desktop target; Qt remains a migration baseline until parity.
 
 ### Deployment Model: Local + Remote
 

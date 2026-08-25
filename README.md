@@ -74,7 +74,7 @@ docker run --rm \
 
 Notes:
 
-- mount a host directory so the SQLite and DuckDB files persist across container restarts
+- mount a host directory so SQLite, the manifest, and derived index files persist across container restarts
 - use `--host 0.0.0.0` inside the container so the port mapping is reachable from the host
 - replace `v0.1.0` with `latest` if you explicitly want the newest published image
 
@@ -127,7 +127,7 @@ motif_http_server --db ~/chess/my-db --port 9000 \
 | `POST` | `/api/positions/apply-move` | Apply a UCI move and return the resulting FEN |
 | `GET` | `/api/positions/hash?fen=` | Zobrist hash for a FEN position |
 | `GET` | `/api/positions/:hash` | Games containing a position |
-| `POST` | `/api/positions/rebuild` | Rebuild the DuckDB position store from SQLite |
+| `POST` | `/api/positions/rebuild` | Rebuild exact position postings from canonical SQLite |
 | `GET` | `/api/openings/:hash/stats` | Opening continuation statistics plus `total_games` |
 | `POST` | `/api/imports` | Start a PGN import by filesystem path |
 | `POST` | `/api/imports/upload` | Start a PGN import by file upload |
