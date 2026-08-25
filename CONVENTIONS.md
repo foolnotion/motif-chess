@@ -17,26 +17,16 @@ mask packaging problems waste effort and often make things worse.
 
 ---
 
-## DuckDB — C API only
+## Position indexes
 
-**DuckDB's C++ API is incompatible with Clang 21.**
+SQLite `games.db` is the canonical game and header store. Position queries use immutable
+`positions.postings.N` sidecars, with optional `opening_tree.idx.N` shallow aggregates. Both are derived
+exclusively from SQLite and must fail closed when their manifest generation does not cover the canonical
+game set.
 
-`profiling_utils.hpp` instantiates `unique_ptr<ActiveTimer>` with an incomplete type; Clang 21 rejects
-this even with `SYSTEM` includes. The C++ API (`duckdb::DuckDB`, `duckdb::Connection`,
-`duckdb::Appender`) is **banned** in this project.
-
-All DuckDB code uses the pure C API:
-
-```cpp
-#include <duckdb.h>
-// duckdb_database, duckdb_connection, duckdb_appender — always
-```
-
-This applies to all modules for the lifetime of the project unless the upstream incompatibility is
-resolved and explicitly approved.
-
-> **Note:** The architecture document's DuckDB section describes the C++ API surface; that section is
-> outdated and will be corrected. Trust this file, not the arch doc, on DuckDB API choice.
+DuckDB is not a project dependency. During the one-release migration window, opening a legacy bundle
+without postings rebuilds them from canonical SQLite. A leftover `positions.duckdb` is never read,
+modified, or deleted.
 
 ---
 
@@ -64,7 +54,7 @@ Treating a duplicate as a fatal error is a bug.
 - **All identifiers**: `lower_snake_case` — variables, functions, struct members, Qt signals, logger names.
 - **Template parameters only**: `CamelCase` (e.g., `template <typename ResultType>`).
 - **No `k_` prefix** for constants. Use `constexpr auto max_retry_count = 3;` not `constexpr auto k_max_retry_count = 3;`.
-- **Namespaces** mirror CMake targets: `motif::db`, `motif::import`, `motif::search`, `motif::engine`, `motif::app`.
+- **Namespaces** mirror CMake targets: `motif::db`, `motif::import`, `motif::search`, `motif::engine`, `motif::app`, `motif::slint_app`.
 - **No `using namespace`** in any header, ever.
 
 ---
@@ -132,12 +122,15 @@ result.and_then([](auto& game) { ... })
 | Module | Must never include |
 |---|---|
 | `motif_db` | Any Qt header |
-| `motif_import` | Any Qt header; SQLite or DuckDB headers directly |
-| `motif_search` | Any Qt header; SQLite or DuckDB headers directly |
+| `motif_import` | Any Qt header; SQLite headers directly |
+| `motif_search` | Any Qt header; SQLite headers directly |
 | `motif_engine` | Any Qt header |
+| `motif_slint_app_service` | Any Qt or Slint header |
 
 `motif_import` and `motif_search` access storage exclusively through `motif_db` APIs.
 Shared domain types (`game`, `player`, `event`, `position`) live in `motif_db/types.hpp`.
+Generated Slint types and event-loop APIs stay in the `motif_slint_app` executable adapter; toolkit-neutral
+workspace/import services must not expose them in public headers.
 
 ---
 
@@ -165,7 +158,7 @@ been caught during planning. If official docs are unavailable, read the library'
 
 - Framework: Catch2 v3.
 - Test naming: `TEST_CASE("game_store: insert deduplicates players", "[motif-db]")`.
-- Storage tests use real in-memory SQLite (`:memory:`) and DuckDB instances — **no mocks for the storage layer**.
+- Storage tests use real SQLite and real immutable derived-index files — **no mocks for the storage layer**.
 - Every public API function must have tests.
 - Never run performance tests in parallel with other performance tests or other heavy test workloads; serialized execution is required so measurements are not polluted and perf gates do not fail spuriously.
 - Sanitizer gate: `cmake --preset=dev-sanitize && ctest --test-dir build/dev-sanitize` must be clean before a story is marked done.
