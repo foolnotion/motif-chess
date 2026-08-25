@@ -8,7 +8,6 @@
 #include <ios>
 #include <limits>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -123,7 +122,6 @@ auto count_games(std::filesystem::path const& pgn_path, std::size_t start_offset
 struct prepared_game
 {
     motif::db::game game_row;
-    std::vector<motif::db::position_row> position_rows;
 };
 
 enum class slot_state : std::uint8_t
@@ -144,7 +142,7 @@ struct pipeline_slot
 };
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<prepared_game>
+auto prepare_game(pgn::game const& pgn_game) -> result<prepared_game>
 {
     if (pgn_game.moves.empty()) {
         return tl::unexpected {error_code::empty_game};
@@ -192,44 +190,16 @@ auto prepare_game(pgn::game const& pgn_game, bool build_positions) -> result<pre
     std::vector<std::uint16_t> encoded_moves;
     encoded_moves.reserve(pgn_game.moves.size());
 
-    std::vector<motif::db::position_row> position_rows;
-    std::int8_t const result_int = build_positions ? pgn_result_to_int8(pgn_game.result) : std::int8_t {0};
-    if (build_positions) {
-        position_rows.reserve(pgn_game.moves.size() + 1);
-        position_rows.push_back(motif::db::position_row {
-            .zobrist_hash = motif::db::zobrist_hash {board.hash()},
-            .game_id = motif::db::game_id {},
-            .ply = 0,
-            .encoded_move = 0,
-            .result = result_int,
-            .white_elo = white_elo_opt,
-            .black_elo = black_elo_opt,
-        });
-    }
-
     for (auto const& node : pgn_game.moves) {
         auto move_result = motif::chess::apply_san(board, node.san);
         if (!move_result) {
             return tl::unexpected {error_code::parse_error};
         }
-        auto const enc = *move_result;
-        encoded_moves.push_back(enc);
-
-        if (build_positions) {
-            position_rows.push_back(motif::db::position_row {
-                .zobrist_hash = motif::db::zobrist_hash {board.hash()},
-                .game_id = motif::db::game_id {},
-                .ply = static_cast<std::uint16_t>(encoded_moves.size()),
-                .encoded_move = enc,
-                .result = result_int,
-                .white_elo = white_elo_opt,
-                .black_elo = black_elo_opt,
-            });
-        }
+        encoded_moves.push_back(*move_result);
     }
 
     game_row.moves = std::move(encoded_moves);
-    return prepared_game {.game_row = std::move(game_row), .position_rows = std::move(position_rows)};
+    return prepared_game {.game_row = std::move(game_row)};
 }
 
 }  // namespace
@@ -289,7 +259,8 @@ auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config c
 
 auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
-    auto const chk = read_checkpoint(db_.dir());
+    auto const generation_lock = db_.lock_generation();
+    auto chk = read_checkpoint(db_.dir());
     if (!chk) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -306,31 +277,6 @@ auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_pa
         return tl::unexpected {error_code::invalid_state};
     }
 
-    auto const current_stat = stat_source(pgn_path);
-    if (!current_stat) {
-        return tl::unexpected {current_stat.error()};
-    }
-    // A checkpoint offset strictly beyond the current file's end can never be
-    // a valid resume point; exact EOF (the source was fully ingested) is
-    // valid. Reject anything past it rather than letting pgn_reader silently
-    // treat it as "nothing more to read".
-    if (checkpoint.byte_offset > current_stat->size) {
-        return tl::unexpected {error_code::invalid_state};
-    }
-    // Detect the source file being edited or replaced at the same path since
-    // the checkpoint was written -- either would make byte_offset point at
-    // content that no longer matches what was already ingested.
-    if (current_stat->size != checkpoint.source_size || current_stat->mtime_ns != checkpoint.source_mtime_ns) {
-        return tl::unexpected {error_code::invalid_state};
-    }
-    auto const current_hash = hash_source(pgn_path);
-    if (!current_hash) {
-        return tl::unexpected {current_hash.error()};
-    }
-    if (*current_hash != checkpoint.source_content_hash) {
-        return tl::unexpected {error_code::invalid_state};
-    }
-
     auto const index_exists = db_.writer().identity_index_exists();
     if (!index_exists) {
         return tl::unexpected {error_code::io_failure};
@@ -340,11 +286,14 @@ auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_pa
     if (!*index_exists) {
         // A process or power failure can occur after raw batches commit but
         // before deduplicate() restores the identity index. Reconcile that
-        // durable SQLite state before resuming with checked inserts or
-        // rebuilding DuckDB positions.
+        // durable SQLite state before resuming with checked inserts.
         if (auto repair_res = db_.writer().deduplicate(); !repair_res) {
             return tl::unexpected {error_code::io_failure};
         }
+        // deduplicate() can remove canonical games committed by the prior,
+        // interrupted session; postings are marked stale by
+        // prepare_canonical_mutation() in run_from() below regardless, so
+        // this reconciliation never needs to touch a derived index itself.
         auto const game_count = db_.store().count_games();
         if (!game_count) {
             return tl::unexpected {error_code::io_failure};
@@ -363,6 +312,10 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
                                std::int64_t pre_last_game_id,
                                import_config const& config) -> result<import_summary>
 {
+    auto const generation_lock = db_.lock_generation();
+    if (auto stale_res = db_.prepare_canonical_mutation(); !stale_res) {
+        return tl::unexpected {error_code::io_failure};
+    }
     if (config.num_workers == 0 || config.num_lines == 0) {
         auto log = spdlog::get("motif.import");
         if (log) {
@@ -391,18 +344,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         total_games_.store(*game_count, std::memory_order_relaxed);
     }
 
-    // Captured once per run and embedded in every checkpoint written below so
-    // a later resume() can detect the source file being edited or replaced
-    // at the same path in the meantime.
-    auto const source_stat_res = stat_source(pgn_path);
-    if (!source_stat_res) {
-        return tl::unexpected {source_stat_res.error()};
-    }
-    auto const source_hash_res = hash_source(pgn_path);
-    if (!source_hash_res) {
-        return tl::unexpected {source_hash_res.error()};
-    }
-
     pgn_reader reader {pgn_path};
     if (start_offset > 0) {
         if (auto seek_res = reader.seek_to_offset(start_offset); !seek_res) {
@@ -425,35 +366,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     // reasoning about a partially-committed DB is already nontrivial without
     // also tracking "is the identity index currently dropped".
     bool const raw_mode = pre_committed == 0;
-
-    // Positions are never built inline: previously this ran only for a fresh
-    // import (pre_committed == 0), which is now exactly raw_mode. A game
-    // inserted during raw ingest may turn out to be an exact duplicate and
-    // get deleted by the post-ingest dedup pass, which would leave its
-    // inline position rows dangling -- rebuild_position_store() (below,
-    // after dedup) replays from the deduplicated game table instead.
-    bool const build_inline_positions = false;
-    std::vector<motif::db::position_row> inline_positions;
-    bool any_inline_flushed = false;
-
-    auto flush_inline_positions = [&]() -> bool
-    {
-        if (inline_positions.empty()) {
-            return true;
-        }
-        constexpr std::size_t flush_batch = 50'000;
-        std::span<motif::db::position_row const> const all_rows(inline_positions);
-        for (std::size_t offset = 0; offset < inline_positions.size(); offset += flush_batch) {
-            if (auto ins_res = db_.positions().insert_batch(all_rows.subspan(offset, std::min(flush_batch, all_rows.size() - offset)));
-                !ins_res)
-            {
-                return false;
-            }
-        }
-        any_inline_flushed = true;
-        inline_positions.clear();
-        return true;
-    };
 
     auto begin_sqlite_batch = [&]() -> bool
     {
@@ -487,6 +399,9 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             return false;
         }
         sqlite_tx_open = false;
+        // These games are now durable in SQLite. Postings and the opening
+        // tree index (if enabled) are rebuilt from the persisted game store
+        // once ingest finishes -- see below.
         return true;
     };
 
@@ -497,9 +412,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             .byte_offset = checkpoint_offset,
             .games_committed = committed,
             .last_game_id = last_game_id,
-            .source_size = source_stat_res->size,
-            .source_mtime_ns = source_stat_res->mtime_ns,
-            .source_content_hash = *source_hash_res,
         };
         if (auto wres = write_checkpoint(db_.dir(), chk); !wres) {
             if (log) {
@@ -514,24 +426,11 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     // landed, with potential unreconciled duplicates -- until deduplicate()
     // runs. deduplicate() is safe to call even with zero raw-mode inserts
     // pending (it's a no-op DELETE/UPDATE followed by CREATE INDEX).
-    // A failure here leaves the DB without its identity index and with
-    // possible unreconciled raw duplicates -- log it rather than discarding
-    // it, so the state is diagnosable instead of silently indistinguishable
-    // from a clean repair. The next database_manager::open() will detect the
-    // still-missing index and retry the repair.
-    auto restore_identity_index = [&]() -> bool
+    auto restore_identity_index = [&]() -> void
     {
-        if (!raw_mode) {
-            return true;
+        if (raw_mode) {
+            (void)db_.writer().deduplicate();
         }
-        if (auto repair_res = db_.writer().deduplicate(); !repair_res) {
-            if (log) {
-                log->error("failed to restore game_identity_lookup after aborting raw ingest: {}",
-                           motif::db::to_string(repair_res.error()));
-            }
-            return false;
-        }
-        return true;
     };
 
     if (raw_mode) {
@@ -541,9 +440,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     }
 
     if (!begin_sqlite_batch()) {
-        if (!restore_identity_index()) {
-            return tl::unexpected {error_code::io_failure};
-        }
+        restore_identity_index();
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -589,7 +486,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         if (slot.state != slot_state::ready) {
             return;
         }
-        auto prep = prepare_game(slot.pgn_game, build_inline_positions);
+        auto prep = prepare_game(slot.pgn_game);
         if (!prep) {
             slot.state = slot_state::parse_error;
             slot.error = prep.error();
@@ -660,13 +557,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         checkpoint_offset = slot.next_game_offset;
         auto const game_id = *ins;
 
-        if (!prep.position_rows.empty()) {
-            for (auto& row : prep.position_rows) {
-                row.game_id = game_id;
-            }
-            inline_positions.insert(inline_positions.end(), prep.position_rows.begin(), prep.position_rows.end());
-        }
-
         last_game_id = static_cast<std::int64_t>(game_id.value);
         committed++;
         batch_pending++;
@@ -681,15 +571,6 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
                 if (log) {
                     log->error("SQLite batch commit failed");
                 }
-                slot.prepared.reset();
-                slot.state = slot_state::empty;
-                return;
-            }
-
-            if (build_inline_positions && !flush_inline_positions()) {
-                fatal_error = error {error_code::io_failure};
-                eof_reached = true;
-                pflow.stop();
                 slot.prepared.reset();
                 slot.state = slot_state::empty;
                 return;
@@ -738,21 +619,18 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
     if (fatal_error.has_value() && *fatal_error != error_code::eof) {
         rollback_sqlite_batch();
-        if (!restore_identity_index()) {
-            return tl::unexpected {error_code::io_failure};
-        }
+        restore_identity_index();
         return tl::unexpected {*fatal_error};
     }
 
     if (!commit_sqlite_batch()) {
         rollback_sqlite_batch();
-        if (!restore_identity_index()) {
-            return tl::unexpected {error_code::io_failure};
-        }
+        restore_identity_index();
         return tl::unexpected {error_code::io_failure};
     }
     auto const ingest_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ingest_started);
-    auto rebuild_timing = motif::db::position_rebuild_timing {};
+    auto position_postings_metrics = motif::db::position_postings_build_metrics {};
+    auto opening_tree_index_metrics = motif::db::opening_tree_index_build_metrics {};
 
     // Runs even on early stop/cancel: raw_mode dropped the identity index
     // before ingest, so the DB is left without it -- and with unreconciled
@@ -787,34 +665,22 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             .duplicates_removed = duplicates_removed,
             .ingest_elapsed = ingest_elapsed,
             .dedup_elapsed = dedup_elapsed,
+            .position_postings_metrics = std::nullopt,
+            .opening_tree_index_metrics = std::nullopt,
             .elapsed = elapsed,
         };
     }
 
-    if (build_inline_positions) {
+    if (config.build_position_postings_after_import && !db_.dir().empty()) {
         phase_.store(import_phase::rebuilding, std::memory_order_relaxed);
-        if (!flush_inline_positions()) {
+        if (auto postings_res = db_.rebuild_position_postings(&position_postings_metrics); !postings_res) {
             return tl::unexpected {error_code::io_failure};
         }
-        if (any_inline_flushed && config.sort_positions_by_zobrist_after_rebuild) {
-            if (auto sort_res = db_.sort_positions(&rebuild_timing); !sort_res) {
-                return tl::unexpected {error_code::io_failure};
-            }
-        } else if (any_inline_flushed) {
-            if (auto rollup_res = db_.positions().rebuild_opening_stats_rollups(); !rollup_res) {
-                return tl::unexpected {error_code::io_failure};
-            }
-            // Not run inside a transaction here (unlike db_.sort_positions()),
-            // so an explicit checkpoint is needed for the rebuilt rollup
-            // table to survive a close()+reopen. See position_store.cpp's
-            // checkpoint() for why.
-            if (auto checkpoint_res = db_.positions().checkpoint(); !checkpoint_res) {
-                return tl::unexpected {error_code::io_failure};
-            }
-        }
-    } else if (config.rebuild_positions_after_import) {
+    }
+
+    if (config.build_opening_tree_index_after_import) {
         phase_.store(import_phase::rebuilding, std::memory_order_relaxed);
-        if (auto rebuild_res = db_.rebuild_position_store(config.sort_positions_by_zobrist_after_rebuild, &rebuild_timing); !rebuild_res) {
+        if (auto index_res = db_.rebuild_opening_tree_index(&opening_tree_index_metrics); !index_res) {
             return tl::unexpected {error_code::io_failure};
         }
     }
@@ -833,9 +699,12 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         .duplicates_removed = duplicates_removed,
         .ingest_elapsed = ingest_elapsed,
         .dedup_elapsed = dedup_elapsed,
-        .position_replay_elapsed = rebuild_timing.position_replay_elapsed,
-        .sort_elapsed = rebuild_timing.sort_elapsed,
-        .rollup_elapsed = rebuild_timing.rollup_elapsed,
+        .position_postings_metrics = config.build_position_postings_after_import
+            ? std::optional<motif::db::position_postings_build_metrics> {position_postings_metrics}
+            : std::optional<motif::db::position_postings_build_metrics> {},
+        .opening_tree_index_metrics = config.build_opening_tree_index_after_import
+            ? std::optional<motif::db::opening_tree_index_build_metrics> {opening_tree_index_metrics}
+            : std::optional<motif::db::opening_tree_index_build_metrics> {},
         .elapsed = elapsed,
     };
 }

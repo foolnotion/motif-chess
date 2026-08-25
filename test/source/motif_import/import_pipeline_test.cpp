@@ -15,7 +15,6 @@
 #include "motif/import/import_pipeline.hpp"
 
 #include <catch2/catch_test_macros.hpp>
-#include <duckdb.h>
 #include <fmt/base.h>
 #include <pgnlib/pgnlib.hpp>
 #include <pgnlib/types.hpp>
@@ -29,6 +28,7 @@
 #include "motif/import/logger.hpp"
 #include "motif/import/pgn_helpers.hpp"
 #include "motif/import/pgn_reader.hpp"
+#include "motif/search/opening_stats.hpp"
 #include "test_helpers.hpp"
 
 namespace
@@ -165,10 +165,44 @@ constexpr motif::import::import_config k_single_worker {
     .num_lines = 4,
     .batch_size = 2,
 };
+
+// Exact matches for the starting position served through the durable postings
+// index.
+auto start_position_matches(motif::db::database_manager& mgr) -> std::size_t
+{
+    auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+    auto const matches = mgr.query_position_matches(start_hash);
+    REQUIRE(matches.has_value());
+    return matches->size();
+}
+
+// Canonical game built directly from SANs; used to grow the store without a
+// postings rebuild so postings-stale behavior can be observed.
+auto game_from_sans(char const* white, char const* black, std::string_view result, std::initializer_list<char const*> sans)
+    -> motif::db::game
+{
+    auto board = motif::chess::board {};
+    auto moves = std::vector<std::uint16_t> {};
+    for (char const* const san : sans) {
+        auto const encoded = motif::chess::apply_san(board, san);
+        REQUIRE(encoded.has_value());
+        moves.push_back(*encoded);
+    }
+    return motif::db::game {
+        .white = {.name = white, .elo = std::nullopt, .title = std::nullopt, .country = std::nullopt},
+        .black = {.name = black, .elo = std::nullopt, .title = std::nullopt, .country = std::nullopt},
+        .event_details = std::nullopt,
+        .date = std::nullopt,
+        .result = std::string {result},
+        .eco = std::nullopt,
+        .moves = std::move(moves),
+        .extra_tags = {},
+        .provenance = {},
+    };
+}
+
 constexpr auto import_perf_limit_ms = std::int64_t {120'000};
 constexpr std::size_t perf_batch_size {10'000};
-constexpr double us_per_ms {1'000.0};
-constexpr std::uint64_t query_sample_seed {42};
 
 auto perf_pgn_path() -> std::filesystem::path
 {
@@ -258,29 +292,15 @@ void print_import_perf_summary(std::string_view const label, motif::import::impo
                "  skipped:      {}\n"
                "  errors:       {}\n"
                "  ingest:       {} ms\n"
-               "  replay:       {} ms\n"
-               "  sort:         {} ms\n"
-               "  rollup:       {} ms\n"
+               "  dedup:        {} ms\n"
                "  elapsed:      {} ms\n",
                label, summary.total_attempted, summary.committed, summary.skipped,
-               summary.errors, summary.ingest_elapsed.count(), summary.position_replay_elapsed.count(),
-               summary.sort_elapsed.count(), summary.rollup_elapsed.count(), summary.elapsed.count());
+               summary.errors, summary.ingest_elapsed.count(), summary.dedup_elapsed.count(), summary.elapsed.count());
 }
 
 void print_duration_result(std::string_view const label, std::chrono::milliseconds const elapsed)
 {
     fmt::print("\n=== {} ===\n" "  elapsed:      {} ms\n", label, elapsed.count());
-}
-
-void print_position_rebuild_timing(motif::db::position_rebuild_timing const& timing)
-{
-    fmt::print("  position replay: {} ms\n"
-               "  position rows:   {} ms\n"
-               "  position insert: {} ms\n"
-               "  sort:            {} ms\n"
-               "  rollup:          {} ms\n",
-               timing.position_replay_elapsed.count(), timing.position_row_build_elapsed.count(), timing.position_insert_elapsed.count(),
-               timing.sort_elapsed.count(), timing.rollup_elapsed.count());
 }
 
 void check_release_calibrated_perf(std::int64_t const elapsed_ms)
@@ -304,8 +324,7 @@ auto serial_fast_path_candidate_config() -> motif::import::import_config
     return motif::import::import_config {
         .num_workers = 1,
         .num_lines = 1,
-        .rebuild_positions_after_import = true,
-        .sort_positions_by_zobrist_after_rebuild = true,
+        .build_position_postings_after_import = true,
         .batch_size = motif::import::import_config::default_batch_size,
     };
 }
@@ -317,40 +336,27 @@ auto wide_parallel_config(std::size_t const workers) -> motif::import::import_co
     return motif::import::import_config {
         .num_workers = workers,
         .num_lines = workers * wide_parallel_lines_per_worker,
-        .rebuild_positions_after_import = true,
-        .sort_positions_by_zobrist_after_rebuild = true,
+        .build_position_postings_after_import = true,
         .batch_size = motif::import::import_config::default_batch_size,
     };
 }
 
-auto sqlite_only_serial_perf_config() -> motif::import::import_config
+auto ingest_only_serial_perf_config() -> motif::import::import_config
 {
     return motif::import::import_config {
         .num_workers = 1,
         .num_lines = 1,
-        .rebuild_positions_after_import = false,
+        .build_position_postings_after_import = false,
         .batch_size = perf_batch_size,
     };
 }
 
-auto sqlite_rebuild_no_index_perf_config() -> motif::import::import_config
+auto postings_serial_perf_config() -> motif::import::import_config
 {
     return motif::import::import_config {
         .num_workers = 1,
         .num_lines = 1,
-        .rebuild_positions_after_import = true,
-        .sort_positions_by_zobrist_after_rebuild = false,
-        .batch_size = perf_batch_size,
-    };
-}
-
-auto sqlite_rebuild_sorted_no_index_perf_config() -> motif::import::import_config
-{
-    return motif::import::import_config {
-        .num_workers = 1,
-        .num_lines = 1,
-        .rebuild_positions_after_import = true,
-        .sort_positions_by_zobrist_after_rebuild = true,
+        .build_position_postings_after_import = true,
         .batch_size = perf_batch_size,
     };
 }
@@ -381,7 +387,7 @@ auto run_sqlite_then_rebuild_perf() -> motif::import::result<std::chrono::millis
     }
 
     motif::import::import_pipeline pipeline {*mgr};
-    auto import_summary = pipeline.run(pgn_file, sqlite_only_serial_perf_config());
+    auto import_summary = pipeline.run(pgn_file, ingest_only_serial_perf_config());
     if (!import_summary.has_value()) {
         auto const shutdown_result = motif::import::shutdown_logging();
         (void)shutdown_result;
@@ -391,8 +397,8 @@ auto run_sqlite_then_rebuild_perf() -> motif::import::result<std::chrono::millis
     }
 
     auto const rebuild_start = std::chrono::steady_clock::now();
-    auto rebuild_timing = motif::db::position_rebuild_timing {};
-    auto rebuild_res = mgr->rebuild_position_store(/*sort_by_zobrist=*/true, &rebuild_timing);
+    auto rebuild_metrics = motif::db::position_postings_build_metrics {};
+    auto rebuild_res = mgr->rebuild_position_postings(&rebuild_metrics);
     auto const rebuild_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rebuild_start);
     if (!rebuild_res.has_value()) {
         auto const shutdown_result = motif::import::shutdown_logging();
@@ -401,7 +407,7 @@ auto run_sqlite_then_rebuild_perf() -> motif::import::result<std::chrono::millis
         std::filesystem::remove_all(tmp);
         return tl::unexpected {motif::import::error_code::io_failure};
     }
-    print_position_rebuild_timing(rebuild_timing);
+    fmt::print("  postings occurrences: {}\n", rebuild_metrics.occurrence_count);
 
     auto const shutdown_result = motif::import::shutdown_logging();
     (void)shutdown_result;
@@ -438,7 +444,7 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
     }
 
     motif::import::import_pipeline pipeline {*mgr};
-    auto import_summary = pipeline.run(pgn_file, sqlite_only_serial_perf_config());
+    auto import_summary = pipeline.run(pgn_file, ingest_only_serial_perf_config());
     if (!import_summary.has_value()) {
         auto const shutdown_result = motif::import::shutdown_logging();
         (void)shutdown_result;
@@ -448,8 +454,8 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
     }
 
     auto const rebuild_start = std::chrono::steady_clock::now();
-    auto rebuild_timing = motif::db::position_rebuild_timing {};
-    auto rebuild_res = mgr->rebuild_position_store(/*sort_by_zobrist=*/true, &rebuild_timing);
+    auto rebuild_metrics = motif::db::position_postings_build_metrics {};
+    auto rebuild_res = mgr->rebuild_position_postings(&rebuild_metrics);
     auto const rebuild_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rebuild_start);
     if (!rebuild_res.has_value()) {
         auto const shutdown_result = motif::import::shutdown_logging();
@@ -458,7 +464,7 @@ auto run_rebuild_only_perf() -> motif::import::result<std::chrono::milliseconds>
         std::filesystem::remove_all(tmp);
         return tl::unexpected {motif::import::error_code::io_failure};
     }
-    print_position_rebuild_timing(rebuild_timing);
+    fmt::print("  postings occurrences: {}\n", rebuild_metrics.occurrence_count);
 
     auto const shutdown_result = motif::import::shutdown_logging();
     (void)shutdown_result;
@@ -491,16 +497,17 @@ TEST_CASE("import_pipeline: run imports games and deletes checkpoint on success"
     REQUIRE(summary.has_value());
     CHECK(summary->committed == 3);
     CHECK(summary->skipped == 0);
+    CHECK(summary->position_postings_metrics.has_value());
     CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
-    auto row_count = mgr->positions().row_count();
-    REQUIRE(row_count.has_value());
-    CHECK(*row_count == 16);
+    REQUIRE(mgr->manifest().position_postings.has_value());
+    CHECK(start_position_matches(*mgr) == 3U);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: inline path row count matches rebuild path", "[motif-import]")
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this parity test's score.
+TEST_CASE("import_pipeline: default postings path matches an explicit postings rebuild", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_parity";
     std::filesystem::remove_all(tmp);
@@ -517,14 +524,17 @@ TEST_CASE("import_pipeline: inline path row count matches rebuild path", "[motif
     motif::import::import_pipeline pipeline_a {*mgr_a};
     auto summary_a = pipeline_a.run(pgn_file, motif::import::import_config {});
     REQUIRE(summary_a.has_value());
-    auto const row_count_a = mgr_a->positions().row_count();
-    REQUIRE(row_count_a.has_value());
+    REQUIRE(mgr_a->manifest().position_postings.has_value());
+    auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+    auto const matches_a = mgr_a->query_position_matches(start_hash);
+    REQUIRE(matches_a.has_value());
     mgr_a->close();
 
+    // Ingest-only import followed by an explicit postings rebuild.
     constexpr motif::import::import_config rebuild_config {
         .num_workers = 1,
         .num_lines = 4,
-        .rebuild_positions_after_import = false,
+        .build_position_postings_after_import = false,
         .batch_size = 2,
     };
     auto mgr_b = motif::db::database_manager::create(tmp / "db_b", "test");
@@ -532,18 +542,28 @@ TEST_CASE("import_pipeline: inline path row count matches rebuild path", "[motif
     motif::import::import_pipeline pipeline_b {*mgr_b};
     auto summary_b = pipeline_b.run(pgn_file, rebuild_config);
     REQUIRE(summary_b.has_value());
-    REQUIRE(mgr_b->rebuild_position_store().has_value());
-    auto const row_count_b = mgr_b->positions().row_count();
-    REQUIRE(row_count_b.has_value());
+    auto rebuild_metrics = motif::db::position_postings_build_metrics {};
+    REQUIRE(mgr_b->rebuild_position_postings(&rebuild_metrics).has_value());
+    CHECK(rebuild_metrics.occurrence_count == 16);
+    auto const matches_b = mgr_b->query_position_matches(start_hash);
+    REQUIRE(matches_b.has_value());
     mgr_b->close();
 
     CHECK(summary_a->committed == summary_b->committed);
-    CHECK(*row_count_a == *row_count_b);
+    REQUIRE(matches_a->size() == matches_b->size());
+    CHECK(matches_a->size() == 3U);
+    for (std::size_t index = 0; index < matches_a->size(); ++index) {
+        CHECK((*matches_a)[index].game_id == (*matches_b)[index].game_id);
+        CHECK((*matches_a)[index].ply == (*matches_b)[index].ply);
+        CHECK((*matches_a)[index].result == (*matches_b)[index].result);
+        CHECK((*matches_a)[index].white_elo == (*matches_b)[index].white_elo);
+        CHECK((*matches_a)[index].black_elo == (*matches_b)[index].black_elo);
+    }
 
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: inline import builds opening rollups without sorting", "[motif-import]")
+TEST_CASE("import_pipeline: postings import builds opening continuations", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_inline_rollups_unsorted";
     std::filesystem::remove_all(tmp);
@@ -561,8 +581,7 @@ TEST_CASE("import_pipeline: inline import builds opening rollups without sorting
     constexpr motif::import::import_config config {
         .num_workers = 1,
         .num_lines = 4,
-        .rebuild_positions_after_import = true,
-        .sort_positions_by_zobrist_after_rebuild = false,
+        .build_position_postings_after_import = true,
         .batch_size = 2,
     };
     motif::import::import_pipeline pipeline {*mgr};
@@ -570,26 +589,12 @@ TEST_CASE("import_pipeline: inline import builds opening rollups without sorting
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed == 3);
 
+    auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+    auto const continuations = mgr->query_unfiltered_opening_stats(start_hash);
+    REQUIRE(continuations.has_value());
+    CHECK(continuations->size() == 3);
+
     mgr->close();
-
-    duckdb_database database {};
-    auto const db_path = (tmp / "db" / "positions.duckdb").string();
-    REQUIRE(duckdb_open(db_path.c_str(), &database) == DuckDBSuccess);
-    duckdb_connection con {};
-    REQUIRE(duckdb_connect(database, &con) == DuckDBSuccess);
-    constexpr auto rollup_count_sql = R"sql(
-        SELECT COUNT(*) = 1
-        FROM information_schema.tables
-        WHERE table_schema = 'main'
-          AND table_name = 'opening_continuation'
-    )sql";
-    duckdb_result result {};
-    REQUIRE(duckdb_query(con, rollup_count_sql, &result) == DuckDBSuccess);
-    CHECK(duckdb_value_boolean(&result, 0, 0));
-    duckdb_destroy_result(&result);
-    duckdb_disconnect(&con);
-    duckdb_close(&database);
-
     std::filesystem::remove_all(tmp);
 }
 
@@ -621,18 +626,11 @@ TEST_CASE("import_pipeline: resume skips already-committed games (duplicate poli
     CHECK(first_run->committed == 3);
 
     // Write a checkpoint at offset 0 (forces resume to re-read from start)
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_hash.has_value());
     motif::import::import_checkpoint const fake_chk {
         .source_path = pgn_file.string(),
         .byte_offset = 0,
         .games_committed = 0,
         .last_game_id = 0,
-        .source_size = source_stat->size,
-        .source_mtime_ns = source_stat->mtime_ns,
-        .source_content_hash = *source_hash,
     };
     REQUIRE(motif::import::write_checkpoint(mgr->dir(), fake_chk).has_value());
 
@@ -642,9 +640,9 @@ TEST_CASE("import_pipeline: resume skips already-committed games (duplicate poli
     CHECK(second_run->committed == 0);
     CHECK(second_run->skipped == 3);
 
-    auto const row_count = mgr->positions().row_count();
-    REQUIRE(row_count.has_value());
-    CHECK(*row_count == 16);
+    // The resume's own postings rebuild republished the exact index.
+    REQUIRE(mgr->manifest().position_postings.has_value());
+    CHECK(start_position_matches(*mgr) == 3U);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
@@ -666,18 +664,8 @@ TEST_CASE("import_pipeline: run resumes a matching checkpoint", "[motif-import]"
     REQUIRE(mgr.has_value());
     motif::import::import_pipeline pipeline {*mgr};
     REQUIRE(pipeline.run(pgn_file, k_single_worker).has_value());
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_hash.has_value());
     REQUIRE(motif::import::write_checkpoint(mgr->dir(),
-                                            {.source_path = pgn_file.string(),
-                                             .byte_offset = 0,
-                                             .games_committed = 0,
-                                             .last_game_id = 0,
-                                             .source_size = source_stat->size,
-                                             .source_mtime_ns = source_stat->mtime_ns,
-                                             .source_content_hash = *source_hash})
+                                            {.source_path = pgn_file.string(), .byte_offset = 0, .games_committed = 0, .last_game_id = 0})
                 .has_value());
 
     auto const summary = pipeline.run(pgn_file, k_single_worker);
@@ -722,18 +710,11 @@ TEST_CASE("import_pipeline: resume repairs an interrupted raw import", "[motif-i
     REQUIRE(interrupted_id.has_value());
     REQUIRE_FALSE(*mgr->writer().identity_index_exists());
 
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_hash.has_value());
     motif::import::import_checkpoint const checkpoint {
         .source_path = pgn_file.string(),
         .byte_offset = 0,
         .games_committed = 1,
         .last_game_id = static_cast<std::int64_t>(interrupted_id->value),
-        .source_size = source_stat->size,
-        .source_mtime_ns = source_stat->mtime_ns,
-        .source_content_hash = *source_hash,
     };
     REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
 
@@ -748,17 +729,18 @@ TEST_CASE("import_pipeline: resume repairs an interrupted raw import", "[motif-i
     REQUIRE(mgr->writer().identity_index_exists().has_value());
     CHECK(*mgr->writer().identity_index_exists());
 
-    auto const position_count = mgr->positions().row_count();
-    REQUIRE(position_count.has_value());
-    CHECK(*position_count == 16);
+    // The moveless interrupted game still records its ply-0 occurrence in
+    // the postings index (every replayed game contributes a starting row),
+    // so four games means four starting-position matches.
+    CHECK(start_position_matches(*mgr) == 4U);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: resume rejects a checkpoint offset strictly beyond EOF", "[motif-import]")
+TEST_CASE("import_pipeline: cancellation leaves the position table dirty, and reopen repairs it", "[motif-import]")
 {
-    auto const tmp = std::filesystem::temp_directory_path() / "ipl_resume_past_eof";
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_cancel_repair";
     std::filesystem::remove_all(tmp);
     std::filesystem::create_directories(tmp);
 
@@ -771,185 +753,45 @@ TEST_CASE("import_pipeline: resume rejects a checkpoint offset strictly beyond E
     auto mgr = motif::db::database_manager::create(tmp / "db", "test");
     REQUIRE(mgr.has_value());
 
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_hash.has_value());
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const summary = pipeline.run(pgn_file, k_single_worker);
+        REQUIRE(summary.has_value());
+        REQUIRE(summary->committed == 3);
+        // Default config publishes postings that serve exact matches.
+        CHECK(start_position_matches(*mgr) == 3U);
+    }
 
-    // Exact EOF remains a valid resume point (nothing left to read).
-    motif::import::import_checkpoint const at_eof {
-        .source_path = pgn_file.string(),
-        .byte_offset = source_stat->size,
-        .games_committed = 3,
-        .last_game_id = 3,
-        .source_size = source_stat->size,
-        .source_mtime_ns = source_stat->mtime_ns,
-        .source_content_hash = *source_hash,
-    };
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(), at_eof).has_value());
-    motif::import::import_pipeline at_eof_pipeline {*mgr};
-    auto const at_eof_result = at_eof_pipeline.resume(pgn_file, k_single_worker);
-    REQUIRE(at_eof_result.has_value());
-    CHECK(at_eof_result->committed == 0);
-
-    // Strictly beyond EOF must be rejected outright.
-    motif::import::import_checkpoint const past_eof {
-        .source_path = pgn_file.string(),
-        .byte_offset = source_stat->size + 1,
-        .games_committed = 3,
-        .last_game_id = 3,
-        .source_size = source_stat->size,
-        .source_mtime_ns = source_stat->mtime_ns,
-        .source_content_hash = *source_hash,
-    };
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(), past_eof).has_value());
-    motif::import::import_pipeline past_eof_pipeline {*mgr};
-    auto const past_eof_result = past_eof_pipeline.resume(pgn_file, k_single_worker);
-    REQUIRE_FALSE(past_eof_result.has_value());
-    CHECK(past_eof_result.error() == motif::import::error_code::invalid_state);
+    // A second run against the same source is canceled before the worker
+    // starts (request_stop() called ahead of run(), mirroring a UI cancel
+    // that lands before any line is read). commit_sqlite_batch() still opens
+    // and commits the (empty) SQLite transaction and, per its real code
+    // path, calls mark_position_table_dirty() unconditionally -- the run
+    // returns early without a rebuild, so that dirty state must survive into
+    // the on-disk manifest.
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        pipeline.request_stop();
+        auto const summary = pipeline.run(pgn_file, k_single_worker);
+        REQUIRE(summary.has_value());
+    }
 
     mgr->close();
-    std::filesystem::remove_all(tmp);
-}
 
-TEST_CASE("import_pipeline: resume rejects a source file mutated at the same path", "[motif-import]")
-{
-    auto const tmp = std::filesystem::temp_directory_path() / "ipl_resume_mutated_source";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
+    auto const manifest_after_cancel = motif::db::read_manifest(mgr->dir() / "manifest.json");
+    REQUIRE(manifest_after_cancel.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(manifest_after_cancel->position_index_dirty);
 
-    auto const pgn_file = tmp / "games.pgn";
-    {
-        std::ofstream out {pgn_file};
-        out << k_three_game_pgn;
-    }
+    // The canceled run invalidated the postings generation. Reopen repairs
+    // directly from canonical SQLite.
 
-    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
-    REQUIRE(mgr.has_value());
+    auto reopened = motif::db::database_manager::open(tmp / "db");
+    REQUIRE(reopened.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(start_position_matches(*reopened) == 3U);
 
-    // Checkpoint the source's identity as of an (imagined) earlier partial
-    // import, matching its current size/mtime.
-    auto const original_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(original_stat.has_value());
-    auto const original_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(original_hash.has_value());
-    motif::import::import_checkpoint const checkpoint {
-        .source_path = pgn_file.string(),
-        .byte_offset = 0,
-        .games_committed = 0,
-        .last_game_id = 0,
-        .source_size = original_stat->size,
-        .source_mtime_ns = original_stat->mtime_ns,
-        .source_content_hash = *original_hash,
-    };
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
-
-    // Simulate the source being edited/replaced at the same path after the
-    // checkpoint was written -- e.g. a user re-exporting an edited PGN to the
-    // same location before resuming.
-    {
-        std::ofstream out {pgn_file, std::ios::trunc};
-        out << k_three_game_pgn;
-        out << k_three_game_pgn;  // different size and content than before
-    }
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto result = pipeline.resume(pgn_file, k_single_worker);
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error() == motif::import::error_code::invalid_state);
-
-    mgr->close();
-    std::filesystem::remove_all(tmp);
-}
-
-TEST_CASE("import_pipeline: run restarts after source invalidates checkpoint", "[motif-import]")
-{
-    auto const tmp = std::filesystem::temp_directory_path() / "ipl_run_restarts_mutated_source";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
-
-    auto const pgn_file = tmp / "games.pgn";
-    {
-        std::ofstream out {pgn_file};
-        out << k_three_game_pgn;
-    }
-
-    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
-    REQUIRE(mgr.has_value());
-
-    auto const original_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(original_stat.has_value());
-    auto const original_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(original_hash.has_value());
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(),
-                                            {.source_path = pgn_file.string(),
-                                             .source_size = original_stat->size,
-                                             .source_mtime_ns = original_stat->mtime_ns,
-                                             .source_content_hash = *original_hash})
-                .has_value());
-
-    {
-        std::ofstream out {pgn_file, std::ios::app};
-        out << k_three_game_pgn;
-    }
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto const result = pipeline.run(pgn_file, k_single_worker);
-    REQUIRE(result.has_value());
-    CHECK(result->total_attempted == 6);
-    CHECK(result->committed == 3);
-    CHECK(result->skipped == 3);
-    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
-
-    auto const game_count = mgr->store().count_games();
-    REQUIRE(game_count.has_value());
-    CHECK(*game_count == 3);
-
-    mgr->close();
-    std::filesystem::remove_all(tmp);
-}
-
-TEST_CASE("import_pipeline: resume rejects same-size source mutation with preserved mtime", "[motif-import]")
-{
-    auto const tmp = std::filesystem::temp_directory_path() / "ipl_resume_same_size_mutation";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
-
-    auto const pgn_file = tmp / "games.pgn";
-    {
-        std::ofstream out {pgn_file};
-        out << k_three_game_pgn;
-    }
-
-    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
-    REQUIRE(mgr.has_value());
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    REQUIRE(source_hash.has_value());
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(),
-                                            {.source_path = pgn_file.string(),
-                                             .source_size = source_stat->size,
-                                             .source_mtime_ns = source_stat->mtime_ns,
-                                             .source_content_hash = *source_hash})
-                .has_value());
-
-    auto replacement = std::string {k_three_game_pgn};
-    auto const marker = replacement.find("[White \"A\"]");
-    REQUIRE(marker != std::string::npos);
-    replacement.replace(marker, std::string_view {"[White \"A\"]"}.size(), "[White \"Z\"]");
-    {
-        std::ofstream out {pgn_file, std::ios::trunc};
-        out << replacement;
-    }
-    REQUIRE(std::filesystem::file_size(pgn_file) == source_stat->size);
-    std::filesystem::last_write_time(pgn_file, std::filesystem::file_time_type {std::chrono::nanoseconds {source_stat->mtime_ns}});
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto const result = pipeline.resume(pgn_file, k_single_worker);
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error() == motif::import::error_code::invalid_state);
-
+    reopened->close();
     mgr->close();
     std::filesystem::remove_all(tmp);
 }
@@ -1221,15 +1063,20 @@ TEST_CASE("import_pipeline: raw ingest + dedup leaves no dangling position rows"
     CHECK(summary->committed == 1);
     CHECK(summary->duplicates_removed == 1);
 
-    // The duplicate pair collapses to one surviving game; position rows must
-    // all reference it, not the raw-inserted-then-deleted duplicate.
+    // The duplicate pair collapses to one surviving game; exact occurrences
+    // must all reference it through the default postings index, not the
+    // raw-inserted-then-deleted duplicate.
     auto const games = mgr->find_games(motif::db::search_filter {});
     REQUIRE(games.has_value());
     REQUIRE(games->games.size() == 1);
+    auto const survivor = games->games.front().id;
 
-    auto row_count = mgr->positions().row_count();
-    REQUIRE(row_count.has_value());
-    CHECK(*row_count > 0);
+    REQUIRE(mgr->manifest().position_postings.has_value());
+    auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+    auto const matches = mgr->query_position_matches(start_hash);
+    REQUIRE(matches.has_value());
+    REQUIRE(matches->size() == 1U);
+    CHECK(matches->front().game_id == survivor);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
@@ -1285,16 +1132,16 @@ TEST_CASE("import_pipeline: run can skip position writes", "[motif-import]")
     REQUIRE(mgr.has_value());
 
     motif::import::import_pipeline pipeline {*mgr};
-    auto summary = pipeline.run(pgn_file, sqlite_only_serial_perf_config());
+    auto summary = pipeline.run(pgn_file, ingest_only_serial_perf_config());
     REQUIRE(summary.has_value());
     CHECK(summary->committed == 3);
-    CHECK(summary->position_replay_elapsed == std::chrono::milliseconds {0});
-    CHECK(summary->sort_elapsed == std::chrono::milliseconds {0});
-    CHECK(summary->rollup_elapsed == std::chrono::milliseconds {0});
+    CHECK_FALSE(summary->position_postings_metrics.has_value());
+    CHECK_FALSE(mgr->manifest().position_postings.has_value());
 
-    auto row_count = mgr->positions().row_count();
-    REQUIRE(row_count.has_value());
-    CHECK(*row_count == 0);
+    auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+    auto const matches = mgr->query_position_matches(start_hash);
+    REQUIRE_FALSE(matches.has_value());
+    CHECK(matches.error() == motif::db::error_code::io_failure);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
@@ -1327,18 +1174,11 @@ TEST_CASE("import_pipeline: zero num_workers is rejected", "[motif-import]")
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error() == motif::import::error_code::invalid_state);
 
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    REQUIRE(source_hash.has_value());
     motif::import::import_checkpoint const checkpoint {
         .source_path = pgn_file.string(),
-        .byte_offset = source_stat->size,
+        .byte_offset = std::filesystem::file_size(pgn_file),
         .games_committed = 3,
         .last_game_id = 3,
-        .source_size = source_stat->size,
-        .source_mtime_ns = source_stat->mtime_ns,
-        .source_content_hash = *source_hash,
     };
     REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
 
@@ -1348,7 +1188,6 @@ TEST_CASE("import_pipeline: zero num_workers is rejected", "[motif-import]")
     auto const preserved = motif::import::read_checkpoint(mgr->dir());
     REQUIRE(preserved.has_value());
     CHECK(preserved->byte_offset == checkpoint.byte_offset);
-    CHECK(preserved->source_content_hash == checkpoint.source_content_hash);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
@@ -1385,7 +1224,7 @@ TEST_CASE("import_pipeline: zero num_lines is rejected", "[motif-import]")
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: rebuild_positions_after_import=false leaves position " "store empty", "[motif-import]")
+TEST_CASE("import_pipeline: disabled postings build leaves exact queries unavailable", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_no_pos_rows";
     std::filesystem::remove_all(tmp);
@@ -1403,7 +1242,7 @@ TEST_CASE("import_pipeline: rebuild_positions_after_import=false leaves position
     motif::import::import_config const no_pos_config {
         .num_workers = 1,
         .num_lines = 4,
-        .rebuild_positions_after_import = false,
+        .build_position_postings_after_import = false,
         .batch_size = 2,
     };
 
@@ -1412,11 +1251,227 @@ TEST_CASE("import_pipeline: rebuild_positions_after_import=false leaves position
     REQUIRE(summary.has_value());
     CHECK(summary->committed == 3);
 
-    auto row_count = mgr->positions().row_count();
-    REQUIRE(row_count.has_value());
-    CHECK(*row_count == 0);
+    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    auto const matches = mgr->query_position_matches(motif::db::zobrist_hash {motif::chess::board {}.hash()});
+    REQUIRE_FALSE(matches.has_value());
+    CHECK(matches.error() == motif::db::error_code::io_failure);
 
     mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- one integration case intentionally inventories every postings query path.
+TEST_CASE("import_pipeline: literal default serves every position path from postings", "[motif-import]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_default_postings";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+
+    motif::import::import_pipeline pipeline {*mgr};
+    auto const summary = pipeline.run(pgn_file, motif::import::import_config {});
+    REQUIRE(summary.has_value());
+    CHECK(summary->committed == 3);
+    REQUIRE(summary->position_postings_metrics.has_value());
+    CHECK(summary->position_postings_metrics.value_or(motif::db::position_postings_build_metrics {}).game_count == 3U);
+
+    // The exact postings index is the published derived artifact.
+    REQUIRE(mgr->manifest().position_postings.has_value());
+    CHECK(std::filesystem::exists(tmp / "db"
+                                  / mgr->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).filename));
+
+    auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+    auto const after_e4e5 = [&]() -> motif::db::zobrist_hash
+    {
+        auto board = motif::chess::board {};
+        // apply_san applies the move to the board and returns its encoding.
+        REQUIRE(motif::chess::apply_san(board, "e4").has_value());
+        REQUIRE(motif::chess::apply_san(board, "e5").has_value());
+        return motif::db::zobrist_hash {board.hash()};
+    }();
+
+    // Exact position search, pagination, game ids, and summary counts.
+    auto const matches = mgr->query_position_matches(start_hash);
+    REQUIRE(matches.has_value());
+    REQUIRE(matches->size() == 3U);
+    CHECK((*matches)[0].game_id == motif::db::game_id {1U});
+    CHECK((*matches)[1].game_id == motif::db::game_id {2U});
+    CHECK((*matches)[2].game_id == motif::db::game_id {3U});
+    auto const paged = mgr->query_position_matches(start_hash, 1U, 1U);
+    REQUIRE(paged.has_value());
+    REQUIRE(paged->size() == 1U);
+    CHECK(paged->front().game_id == motif::db::game_id {2U});
+    auto const game_ids = mgr->position_game_ids(start_hash);
+    REQUIRE(game_ids.has_value());
+    CHECK(game_ids->size() == 3U);
+    auto const summary_one = mgr->position_summary(start_hash);
+    REQUIRE(summary_one.has_value());
+    REQUIRE(summary_one->has_value());
+    CHECK(summary_one->value_or(motif::db::position_postings_summary {}).distinct_game_count == 3U);
+    auto const after_e4e5_matches = mgr->query_position_matches(after_e4e5);
+    REQUIRE(after_e4e5_matches.has_value());
+    CHECK(after_e4e5_matches->size() == 1U);
+
+    // Unfiltered opening statistics.
+    auto const unfiltered = mgr->query_unfiltered_opening_stats(start_hash);
+    REQUIRE(unfiltered.has_value());
+    REQUIRE(unfiltered->size() == 3U);
+    for (auto const& row : *unfiltered) {
+        CHECK(row.frequency == 1U);
+        CHECK(row.transposition_frequency == 1U);
+    }
+
+    // Filtered opening statistics through the public search API.
+    auto filter = motif::db::search_filter {};
+    filter.player_name = std::string {"C"};
+    auto const filtered = motif::search::opening_stats::query(*mgr, start_hash, filter);
+    REQUIRE(filtered.has_value());
+    CHECK(filtered->total_games == 1U);
+    REQUIRE(filtered->continuations.size() == 1U);
+    CHECK(filtered->continuations.front().san == "d4");
+
+    // Elo distributions: unfiltered and metadata-filtered.
+    auto const distribution = mgr->query_elo_distribution(start_hash, {}, 200);
+    REQUIRE(distribution.has_value());
+    REQUIRE(distribution->size() == 2U);  // game 3 carries no Elo and is excluded
+    auto const elo_filter = []() -> motif::db::search_filter
+    {
+        constexpr auto minimum_elo = std::int32_t {2050};
+        auto filtered_filter = motif::db::search_filter {};
+        filtered_filter.min_elo = minimum_elo;
+        return filtered_filter;
+    }();
+    auto const filtered_distribution = mgr->query_elo_distribution(start_hash, elo_filter, 200);
+    REQUIRE(filtered_distribution.has_value());
+    REQUIRE(filtered_distribution->size() == 1U);
+    CHECK(filtered_distribution->front().game_count == 1U);
+
+    // Deep traversal outside any shallow tree: bounded slice from a root the
+    // (absent) opening-tree index never covered, unfiltered and game-filtered.
+    auto const deep = mgr->query_tree_slice(after_e4e5, 10U);
+    REQUIRE(deep.has_value());
+    REQUIRE(deep->size() == 3U);  // Nf3, Nc6, Bb5 remain in game 1
+    CHECK(deep->front().depth == 1U);
+    CHECK(deep->back().depth == 3U);
+    auto const deep_filtered = mgr->query_tree_slice(after_e4e5, 10U, {motif::db::game_id {2U}});
+    REQUIRE(deep_filtered.has_value());
+    CHECK(deep_filtered->empty());
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("import_pipeline: literal-default bundle reopens from postings", "[motif-import]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_default_reopen";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    {
+        auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+        REQUIRE(mgr.has_value());
+        motif::import::import_pipeline pipeline {*mgr};
+        REQUIRE(pipeline.run(pgn_file, motif::import::import_config {}).has_value());
+        mgr->close();
+    }
+
+    // Checksum-verified postings that cover canonical SQLite are a clean
+    // position-index state.
+    {
+        auto const manifest_after_close = motif::db::read_manifest(tmp / "db" / "manifest.json");
+        REQUIRE(manifest_after_close.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK_FALSE(manifest_after_close->position_index_dirty);
+    }
+
+    {
+        auto reopened = motif::db::database_manager::open(tmp / "db");
+        REQUIRE(reopened.has_value());
+        // Reopen recognizes the covering postings generation.
+        REQUIRE(reopened->manifest().position_postings.has_value());
+        CHECK(start_position_matches(*reopened) == 3U);
+
+        // Canonical growth without a postings rebuild makes exact queries
+        // fail closed rather than silently serving stale data.
+        REQUIRE(reopened->insert_game(game_from_sans("White Four", "Black Four", "1-0", {"e4", "c5"})).has_value());
+        auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+        auto const stale = reopened->query_position_matches(start_hash);
+        REQUIRE_FALSE(stale.has_value());
+        CHECK(stale.error() == motif::db::error_code::io_failure);
+
+        // Rebuilding the exact index restores serving.
+        REQUIRE(reopened->rebuild_position_postings().has_value());
+        CHECK(start_position_matches(*reopened) == 4U);
+
+        reopened->close();
+    }
+
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("import_pipeline: mutation on a postings-only bundle fails closed and reopens repaired", "[motif-import]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_default_mutation";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    {
+        auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+        REQUIRE(mgr.has_value());
+        motif::import::import_pipeline pipeline {*mgr};
+        REQUIRE(pipeline.run(pgn_file, motif::import::import_config {}).has_value());
+
+        REQUIRE(mgr->set_manual_game_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
+        auto patch = motif::db::game_patch {};
+        patch.result = "0-1";
+        REQUIRE(mgr->patch_game_metadata(motif::db::game_id {1U}, patch).has_value());
+        CHECK_FALSE(mgr->manifest().position_postings.has_value());
+
+        // The mutation invalidated postings, so exact queries fail closed
+        // instead of serving stale data.
+        auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+        auto const refused = mgr->query_position_matches(start_hash);
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error() == motif::db::error_code::io_failure);
+
+        mgr->close();
+    }
+
+    {
+        // Reopen repairs postings directly from canonical SQLite, then serves
+        // the patched result.
+        auto reopened = motif::db::database_manager::open(tmp / "db");
+        REQUIRE(reopened.has_value());
+        REQUIRE(reopened->manifest().position_postings.has_value());
+        auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
+        auto const matches = reopened->query_position_matches(start_hash);
+        REQUIRE(matches.has_value());
+        REQUIRE(matches->size() == 3U);
+        CHECK((*matches)[0].game_id == motif::db::game_id {1U});
+        CHECK((*matches)[0].result == -1);
+        reopened->close();
+    }
+
     std::filesystem::remove_all(tmp);
 }
 
@@ -1457,8 +1512,9 @@ TEST_CASE("import_config defaults preserve measured fast path", "[motif-import]"
     // are part of the contract this test protects.
     CHECK(config.num_workers >= 1);
     CHECK(config.num_lines == config.num_workers * motif::import::import_config::default_lines_per_worker);
-    CHECK(config.rebuild_positions_after_import);
-    CHECK(config.sort_positions_by_zobrist_after_rebuild);
+    // Exact postings are the default durable position index.
+    CHECK(config.build_position_postings_after_import);
+    CHECK_FALSE(config.build_opening_tree_index_after_import);
     CHECK(config.batch_size == motif::import::import_config::default_batch_size);
 }
 
@@ -1761,7 +1817,7 @@ TEST_CASE("import_pipeline: wide parallel (32 workers) perf", "[performance][mot
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
-TEST_CASE("import_pipeline: sqlite-only serial perf", "[performance][motif-import]")
+TEST_CASE("import_pipeline: ingest-only serial perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1770,13 +1826,13 @@ TEST_CASE("import_pipeline: sqlite-only serial perf", "[performance][motif-impor
         SKIP("1M-game PGN not available");
     }
 
-    auto summary = run_perf_import(sqlite_only_serial_perf_config());
+    auto summary = run_perf_import(ingest_only_serial_perf_config());
     REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: sqlite-only serial perf", *summary);
+    print_import_perf_summary("import_pipeline: ingest-only serial perf", *summary);
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
-TEST_CASE("import_pipeline: sqlite-import plus rebuild perf", "[performance][motif-import]")
+TEST_CASE("import_pipeline: ingest plus postings rebuild perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1787,11 +1843,11 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf", "[performance][mot
 
     auto total_elapsed = run_sqlite_then_rebuild_perf();
     REQUIRE(total_elapsed.has_value());
-    print_duration_result("import_pipeline: sqlite-import plus rebuild perf", *total_elapsed);
+    print_duration_result("import_pipeline: ingest plus postings rebuild perf", *total_elapsed);
     check_release_calibrated_perf(total_elapsed->count());
 }
 
-TEST_CASE("import_pipeline: rebuild-only perf", "[performance][motif-import]")
+TEST_CASE("import_pipeline: postings rebuild-only perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1802,11 +1858,11 @@ TEST_CASE("import_pipeline: rebuild-only perf", "[performance][motif-import]")
 
     auto rebuild_elapsed = run_rebuild_only_perf();
     REQUIRE(rebuild_elapsed.has_value());
-    print_duration_result("import_pipeline: rebuild-only perf", *rebuild_elapsed);
+    print_duration_result("import_pipeline: postings rebuild-only perf", *rebuild_elapsed);
     check_release_calibrated_perf(rebuild_elapsed->count());
 }
 
-TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (no index)", "[performance][motif-import]")
+TEST_CASE("import_pipeline: serial postings build perf", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
 
@@ -1815,24 +1871,9 @@ TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (no index)", "[perfo
         SKIP("1M-game PGN not available");
     }
 
-    auto summary = run_perf_import(sqlite_rebuild_no_index_perf_config());
+    auto summary = run_perf_import(postings_serial_perf_config());
     REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: sqlite-import plus rebuild perf (no index)", *summary);
-    check_release_calibrated_perf(summary->elapsed.count());
-}
-
-TEST_CASE("import_pipeline: sqlite-import plus rebuild perf (sorted no index)", "[performance][motif-import]")
-{
-    skip_perf_unless_release_build();
-
-    auto const pgn_file = perf_pgn_path();
-    if (!std::filesystem::exists(pgn_file)) {
-        SKIP("1M-game PGN not available");
-    }
-
-    auto summary = run_perf_import(sqlite_rebuild_sorted_no_index_perf_config());
-    REQUIRE(summary.has_value());
-    print_import_perf_summary("import_pipeline: sqlite-import plus rebuild perf (sorted no index)", *summary);
+    print_import_perf_summary("import_pipeline: serial postings build perf", *summary);
     check_release_calibrated_perf(summary->elapsed.count());
 }
 
@@ -1870,160 +1911,6 @@ TEST_CASE("import_pipeline: 10k diagnostic summary", "[motif-import][diagnostic]
     std::filesystem::remove_all(tmp);
 }
 
-namespace
-{
-
-struct query_latency_result
-{
-    std::string variant_name;
-    std::size_t num_queries {};
-    double total_ms {};
-    double p50_us {};
-    double p99_us {};
-    double min_us {};
-    double max_us {};
-    std::size_t total_rows_returned {};
-};
-
-auto measure_query_latencies(motif::db::database_manager& mgr,
-                             std::vector<motif::db::zobrist_hash> const& hashes,
-                             std::string_view variant_name) -> query_latency_result
-{
-    auto& positions = mgr.positions();
-    std::vector<double> latencies_us;
-    latencies_us.reserve(hashes.size());
-    std::size_t total_rows = 0;
-
-    for (auto const hash : hashes) {
-        auto const start = std::chrono::steady_clock::now();
-        auto res = positions.query_by_zobrist(hash);
-        auto const end = std::chrono::steady_clock::now();
-
-        auto const elapsed_us = std::chrono::duration<double, std::micro>(end - start).count();
-        latencies_us.push_back(elapsed_us);
-
-        if (res) {
-            total_rows += res->size();
-        }
-    }
-
-    std::ranges::sort(latencies_us);
-
-    auto const count = latencies_us.size();
-    auto total_ms = 0.0;
-    for (auto const latency : latencies_us) {
-        total_ms += latency;
-    }
-    total_ms /= us_per_ms;
-
-    auto const p50_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.50));
-    auto const p99_idx = std::min(count - 1, static_cast<std::size_t>(static_cast<double>(count) * 0.99));
-
-    return query_latency_result {
-        .variant_name = std::string {variant_name},
-        .num_queries = count,
-        .total_ms = total_ms,
-        .p50_us = count > 0 ? latencies_us[p50_idx] : 0.0,
-        .p99_us = count > 0 ? latencies_us[p99_idx] : 0.0,
-        .min_us = count > 0 ? latencies_us.front() : 0.0,
-        .max_us = count > 0 ? latencies_us.back() : 0.0,
-        .total_rows_returned = total_rows,
-    };
-}
-
-}  // namespace
-
-// Catch2 assertion macros inflate this test's measured cognitive complexity.
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("query_latency: unsorted vs sorted by zobrist", "[performance][query-latency]")
-{
-    skip_perf_unless_release_build();
-
-    auto const pgn_file = perf_pgn_path();
-    if (!std::filesystem::exists(pgn_file)) {
-        SKIP("PGN corpus not available");
-    }
-
-    auto const tmp = std::filesystem::temp_directory_path() / "query_latency_bench";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
-
-    auto mgr = motif::db::database_manager::create(tmp / "db", "qlatency");
-    REQUIRE(mgr.has_value());
-
-    std::filesystem::remove_all(perf_log_dir());
-    auto init_log = motif::import::initialize_logging({.log_dir = perf_log_dir()});
-    REQUIRE(init_log.has_value());
-
-    motif::import::import_config const sqlite_only_config {
-        .num_workers = 1,
-        .num_lines = 1,
-        .rebuild_positions_after_import = false,
-        .batch_size = perf_batch_size,
-    };
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto summary = pipeline.run(pgn_file, sqlite_only_config);
-    REQUIRE(summary.has_value());
-    REQUIRE(summary->committed > 0);
-
-    auto rebuild_res = mgr->rebuild_position_store(
-        /*sort_by_zobrist=*/false);
-    REQUIRE(rebuild_res.has_value());
-
-    auto& positions = mgr->positions();
-    auto const row_count_res = positions.row_count();
-    REQUIRE(row_count_res.has_value());
-    fmt::print("position row count: {}\n", *row_count_res);
-
-    constexpr std::size_t num_warmup = 5;
-    for (std::size_t i = 0; i < num_warmup; ++i) {
-        auto dummy = positions.query_by_zobrist(motif::db::zobrist_hash {0});
-        (void)dummy;
-    }
-
-    constexpr std::size_t num_samples = 200;
-    auto hashes_res = positions.sample_zobrist_hashes(num_samples, query_sample_seed);
-    REQUIRE(hashes_res.has_value());
-    auto sample_hashes = std::move(*hashes_res);
-
-    REQUIRE_FALSE(sample_hashes.empty());
-    fmt::print("sample hashes collected: {}\n", sample_hashes.size());
-
-    auto print_result = [](query_latency_result const& result) -> void
-    {
-        fmt::print("\n=== {} ===\n"
-                   "  queries:      {}\n"
-                   "  total:        {} ms\n"
-                   "  p50:          {} us\n"
-                   "  p99:          {} us\n"
-                   "  min:          {} us\n"
-                   "  max:          {} us\n"
-                   "  total rows:   {}\n",
-                   result.variant_name, result.num_queries, result.total_ms,
-                   result.p50_us, result.p99_us, result.min_us, result.max_us, result.total_rows_returned);
-    };
-
-    auto r_unsorted = measure_query_latencies(*mgr, sample_hashes, "unsorted");
-    print_result(r_unsorted);
-
-    auto sort_res = positions.sort_by_zobrist();
-    REQUIRE(sort_res.has_value());
-
-    for (std::size_t i = 0; i < num_warmup; ++i) {
-        auto dummy = positions.query_by_zobrist(sample_hashes.front());
-        (void)dummy;
-    }
-
-    auto r_sorted = measure_query_latencies(*mgr, sample_hashes, "sorted by zobrist");
-    print_result(r_sorted);
-
-    auto const shutdown_result = motif::import::shutdown_logging();
-    (void)shutdown_result;
-    mgr->close();
-    std::filesystem::remove_all(tmp);
-}
-
 TEST_CASE("import_pipeline: ingest-only peak RSS on 1M (isolates pgn_reader buffer)", "[performance][motif-import]")
 {
     skip_perf_unless_release_build();
@@ -2042,17 +1929,15 @@ TEST_CASE("import_pipeline: ingest-only peak RSS on 1M (isolates pgn_reader buff
 
     motif::import::import_pipeline pipeline {*mgr};
 
-    // No position rebuild, no sort, no rollup -- isolates PGN read (pgn_reader's
-    // whole-file buffer) + SQLite game write from all DuckDB memory use, so this
-    // number is directly attributable to the import_stream migration's buffer.
-    auto const sqlite_only = motif::import::import_config {
-        .rebuild_positions_after_import = false,
+    // No derived-index build: isolates PGN read and canonical game writes.
+    auto const ingest_only = motif::import::import_config {
+        .build_position_postings_after_import = false,
     };
 
     static constexpr std::size_t bytes_per_mb = 1024UZ * 1024UZ;
     auto const rss_baseline = test_helpers::read_rss_bytes();
     test_helpers::peak_rss_sampler const sampler;
-    auto summary = pipeline.run(pgn_file, sqlite_only);
+    auto summary = pipeline.run(pgn_file, ingest_only);
     auto const peak_rss = sampler.peak();
 
     REQUIRE(summary.has_value());
@@ -2127,16 +2012,16 @@ TEST_CASE("import_pipeline: rebuild path peak RSS on 1M", "[performance][motif-i
 
     motif::import::import_pipeline pipeline {*mgr};
 
-    auto const sqlite_only = motif::import::import_config {
-        .rebuild_positions_after_import = false,
+    auto const ingest_only = motif::import::import_config {
+        .build_position_postings_after_import = false,
     };
 
     static constexpr std::size_t bytes_per_mb = 1024UZ * 1024UZ;
     auto const rss_baseline = test_helpers::read_rss_bytes();
     test_helpers::peak_rss_sampler const sampler;
-    auto summary = pipeline.run(pgn_file, sqlite_only);
+    auto summary = pipeline.run(pgn_file, ingest_only);
     REQUIRE(summary.has_value());
-    auto rebuild_res = mgr->rebuild_position_store();
+    auto rebuild_res = mgr->rebuild_position_postings();
     REQUIRE(rebuild_res.has_value());
     auto const peak_rss = sampler.peak();
 

@@ -167,30 +167,49 @@ namespace motif::search::opening_stats
 auto query(motif::db::database_manager const& database, motif::db::zobrist_hash const hash) -> result<stats>
 {
     auto const started = std::chrono::steady_clock::now();
-    auto total_count_res = database.positions().count_distinct_games_by_zobrist(hash);
-    if (!total_count_res) {
+
+    // A postings directory entry only exists for a hash with at least one
+    // occurrence, so a present summary always yields a positive game count
+    // without decoding that hash's posting block. Absence covers both "no
+    // valid postings generation" and "hash unindexed" -- either way the
+    // decode-based fallback below computes the correct count (0 for the
+    // latter case) via the same generation-locked staleness rules the
+    // fallback query paths already apply.
+    auto summary_res = database.position_summary(hash);
+    if (!summary_res) {
         return tl::unexpected {error_code::io_failure};
     }
-    if (*total_count_res == 0) {
-        return stats {};
+
+    std::uint32_t total_games = 0;
+    if (summary_res->has_value()) {
+        total_games = summary_res->value_or(motif::db::position_postings_summary {}).distinct_game_count;
+    } else {
+        auto game_ids_res = database.position_game_ids(hash);
+        if (!game_ids_res) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        if (game_ids_res->empty()) {
+            return stats {};
+        }
+        total_games = static_cast<std::uint32_t>(game_ids_res->size());
     }
     auto const counted_at = std::chrono::steady_clock::now();
 
-    auto rows_res = database.positions().query_opening_stats(hash);
+    auto rows_res = database.query_unfiltered_opening_stats(hash);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }
 
     auto const aggregated_at = std::chrono::steady_clock::now();
     if (auto const log = spdlog::get("motif.search"); log != nullptr) {
-        log->debug("opening_stats hash {} games {} DuckDB count {} us aggregate {} us",
+        log->debug("opening_stats hash {} games {} count {} us aggregate {} us",
                    hash.value,
-                   *total_count_res,
+                   total_games,
                    std::chrono::duration_cast<std::chrono::microseconds>(counted_at - started).count(),
                    std::chrono::duration_cast<std::chrono::microseconds>(aggregated_at - counted_at).count());
     }
 
-    return build_stats(database, hash, *rows_res, static_cast<std::uint32_t>(*total_count_res));
+    return build_stats(database, hash, *rows_res, total_games);
 }
 
 auto query_elo_distribution(motif::db::database_manager const& database,
@@ -221,7 +240,7 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
         return query(database, hash);
     }
 
-    auto all_ids_res = database.positions().distinct_game_ids_by_zobrist(hash);
+    auto all_ids_res = database.position_game_ids(hash);
     if (!all_ids_res) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -241,7 +260,7 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
     }
     auto const& filtered_ids = *filtered_ids_res;
 
-    auto rows_res = database.positions().query_opening_stats(hash, filtered_ids);
+    auto rows_res = database.query_filtered_opening_stats(hash, filtered_ids);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }

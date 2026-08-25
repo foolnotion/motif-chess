@@ -135,6 +135,7 @@ class game_store
     auto update_text_field(game_id game_key, std::string_view column, std::string const& value) -> result<void>;
     auto patch_player(game_id game_key,
                       std::string_view id_col,
+                      std::string_view elo_col,
                       player const& current,
                       std::optional<std::string> const& name_patch,
                       std::optional<std::int32_t> const& elo_patch) -> result<void>;

@@ -15,7 +15,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chesslib/board/board.hpp>  // NOLINT(misc-include-cleaner)
 #include <chesslib/util/san.hpp>
-#include <duckdb.h>
 #include <pgnlib/types.hpp>  // NOLINT(misc-include-cleaner)
 #include <sqlite3.h>
 
@@ -69,61 +68,8 @@ struct sqlite_stmt_deleter
 using unique_sqlite = std::unique_ptr<sqlite3, sqlite_deleter>;
 using unique_sqlite_stmt = std::unique_ptr<sqlite3_stmt, sqlite_stmt_deleter>;
 
-namespace position_col
-{
-
-constexpr idx_t zobrist_hash = 0;
-constexpr idx_t game_id = 1;
-constexpr idx_t ply = 2;
-constexpr idx_t result = 3;
-constexpr idx_t white_elo = 4;
-constexpr idx_t black_elo = 5;
-
-}  // namespace position_col
-
 constexpr auto expected_white_elo = 2400;
 constexpr auto expected_black_elo = 2300;
-
-struct duck_reader
-{
-    duckdb_database db {nullptr};
-    duckdb_connection con {nullptr};
-
-    explicit duck_reader(std::filesystem::path const& path)
-    {
-        if (duckdb_open(path.c_str(), &db) != DuckDBSuccess) {
-            throw std::runtime_error {"failed to open DuckDB file"};
-        }
-        if (duckdb_connect(db, &con) != DuckDBSuccess) {
-            throw std::runtime_error {"failed to connect to DuckDB"};
-        }
-    }
-
-    ~duck_reader()
-    {
-        if (con != nullptr) {
-            duckdb_disconnect(&con);
-        }
-        if (db != nullptr) {
-            duckdb_close(&db);
-        }
-    }
-
-    duck_reader(duck_reader const&) = delete;
-    auto operator=(duck_reader const&) -> duck_reader& = delete;
-    duck_reader(duck_reader&&) = delete;
-    auto operator=(duck_reader&&) -> duck_reader& = delete;
-};
-
-struct stored_position_row
-{
-    std::uint64_t zobrist_hash {};
-    std::uint32_t game_id {};
-    std::uint16_t ply {};
-    std::int8_t result {};
-    std::optional<std::int16_t> white_elo;
-    std::optional<std::int16_t> black_elo;
-};
 
 auto open_sqlite(std::filesystem::path const& path) -> unique_sqlite
 {
@@ -146,42 +92,6 @@ auto count_rows(std::filesystem::path const& path, char const* sql) -> std::int6
         throw std::runtime_error {"failed to read sqlite row count"};
     }
     return sqlite3_column_int64(stmt.get(), 0);
-}
-
-auto load_position_rows(std::filesystem::path const& path) -> std::vector<stored_position_row>
-{
-    duck_reader const reader {path};
-    duckdb_result query_result {};
-    // result/white_elo/black_elo are per-game, normalized into game_result
-    // rather than stored inline on every position row.
-    // language=sql
-    constexpr auto load_positions_sql =
-        "SELECT p.zobrist_hash, p.game_id, p.ply, gr.result, gr.white_elo, gr.black_elo "
-        "FROM position p JOIN game_result gr ON gr.game_id = p.game_id ORDER BY p.ply";
-    if (duckdb_query(reader.con, load_positions_sql, &query_result) != DuckDBSuccess) {
-        throw std::runtime_error {"failed to load stored positions"};
-    }
-
-    auto rows = std::vector<stored_position_row> {};
-    auto const row_count = duckdb_row_count(&query_result);
-    rows.reserve(static_cast<std::size_t>(row_count));
-    for (idx_t row_index = 0; row_index < row_count; ++row_index) {
-        rows.push_back(stored_position_row {
-            .zobrist_hash = duckdb_value_uint64(&query_result, position_col::zobrist_hash, row_index),
-            .game_id = duckdb_value_uint32(&query_result, position_col::game_id, row_index),
-            .ply = duckdb_value_uint16(&query_result, position_col::ply, row_index),
-            .result = static_cast<std::int8_t>(duckdb_value_int8(&query_result, position_col::result, row_index)),
-            .white_elo = duckdb_value_is_null(&query_result, position_col::white_elo, row_index)
-                ? std::nullopt
-                : std::optional<std::int16_t> {duckdb_value_int16(&query_result, position_col::white_elo, row_index)},
-            .black_elo = duckdb_value_is_null(&query_result, position_col::black_elo, row_index)
-                ? std::nullopt
-                : std::optional<std::int16_t> {duckdb_value_int16(&query_result, position_col::black_elo, row_index)},
-        });
-    }
-
-    duckdb_destroy_result(&query_result);
-    return rows;
 }
 
 auto expected_hashes(std::vector<pgn::move_node> const& moves) -> std::vector<motif::db::zobrist_hash>
@@ -237,19 +147,21 @@ auto check_stored_game(motif::db::game const& stored_game, std::size_t move_coun
     require_test(stored_game.extra_tags[0] == std::pair<std::string, std::string> {"Round", "1"}, "extra tag mismatch");
 }
 
-auto check_stored_positions(std::vector<stored_position_row> const& positions,
+auto check_stored_positions(motif::db::database_manager const& manager,
                             std::vector<motif::db::zobrist_hash> const& hashes,
                             motif::db::game_id const game_id) -> void
 {
-    require_test(positions.size() == hashes.size(), "stored position count mismatch");
-    for (std::size_t index = 0; index < positions.size(); ++index) {
-        require_test(positions[index].zobrist_hash == hashes[index].value, "zobrist hash mismatch");
-        require_test(positions[index].game_id == game_id.value, "game id mismatch");
-        require_test(positions[index].ply == static_cast<std::uint16_t>(index), "ply mismatch");
-        require_test(positions[index].result == 0, "result mismatch");
-        require_test(positions[index].white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_white_elo)},
+    for (std::size_t index = 0; index < hashes.size(); ++index) {
+        auto const positions = manager.query_position_matches(hashes[index]);
+        require_test(positions.has_value(), "position query failed");
+        require_test(positions->size() == 1, "stored position count mismatch");
+        auto const& position = positions->front();
+        require_test(position.game_id == game_id, "game id mismatch");
+        require_test(position.ply == static_cast<std::uint16_t>(index), "ply mismatch");
+        require_test(position.result == 0, "result mismatch");
+        require_test(position.white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_white_elo)},
                      "white elo mismatch");
-        require_test(positions[index].black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_black_elo)},
+        require_test(position.black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(expected_black_elo)},
                      "black elo mismatch");
     }
 }
@@ -316,16 +228,13 @@ TEST_CASE("import_worker: valid 5-move game stores metadata and position rows", 
     REQUIRE(stored_game.has_value());
     check_stored_game(*stored_game, moves.size());
 
-    auto count = mgr.positions().row_count();
-    REQUIRE(count.has_value());
-    CHECK(*count == 5 + 1);  // NOLINT(bugprone-unchecked-optional-access)
-
+    auto metrics = motif::db::position_postings_build_metrics {};
+    REQUIRE(mgr.rebuild_position_postings(&metrics).has_value());
+    CHECK(metrics.occurrence_count == 5 + 1);
     auto const game_id = res->game_id;  // NOLINT(bugprone-unchecked-optional-access)
-    mgr.close();
-
-    auto const positions = load_position_rows(tdir.path / "positions.duckdb");
     auto const hashes = expected_hashes(moves);
-    check_stored_positions(positions, hashes, game_id);
+    check_stored_positions(mgr, hashes, game_id);
+    mgr.close();
 }
 
 // ── AC2: existing player is reused — no duplicates ───────────────────────────
@@ -446,6 +355,7 @@ TEST_CASE("import_worker: illegal SAN returns parse_error, no row inserted", "[m
 
 // ── No Elo tags → null elo in position rows ──────────────────────────────────
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertions inflate fixture validation complexity.
 TEST_CASE("import_worker: game without Elo tags stores null elo", "[motif-import]")
 {
     tmp_dir const tdir {"no_elo"};
@@ -461,20 +371,19 @@ TEST_CASE("import_worker: game without Elo tags stores null elo", "[motif-import
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(res->positions_inserted == 2);  // starting position + 1 move
 
-    auto count = mgr.positions().row_count();
-    REQUIRE(count.has_value());
-    CHECK(*count == 2);  // NOLINT(bugprone-unchecked-optional-access)
-
+    REQUIRE(mgr.rebuild_position_postings().has_value());
+    auto const hashes = expected_hashes(moves);
+    REQUIRE(hashes.size() == 2);
+    for (std::size_t ply = 0; ply < hashes.size(); ++ply) {
+        auto const positions = mgr.query_position_matches(hashes[ply]);
+        REQUIRE(positions.has_value());
+        REQUIRE(positions->size() == 1);
+        CHECK(positions->front().game_id == res->game_id);  // NOLINT(bugprone-unchecked-optional-access)
+        CHECK(positions->front().ply == ply);
+        CHECK_FALSE(positions->front().white_elo.has_value());
+        CHECK_FALSE(positions->front().black_elo.has_value());
+    }
     mgr.close();
-
-    auto const positions = load_position_rows(tdir.path / "positions.duckdb");
-    REQUIRE(positions.size() == 2);
-    CHECK(positions[0].ply == 0);
-    CHECK_FALSE(positions[0].white_elo.has_value());
-    CHECK_FALSE(positions[0].black_elo.has_value());
-    CHECK(positions[1].ply == 1);
-    CHECK_FALSE(positions[1].white_elo.has_value());
-    CHECK_FALSE(positions[1].black_elo.has_value());
 }
 
 // ── Zero-move game ───────────────────────────────────────────────────────────

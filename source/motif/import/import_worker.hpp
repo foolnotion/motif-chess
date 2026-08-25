@@ -27,7 +27,7 @@ class import_worker
   public:
     explicit import_worker(motif::db::database_manager& database) noexcept;
 
-    // Convert pgn::game to stored game row + DuckDB position rows.
+    // Convert pgn::game to a stored game row.
     // Errors:
     //   empty_game  — game has no moves; no rows written
     //   duplicate   — identity key already in DB; no rows written

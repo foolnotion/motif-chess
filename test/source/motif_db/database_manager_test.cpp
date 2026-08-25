@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <utility>
@@ -14,8 +15,12 @@
 #include <chesslib/board/board.hpp>
 #include <chesslib/board/move_codec.hpp>
 #include <chesslib/core/types.hpp>
-#include <duckdb.h>
+#include <fmt/format.h>
 #include <sqlite3.h>
+#ifndef _WIN32
+#    include <sys/wait.h>
+#    include <unistd.h>
+#endif
 
 #include "motif/db/error.hpp"
 #include "motif/db/manifest.hpp"
@@ -45,48 +50,6 @@ struct tmp_dir
     auto operator=(tmp_dir&&) -> tmp_dir& = delete;
 };
 
-constexpr auto select_position_hashes_sql = R"sql(
-    SELECT zobrist_hash
-    FROM position
-)sql";
-
-struct duckdb_handle_guard
-{
-    duckdb_database db {};
-    duckdb_connection con {};
-    duckdb_result res {};
-
-    duckdb_handle_guard() = default;
-    duckdb_handle_guard(duckdb_handle_guard const&) = delete;
-    auto operator=(duckdb_handle_guard const&) -> duckdb_handle_guard& = delete;
-    duckdb_handle_guard(duckdb_handle_guard&&) = delete;
-    auto operator=(duckdb_handle_guard&&) -> duckdb_handle_guard& = delete;
-
-    ~duckdb_handle_guard()
-    {
-        duckdb_destroy_result(&res);
-        duckdb_disconnect(&con);
-        duckdb_close(&db);
-    }
-};
-
-auto read_position_hashes(std::filesystem::path const& duckdb_path) -> std::vector<std::uint64_t>
-{
-    auto handles = duckdb_handle_guard {};
-    REQUIRE(duckdb_open(duckdb_path.c_str(), &handles.db) == DuckDBSuccess);
-    REQUIRE(duckdb_connect(handles.db, &handles.con) == DuckDBSuccess);
-    REQUIRE(duckdb_query(handles.con, select_position_hashes_sql, &handles.res) == DuckDBSuccess);
-
-    auto const row_count = duckdb_row_count(&handles.res);
-    std::vector<std::uint64_t> hashes;
-    hashes.reserve(static_cast<std::size_t>(row_count));
-    for (idx_t row_idx = 0; row_idx < row_count; ++row_idx) {
-        hashes.push_back(duckdb_value_uint64(&handles.res, 0, row_idx));
-    }
-
-    return hashes;
-}
-
 auto make_one_move_game(  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
     std::string white,
     std::string black) -> motif::db::game
@@ -106,21 +69,6 @@ auto make_one_move_game(  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
         .extra_tags = {},
         .provenance = {},
     };
-}
-
-auto count_position_rows(std::filesystem::path const& duckdb_path) -> std::int64_t
-{  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
-    auto handles = duckdb_handle_guard {};
-    if (duckdb_open(duckdb_path.c_str(), &handles.db) != DuckDBSuccess) {
-        return -1;
-    }
-    if (duckdb_connect(handles.db, &handles.con) != DuckDBSuccess) {
-        return -1;
-    }
-    if (duckdb_query(handles.con, "SELECT COUNT(*) FROM position", &handles.res) != DuckDBSuccess) {
-        return -1;
-    }
-    return duckdb_value_int64(&handles.res, 0, 0);
 }
 
 }  // namespace
@@ -165,6 +113,34 @@ TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db]
     auto second = motif::db::database_manager::create(tdir.path, "dup-db");
     REQUIRE_FALSE(second.has_value());
     CHECK(second.error() == motif::db::error_code::io_failure);
+}
+
+TEST_CASE("database_manager::open rejects a concurrent writer process for the same bundle", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"bundle_lock"};
+    auto first = motif::db::database_manager::create(tdir.path, "lock-test");
+    REQUIRE(first.has_value());
+
+#ifdef _WIN32
+    auto second = motif::db::database_manager::open(tdir.path);
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error() == motif::db::error_code::io_failure);
+#else
+    auto const child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        auto second = motif::db::database_manager::open(tdir.path);
+        ::_exit(second.has_value() ? 1 : 0);
+    }
+    int status {};
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+#endif
+
+    first->close();
+    auto after_close = motif::db::database_manager::open(tdir.path);
+    REQUIRE(after_close.has_value());
 }
 
 TEST_CASE("database_manager::create initializes SQLite with correct schema version", "[motif-db][database_manager]")
@@ -230,7 +206,7 @@ TEST_CASE("database_manager::open does not recreate tables (idempotent open)", "
         auto mgr = motif::db::database_manager::create(tdir.path, "persist-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        auto insert_res = mgr->store().insert(inserted_game);
+        auto insert_res = mgr->insert_game(inserted_game);
         REQUIRE(insert_res.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         game_id = *insert_res;
@@ -270,7 +246,7 @@ TEST_CASE("database_manager: bundle copied to another directory opens successful
         auto mgr = motif::db::database_manager::create(src_dir.path, "portable-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        auto insert_res = mgr->store().insert(test_game);
+        auto insert_res = mgr->insert_game(test_game);
         REQUIRE(insert_res.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         game_id = *insert_res;
@@ -315,40 +291,99 @@ TEST_CASE("database_manager::open returns schema_mismatch when user_version diff
     CHECK(res.error() == motif::db::error_code::schema_mismatch);
 }
 
-// ── DuckDB: positions.duckdb
-// ──────────────────────────────────────────────────
+// ── Persistent bundles never require DuckDB
+// ──────────────────────────────────
 
-TEST_CASE("database_manager::create produces positions.duckdb in bundle dir", "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::create does not create positions.duckdb", "[motif-db][database_manager]")
 {
-    tmp_dir const tdir {"duckdb_create"};
+    tmp_dir const tdir {"create_no_duckdb"};
 
-    auto res = motif::db::database_manager::create(tdir.path, "duck-db");
+    auto res = motif::db::database_manager::create(tdir.path, "no-duckdb-db");
     REQUIRE(res.has_value());
 
-    CHECK(std::filesystem::exists(tdir.path / "positions.duckdb"));
+    CHECK_FALSE(std::filesystem::exists(tdir.path / "positions.duckdb"));
+    // A trivial empty (0-game) postings generation is published immediately
+    // so the bundle never needs any legacy fallback just because nothing
+    // has been imported yet -- see create()'s comment.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(res->manifest().position_postings.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(res->manifest().position_postings->game_count == 0U);
 }
 
-TEST_CASE("database_manager::rebuild_position_store on empty DB returns 0 rows", "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::open ignores a leftover positions.duckdb file and leaves it untouched",
+          "[motif-db][database_manager][migration]")
 {
-    tmp_dir const tdir {"duckdb_rebuild_empty"};
+    tmp_dir const tdir {"dual_index"};
+
+    // Build a persistent bundle with one game and a valid, covering postings
+    // generation, entirely through the postings-only path.
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "dual-db");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->rebuild_position_postings().has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->manifest().position_postings.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        mgr->close();
+    }
+
+    // Simulate a leftover positions.duckdb from an older release: the file
+    // does not need to be a valid DuckDB database at all -- this codebase no
+    // longer links or reads DuckDB in any form, so any leftover bytes at
+    // this exact path must simply be ignored.
+    {
+        std::ofstream marker {tdir.path / "positions.duckdb", std::ios::binary};
+        REQUIRE(marker.good());
+        marker << "not a real duckdb file";
+    }
+    auto const duckdb_size_before = std::filesystem::file_size(tdir.path / "positions.duckdb");
+
+    // Force a dirty reopen (simulated unclean shutdown) to exercise the
+    // recovery decision, not just the ordinary clean-close path.
+    {
+        auto manifest = motif::db::read_manifest(tdir.path / "manifest.json");
+        REQUIRE(manifest.has_value());
+        manifest->position_index_dirty = true;  // NOLINT(bugprone-unchecked-optional-access)
+        REQUIRE(motif::db::write_manifest(tdir.path / "manifest.json", *manifest).has_value());
+    }
+
+    auto reopened = motif::db::database_manager::open(tdir.path);
+    REQUIRE(reopened.has_value());
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const matches = reopened->query_position_matches(start_hash);
+    REQUIRE(matches.has_value());
+    CHECK(matches->size() == 1U);
+    CHECK(std::filesystem::exists(tdir.path / "positions.duckdb"));
+    CHECK(std::filesystem::file_size(tdir.path / "positions.duckdb") == duckdb_size_before);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    reopened->close();
+}
+
+TEST_CASE("database_manager::rebuild_position_postings on empty DB indexes 0 games", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"postings_rebuild_empty"};
 
     auto mgr = motif::db::database_manager::create(tdir.path, "empty-db");
     REQUIRE(mgr.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rebuild_res = mgr->rebuild_position_store();
+    auto rebuild_res = mgr->rebuild_position_postings();
     REQUIRE(rebuild_res.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto count = mgr->positions().row_count();
-    REQUIRE(count.has_value());
+    REQUIRE(mgr->manifest().position_postings.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(*count == 0);
+    CHECK(mgr->manifest().position_postings->game_count == 0U);
 }
 
-TEST_CASE("database_manager::rebuild_position_store after N-move game returns N rows", "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_postings after N-move game indexes N+1 occurrences", "[motif-db][database_manager]")
 {
-    tmp_dir const tdir {"duckdb_rebuild_nmove"};
+    tmp_dir const tdir {"postings_rebuild_nmove"};
 
     // Encode e2-e4 (double pawn push) and e7-e5 (double pawn push)
     chesslib::move e2e4 {};
@@ -381,22 +416,20 @@ TEST_CASE("database_manager::rebuild_position_store after N-move game returns N 
     auto mgr = motif::db::database_manager::create(tdir.path, "nmove-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game).has_value());
+    REQUIRE(mgr->insert_game(test_game).has_value());
 
+    auto metrics = motif::db::position_postings_build_metrics {};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rebuild_res = mgr->rebuild_position_store();
+    auto rebuild_res = mgr->rebuild_position_postings(&metrics);
     REQUIRE(rebuild_res.has_value());
 
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto count = mgr->positions().row_count();
-    REQUIRE(count.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(*count == std::ssize(moves) + 1);
+    // Every ply, including the starting position, is one occurrence.
+    CHECK(metrics.occurrence_count == static_cast<std::uint64_t>(moves.size() + 1));
 }
 
-TEST_CASE("database_manager::rebuild_position_store is idempotent", "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_postings is idempotent", "[motif-db][database_manager]")
 {
-    tmp_dir const tdir {"duckdb_rebuild_idem"};
+    tmp_dir const tdir {"postings_rebuild_idem"};
 
     chesslib::move e2e4 {};
     e2e4.source_square = chesslib::square::e2;
@@ -418,23 +451,22 @@ TEST_CASE("database_manager::rebuild_position_store is idempotent", "[motif-db][
     auto mgr = motif::db::database_manager::create(tdir.path, "idem-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game).has_value());
+    REQUIRE(mgr->insert_game(test_game).has_value());
 
+    auto first_metrics = motif::db::position_postings_build_metrics {};
+    auto second_metrics = motif::db::position_postings_build_metrics {};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->rebuild_position_postings(&first_metrics).has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->rebuild_position_postings(&second_metrics).has_value());
 
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto count = mgr->positions().row_count();
-    REQUIRE(count.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(*count == 2);
+    CHECK(first_metrics.occurrence_count == 2U);
+    CHECK(second_metrics.occurrence_count == 2U);
 }
 
-TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo", "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_postings rejects out-of-range elo", "[motif-db][database_manager]")
 {
-    tmp_dir const tdir {"duckdb_rebuild_elo_range"};
+    tmp_dir const tdir {"postings_rebuild_elo_range"};
 
     chesslib::move e2e4 {};
     e2e4.source_square = chesslib::square::e2;
@@ -456,17 +488,17 @@ TEST_CASE("database_manager::rebuild_position_store rejects out-of-range elo", "
     auto mgr = motif::db::database_manager::create(tdir.path, "elo-range-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game).has_value());
+    REQUIRE(mgr->insert_game(test_game).has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rebuild_res = mgr->rebuild_position_store();
+    auto rebuild_res = mgr->rebuild_position_postings();
     REQUIRE_FALSE(rebuild_res.has_value());
     CHECK(rebuild_res.error() == motif::db::error_code::io_failure);
 }
 
-TEST_CASE("database_manager::rebuild_position_store defaults to sorted-by-zobrist", "[motif-db][database_manager][duckdb]")
+TEST_CASE("database_manager::rebuild_position_postings indexes every distinct hash exactly once", "[motif-db][database_manager]")
 {
-    tmp_dir const tdir {"duckdb_rebuild_sorted_default"};
+    tmp_dir const tdir {"postings_rebuild_distinct_hashes"};
 
     chesslib::move e2e4 {};
     e2e4.source_square = chesslib::square::e2;
@@ -502,27 +534,36 @@ TEST_CASE("database_manager::rebuild_position_store defaults to sorted-by-zobris
         .provenance = {},
     };
 
-    auto mgr = motif::db::database_manager::create(tdir.path, "sorted-default-db");
+    auto mgr = motif::db::database_manager::create(tdir.path, "distinct-hashes-db");
     REQUIRE(mgr.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game_a).has_value());
+    REQUIRE(mgr->insert_game(test_game_a).has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().insert(test_game_b).has_value());
+    REQUIRE(mgr->insert_game(test_game_b).has_value());
 
-    // Default call — should sort by zobrist (new default behavior)
+    auto metrics = motif::db::position_postings_build_metrics {};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rebuild_res = mgr->rebuild_position_store();
+    auto rebuild_res = mgr->rebuild_position_postings(&metrics);
     REQUIRE(rebuild_res.has_value());
 
-    auto hashes = read_position_hashes(tdir.path / "positions.duckdb");
-    REQUIRE(hashes.size() == 4);
-    CHECK(std::ranges::is_sorted(hashes));
+    // Both games share the starting position (1 distinct hash) and each
+    // reaches its own distinct post-move hash: 3 distinct hashes across 4
+    // total occurrences.
+    CHECK(metrics.occurrence_count == 4U);
+    CHECK(metrics.distinct_hash_count == 3U);
+
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const start_summary = mgr->position_summary(start_hash);
+    REQUIRE(start_summary.has_value());
+    REQUIRE(start_summary->has_value());
+    CHECK(start_summary->value_or(motif::db::position_postings_summary {}).distinct_game_count == 2U);
 }
 
 // ── remove_game
 // ───────────────────────────────────────────────────────────────
 
-TEST_CASE("database_manager::remove_game deletes both SQLite row and DuckDB positions", "[motif-db][database_manager]")
+TEST_CASE("database_manager::remove_game deletes the SQLite row and marks postings stale", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"remove_game"};
 
@@ -530,13 +571,12 @@ TEST_CASE("database_manager::remove_game deletes both SQLite row and DuckDB posi
     REQUIRE(mgr.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const gid = mgr->store().insert(make_one_move_game("White", "Black"));
+    auto const gid = mgr->insert_game(make_one_move_game("White", "Black"));
     REQUIRE(gid.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->rebuild_position_store().has_value());
-
+    REQUIRE(mgr->rebuild_position_postings().has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->positions().row_count().value_or(-1) > 0);
+    REQUIRE(mgr->manifest().position_postings.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->remove_game(*gid).has_value());
@@ -547,9 +587,14 @@ TEST_CASE("database_manager::remove_game deletes both SQLite row and DuckDB posi
     REQUIRE_FALSE(get_res.has_value());
     CHECK(get_res.error() == motif::db::error_code::not_found);
 
-    // Position rows gone from DuckDB.
+    // remove_game() marks postings stale immediately.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(mgr->positions().row_count().value_or(-1) == 0);
+    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->rebuild_position_postings().has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(mgr->manifest().position_postings->game_count == 0U);
 }
 
 TEST_CASE("database_manager::remove_game returns not_found for absent id", "[motif-db][database_manager]")
@@ -566,45 +611,49 @@ TEST_CASE("database_manager::remove_game returns not_found for absent id", "[mot
     CHECK(res.error() == motif::db::error_code::not_found);
 }
 
-TEST_CASE("database_manager::remove_user_game rejects imported games without changing positions", "[motif-db][database_manager]")
+TEST_CASE("database_manager::remove_user_game rejects imported games without changing postings", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"remove_imported_game"};
 
     auto mgr = motif::db::database_manager::create(tdir.path, "remove-imported-db");
     REQUIRE(mgr.has_value());
 
-    auto const gid = mgr->store().insert(make_one_move_game("White", "Black"));
+    auto const gid = mgr->insert_game(make_one_move_game("White", "Black"));
     REQUIRE(gid.has_value());
-    REQUIRE(mgr->rebuild_position_store().has_value());
-    auto const position_count = mgr->positions().row_count();
-    REQUIRE(position_count.has_value());
+    REQUIRE(mgr->rebuild_position_postings().has_value());
+    auto const postings_before = mgr->manifest().position_postings;
+    REQUIRE(postings_before.has_value());
 
     auto const remove_result = mgr->remove_user_game(*gid);
     REQUIRE_FALSE(remove_result.has_value());
     CHECK(remove_result.error() == motif::db::error_code::not_editable);
     CHECK(mgr->store().get(*gid).has_value());
-    auto const position_count_after = mgr->positions().row_count();
-    REQUIRE(position_count_after.has_value());
-    CHECK(*position_count_after == *position_count);
+    auto const postings_after = mgr->manifest().position_postings;
+    REQUIRE(postings_after.has_value());
+    CHECK(postings_after.value_or(motif::db::derived_index_manifest_entry {}).filename
+          == postings_before.value_or(motif::db::derived_index_manifest_entry {}).filename);
 }
 
-TEST_CASE("database_manager::remove_user_game deletes a manual game from both stores", "[motif-db][database_manager]")
+TEST_CASE("database_manager::remove_user_game deletes a manual game and marks postings stale", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"remove_manual_game"};
 
     auto mgr = motif::db::database_manager::create(tdir.path, "remove-manual-db");
     REQUIRE(mgr.has_value());
 
-    auto const gid = mgr->store().insert(make_one_move_game("White", "Black"));
+    auto const gid = mgr->insert_game(make_one_move_game("White", "Black"));
     REQUIRE(gid.has_value());
-    REQUIRE(mgr->store().set_manual_provenance(*gid, std::nullopt, "pending").has_value());
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*gid, std::nullopt, "pending").has_value());
+    REQUIRE(mgr->rebuild_position_postings().has_value());
     REQUIRE(mgr->remove_user_game(*gid).has_value());
 
     auto const game = mgr->store().get(*gid);
     REQUIRE_FALSE(game.has_value());
     CHECK(game.error() == motif::db::error_code::not_found);
-    CHECK(mgr->positions().row_count().value_or(-1) == 0);
+    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+
+    REQUIRE(mgr->rebuild_position_postings().has_value());
+    CHECK(mgr->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).game_count == 0U);
 }
 
 TEST_CASE("database_manager::find_games intersects position and metadata filters", "[motif-db][database_manager]")
@@ -664,11 +713,11 @@ TEST_CASE("database_manager::find_games intersects position and metadata filters
         .provenance = {},
     };
 
-    auto const matching_id = mgr->store().insert(matching_game);
+    auto const matching_id = mgr->insert_game(matching_game);
     REQUIRE(matching_id.has_value());
-    REQUIRE(mgr->store().insert(wrong_player).has_value());
-    REQUIRE(mgr->store().insert(wrong_position).has_value());
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->insert_game(wrong_player).has_value());
+    REQUIRE(mgr->insert_game(wrong_position).has_value());
+    REQUIRE(mgr->rebuild_position_postings().has_value());
 
     auto board = chesslib::board {};
     chesslib::move_maker {board, e2e4}.make();
@@ -686,102 +735,6 @@ TEST_CASE("database_manager::find_games intersects position and metadata filters
     REQUIRE(games->games.size() == 1);
     CHECK(games->total_count == 1);
     CHECK(games->games.front().id == *matching_id);
-}
-
-// Regression test for a game that revisits the queried position many times
-// (e.g. via repetition/transposition): under a row-limited query, that
-// game's rows alone could exhaust a small limit and starve later games out
-// of ply data entirely, even though those games are within the
-// limit-bounded distinct-game selection. find_games_by_position() must
-// return exactly one (lowest) ply per game and must never drop a game
-// that's within its own bound.
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("database_manager::find_games_by_position never fabricates a ply for a game crowded out by repetition",
-          "[motif-db][database_manager]")
-{
-    tmp_dir const tdir {"find_games_by_position_repetition"};
-
-    auto mgr = motif::db::database_manager::create(tdir.path, "repetition-db");
-    REQUIRE(mgr.has_value());
-
-    auto const repeated_id = mgr->store().insert(make_one_move_game("Repeated White", "Repeated Black"));
-    REQUIRE(repeated_id.has_value());
-    auto const second_id = mgr->store().insert(make_one_move_game("Second White", "Second Black"));
-    REQUIRE(second_id.has_value());
-    auto const third_id = mgr->store().insert(make_one_move_game("Third White", "Third Black"));
-    REQUIRE(third_id.has_value());
-    REQUIRE(mgr->rebuild_position_store().has_value());
-
-    // A made-up hash standing in for a position reached at various plies;
-    // its actual chess legality is irrelevant to this query-boundary test.
-    constexpr auto target_hash = motif::db::zobrist_hash {0xABCDEF0123456789ULL};
-    constexpr std::uint16_t repeated_low_ply = 6;
-    constexpr std::uint16_t repeated_high_ply = 10;
-    constexpr std::uint16_t other_ply = 2;
-
-    std::vector<motif::db::position_row> extra_rows {
-        // repeated_id revisits target_hash twice; its lowest ply is 6, not 2 --
-        // if repetition rows starved the row budget under a naive row limit,
-        // a game with a real ply of 2 could be replaced by fabricated ply 0.
-        {.zobrist_hash = target_hash,
-         .game_id = *repeated_id,
-         .ply = repeated_low_ply,
-         .encoded_move = 1,
-         .result = 1,
-         .white_elo = std::nullopt,
-         .black_elo = std::nullopt},
-        {.zobrist_hash = target_hash,
-         .game_id = *repeated_id,
-         .ply = repeated_high_ply,
-         .encoded_move = 1,
-         .result = 1,
-         .white_elo = std::nullopt,
-         .black_elo = std::nullopt},
-        {.zobrist_hash = target_hash,
-         .game_id = *second_id,
-         .ply = other_ply,
-         .encoded_move = 1,
-         .result = 1,
-         .white_elo = std::nullopt,
-         .black_elo = std::nullopt},
-        {.zobrist_hash = target_hash,
-         .game_id = *third_id,
-         .ply = other_ply,
-         .encoded_move = 1,
-         .result = 1,
-         .white_elo = std::nullopt,
-         .black_elo = std::nullopt},
-    };
-    REQUIRE(mgr->positions().insert_batch(extra_rows).has_value());
-
-    // Bound to 2 distinct games: repeated_id and second_id (lowest two game
-    // ids), excluding third_id.
-    auto const combined = mgr->find_games_by_position(target_hash, 2);
-    REQUIRE(combined.has_value());
-    auto const& [games_res, ply_matches] = *combined;
-
-    CHECK(games_res.games.size() == 2);
-    CHECK(games_res.total_count == 3);  // true total distinct games matching, unbounded by limit
-
-    REQUIRE(ply_matches.size() == 2);
-    auto find_ply = [&ply_matches](motif::db::game_id const game_key) -> std::optional<std::uint16_t>
-    {
-        for (auto const& match : ply_matches) {
-            if (match.game_id == game_key) {
-                return match.ply;
-            }
-        }
-        return std::nullopt;
-    };
-    auto const repeated_ply = find_ply(*repeated_id);
-    REQUIRE(repeated_ply.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- checked above
-    CHECK(*repeated_ply == repeated_low_ply);  // lowest of its two repeated visits
-
-    auto const second_ply = find_ply(*second_id);
-    REQUIRE(second_ply.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- checked above
-    CHECK(*second_ply == other_ply);  // never fabricated as 0
 }
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
@@ -815,13 +768,13 @@ TEST_CASE("database_manager::find_games handles >999 position IDs via batched IN
             .extra_tags = {},
             .provenance = {},
         };
-        REQUIRE(mgr->store().insert(game_rec).has_value());
+        REQUIRE(mgr->insert_game(game_rec).has_value());
     };
 
     for (std::size_t index = 0; index < game_count; ++index) {
         insert_game(index);
     }
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->rebuild_position_postings().has_value());
 
     auto board = chesslib::board {};
     chesslib::move_maker {board, e2e4}.make();
@@ -853,17 +806,19 @@ TEST_CASE("database_manager::close persists game_count in manifest", "[motif-db]
         auto mgr = motif::db::database_manager::create(tdir.path, "count-db");
         REQUIRE(mgr.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("A", "B")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("A", "B")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("C", "D")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("C", "D")).has_value());
     }  // close() called here
 
     auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
     REQUIRE(manifest_after.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(manifest_after->game_count == 2U);
+    // Direct store writes bypass derived-index rebuilding, so close persists
+    // the game count but keeps recovery dirty until postings are repaired.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK_FALSE(manifest_after->position_index_dirty);
+    CHECK(manifest_after->position_index_dirty);
 }
 
 TEST_CASE("database_manager::open marks manifest dirty and close clears it", "[motif-db][database_manager]")
@@ -892,107 +847,217 @@ TEST_CASE("database_manager::open marks manifest dirty and close clears it", "[m
     CHECK_FALSE(mf_closed->position_index_dirty);
 }
 
-TEST_CASE("database_manager::open rebuilds position store when dirty flag is set", "[motif-db][database_manager]")
+TEST_CASE("database_manager::open rebuilds postings automatically when they do not cover canonical games", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"manifest_rebuild_dirty"};
-    auto const duckdb_path = tdir.path / "positions.duckdb";
 
     {
         auto mgr = motif::db::database_manager::create(tdir.path, "rebuild-dirty-db");
         REQUIRE(mgr.has_value());
+        // Insert directly through the SQLite store, bypassing
+        // rebuild_position_postings(): the bundle now has 1 game but its
+        // published postings generation still describes 0.
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->store().insert(make_one_move_game("W", "B")).has_value());
+        REQUIRE(mgr->insert_game(make_one_move_game("W", "B")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->rebuild_position_store().has_value());
+        mgr->close();
     }
 
-    // Simulate a crash: manually force dirty=true into the manifest without
-    // touching the DuckDB file (simulates unclean shutdown).
+    // A clean close cannot mark the index clean when postings do not cover
+    // canonical games -- confirm the crash-recovery marker really is set,
+    // then that the next open() repairs it without any manual nudge.
     {
-        auto manifest_dirty = motif::db::read_manifest(tdir.path / "manifest.json");
-        REQUIRE(manifest_dirty.has_value());
+        auto const manifest_before_reopen = motif::db::read_manifest(tdir.path / "manifest.json");
+        REQUIRE(manifest_before_reopen.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        manifest_dirty->position_index_dirty = true;
-        REQUIRE(motif::db::write_manifest(tdir.path / "manifest.json", *manifest_dirty).has_value());
+        CHECK(manifest_before_reopen->position_index_dirty);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(manifest_before_reopen->position_postings.value_or(motif::db::derived_index_manifest_entry {}).game_count == 0U);
     }
 
-    auto const rows_before = count_position_rows(duckdb_path);
-    REQUIRE(rows_before > 0);
-
-    // Re-open: should detect dirty flag and rebuild (same rows expected since
-    // the game store is unchanged).
     auto reopened = motif::db::database_manager::open(tdir.path);
     REQUIRE(reopened.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const rows_after = reopened->positions().row_count();
-    REQUIRE(rows_after.has_value());
+    REQUIRE(reopened->manifest().position_postings.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(*rows_after == rows_before);
+    CHECK(reopened->manifest().position_postings->game_count == 1U);
+
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const matches = reopened->query_position_matches(start_hash);
+    REQUIRE(matches.has_value());
+    CHECK(matches->size() == 1U);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    reopened->close();
 }
 
-TEST_CASE("database_manager::open repairs an interrupted raw ingest before rebuilding positions", "[motif-db][database_manager]")
+TEST_CASE("database_manager::open migrates a legacy bundle with a leftover positions.duckdb by rebuilding postings from SQLite",
+          "[motif-db][database_manager][migration]")
 {
-    tmp_dir const tdir {"open_repairs_raw_ingest"};
-    auto const duckdb_path = tdir.path / "positions.duckdb";
-
-    auto const dup_game = make_one_move_game("Raw White", "Raw Black");
-    auto const other_game = make_one_move_game("Other White", "Other Black");
+    tmp_dir const tdir {"legacy_migrate"};
 
     {
-        auto mgr = motif::db::database_manager::create(tdir.path, "raw-ingest-db");
+        auto mgr = motif::db::database_manager::create(tdir.path, "legacy-db");
         REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
+        // Shape a bundle "from before postings existed": no postings entry
+        // in the manifest at all, matching a genuinely legacy bundle.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->prepare_canonical_mutation().has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK_FALSE(mgr->manifest().position_postings.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        mgr->close();
+    }
 
-        // Simulate a raw bulk-ingest window interrupted before deduplicate()
-        // recreated game_identity_lookup: drop the index, insert exact
-        // duplicate rows (as insert_raw() would during a fresh import) plus
-        // one distinct game, and close without ever calling deduplicate().
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->writer().drop_identity_index().has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->writer().insert_raw(dup_game).has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->writer().insert_raw(dup_game).has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->writer().insert_raw(other_game).has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        auto const count_before_close = mgr->store().count_games();
-        REQUIRE(count_before_close.has_value());
-        CHECK(*count_before_close == 3);
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE_FALSE(*mgr->writer().identity_index_exists());
-    }  // close() -- identity index is still absent on disk here.
+    // Leave a leftover positions.duckdb from an older release. It does not
+    // need to be a valid DuckDB database -- this codebase never reads it.
+    {
+        std::ofstream marker {tdir.path / "positions.duckdb", std::ios::binary};
+        REQUIRE(marker.good());
+        marker << "not a real duckdb file";
+    }
+    auto const duckdb_size_before = std::filesystem::file_size(tdir.path / "positions.duckdb");
 
-    // Re-open: open() must detect the missing identity index, deduplicate
-    // (removing the exact-duplicate raw row) before exposing reads, and
-    // rebuild the DuckDB position store from the now-canonical game set.
     auto reopened = motif::db::database_manager::open(tdir.path);
     REQUIRE(reopened.has_value());
-
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(reopened->writer().identity_index_exists().has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(*reopened->writer().identity_index_exists());
+    REQUIRE(reopened->manifest().position_postings.has_value());
+    // The leftover file is never read or deleted by the migration attempt.
+    CHECK(std::filesystem::exists(tdir.path / "positions.duckdb"));
+    CHECK(std::filesystem::file_size(tdir.path / "positions.duckdb") == duckdb_size_before);
 
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const count_after = reopened->store().count_games();
-    REQUIRE(count_after.has_value());
-    CHECK(*count_after == 2);  // one duplicate pair collapsed to one survivor
-
+    auto const summary = reopened->position_summary(start_hash);
+    REQUIRE(summary.has_value());
+    REQUIRE(summary->has_value());
+    CHECK(summary->value_or(motif::db::position_postings_summary {}).distinct_game_count == 1U);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const games = reopened->find_games(motif::db::search_filter {});
-    REQUIRE(games.has_value());
-    CHECK(games->games.size() == 2);
+    auto const build_seq_after_migration = reopened->manifest().derived_index_build_seq;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    reopened->close();
 
-    // Rebuilt position rows reflect only the two canonical (deduplicated)
-    // games: one move each, one starting-position row each -> 4 rows total.
-    auto const rows_after = count_position_rows(duckdb_path);
-    CHECK(rows_after == 4);
+    // A later open() of the now-migrated bundle needs no further rebuild.
+    auto reopened_again = motif::db::database_manager::open(tdir.path);
+    REQUIRE(reopened_again.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(reopened_again->manifest().derived_index_build_seq == build_seq_after_migration);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    reopened_again->close();
+}
+
+TEST_CASE("database_manager::open fails closed and is retryable when postings migration cannot publish",
+          "[motif-db][database_manager][migration]")
+{
+    tmp_dir const tdir {"legacy_migrate_fail"};
+    std::uint64_t build_seq_at_close {};
+
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "legacy-fail-db");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->prepare_canonical_mutation().has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK_FALSE(mgr->manifest().position_postings.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        build_seq_at_close = mgr->manifest().derived_index_build_seq;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        mgr->close();
+    }
+
+    {
+        std::ofstream marker {tdir.path / "positions.duckdb", std::ios::binary};
+        REQUIRE(marker.good());
+        marker << "not a real duckdb file";
+    }
+    auto const duckdb_size_before = std::filesystem::file_size(tdir.path / "positions.duckdb");
+    auto const manifest_before = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(manifest_before.has_value());
+
+    // Collide with the exact staging path open()'s migration attempt will
+    // pass to position_postings::build(): a non-empty directory can't be
+    // removed by rebuild_position_postings()'s leading cleanup nor opened
+    // for writing as a regular file, so the build step fails cleanly before
+    // writing anything -- games.db, manifest.json, and positions.duckdb are
+    // never touched by that call (see rebuild_position_postings()).
+    auto const staging_collision = tdir.path / fmt::format("positions.postings.{}.building", build_seq_at_close);
+    REQUIRE(std::filesystem::create_directory(staging_collision));
+    {
+        std::ofstream const blocker {staging_collision / "blocker"};
+        REQUIRE(blocker.good());
+    }
+
+    auto reopened = motif::db::database_manager::open(tdir.path);
+    REQUIRE_FALSE(reopened.has_value());
+
+    CHECK(std::filesystem::file_size(tdir.path / "positions.duckdb") == duckdb_size_before);
+    auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(manifest_after.has_value());
+    CHECK_FALSE(manifest_after->position_postings.has_value());
+    CHECK(manifest_after->derived_index_build_seq == manifest_before->derived_index_build_seq);
+
+    // Retryable: clearing the collision lets a later open() succeed.
+    std::filesystem::remove_all(staging_collision);
+    auto retried = motif::db::database_manager::open(tdir.path);
+    REQUIRE(retried.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(retried->manifest().position_postings.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    retried->close();
+}
+
+TEST_CASE("database_manager::open fails closed when postings-only repair cannot publish", "[motif-db][database_manager][position_postings]")
+{
+    tmp_dir const tdir {"postings_repair_fail"};
+
+    std::uint64_t repair_build_seq {};
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "repair-fail-db");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->rebuild_position_postings().has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        repair_build_seq = mgr->manifest().derived_index_build_seq;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        mgr->close();
+    }
+
+    auto manifest = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(manifest.has_value());
+    REQUIRE(manifest->position_postings.has_value());
+    auto const original_postings = manifest->position_postings.value_or(motif::db::derived_index_manifest_entry {});
+    std::filesystem::remove(tdir.path / original_postings.filename);
+
+    auto const staging_collision = tdir.path / fmt::format("positions.postings.{}.building", repair_build_seq);
+    REQUIRE(std::filesystem::create_directory(staging_collision));
+    {
+        std::ofstream const blocker {staging_collision / "blocker"};
+        REQUIRE(blocker.good());
+    }
+
+    auto reopened = motif::db::database_manager::open(tdir.path);
+    REQUIRE_FALSE(reopened.has_value());
+    CHECK_FALSE(std::filesystem::exists(tdir.path / "positions.duckdb"));
+
+    auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(manifest_after.has_value());
+    CHECK(manifest_after->derived_index_build_seq == repair_build_seq);
+    REQUIRE(manifest_after->position_postings.has_value());
+    auto const persisted_postings = manifest_after->position_postings.value_or(motif::db::derived_index_manifest_entry {});
+    CHECK(persisted_postings.filename == original_postings.filename);
+    CHECK(persisted_postings.checksum == original_postings.checksum);
 }
 
 // ── patch_game_metadata
 // ──────────────────────────────────────────────────────────
 
-TEST_CASE("database_manager::patch_game_metadata syncs elo to DuckDB position rows", "[motif-db][database_manager]")
+TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebuild reflects the new elo", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"patch_elo_sync"};
 
@@ -1022,18 +1087,18 @@ TEST_CASE("database_manager::patch_game_metadata syncs elo to DuckDB position ro
     };
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const game_id = mgr->store().insert(game);
+    auto const game_id = mgr->insert_game(game);
     REQUIRE(game_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*game_id, {}, "new").has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->rebuild_position_postings().has_value());
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
-    // Verify initial elos are in DuckDB.
+    // Verify initial elos are in the published postings.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rows_before = mgr->positions().query_by_zobrist(start_hash);
+    auto rows_before = mgr->query_position_matches(start_hash);
     REQUIRE(rows_before.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(rows_before->size() == 1);
@@ -1049,9 +1114,18 @@ TEST_CASE("database_manager::patch_game_metadata syncs elo to DuckDB position ro
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
 
-    // DuckDB position rows must reflect the new elos without a rebuild.
+    // patch_game_metadata() marks postings stale immediately: queries fail
+    // closed until an explicit rebuild.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rows_after = mgr->positions().query_by_zobrist(start_hash);
+    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const rows_stale = mgr->query_position_matches(start_hash);
+    REQUIRE_FALSE(rows_stale.has_value());
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->rebuild_position_postings().has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto rows_after = mgr->query_position_matches(start_hash);
     REQUIRE(rows_after.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(rows_after->size() == 1);
@@ -1061,7 +1135,8 @@ TEST_CASE("database_manager::patch_game_metadata syncs elo to DuckDB position ro
     CHECK(rows_after->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_black_elo)});
 }
 
-TEST_CASE("database_manager::patch_game_metadata syncs result to DuckDB, surviving a rebuild", "[motif-db][database_manager]")
+TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebuild reflects the new result",
+          "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"patch_result_sync"};
 
@@ -1086,17 +1161,17 @@ TEST_CASE("database_manager::patch_game_metadata syncs result to DuckDB, survivi
     };
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const game_id = mgr->store().insert(game);
+    auto const game_id = mgr->insert_game(game);
     REQUIRE(game_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*game_id, {}, "new").has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->rebuild_position_postings().has_value());
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rows_before = mgr->positions().query_by_zobrist(start_hash);
+    auto rows_before = mgr->query_position_matches(start_hash);
     REQUIRE(rows_before.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(rows_before->size() == 1);
@@ -1108,21 +1183,15 @@ TEST_CASE("database_manager::patch_game_metadata syncs result to DuckDB, survivi
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
 
-    // Reflected immediately, without a rebuild.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rows_after = mgr->positions().query_by_zobrist(start_hash);
-    REQUIRE(rows_after.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(rows_after->size() == 1);
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(rows_after->front().result == std::int8_t {-1});
+    CHECK_FALSE(mgr->manifest().position_postings.has_value());
 
-    // A full rebuild must not resurrect the pre-patch value: game_result's
-    // insert path uses ON CONFLICT DO NOTHING, so it only stays correct if
-    // rebuild drops game_result along with position before replaying.
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    // A rebuild must reflect the new result, not the pre-patch value: the
+    // game row itself carries the new result, so a full replay-based rebuild
+    // always sees the current value.
+    REQUIRE(mgr->rebuild_position_postings().has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rows_rebuilt = mgr->positions().query_by_zobrist(start_hash);
+    auto rows_rebuilt = mgr->query_position_matches(start_hash);
     REQUIRE(rows_rebuilt.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(rows_rebuilt->size() == 1);
@@ -1130,7 +1199,8 @@ TEST_CASE("database_manager::patch_game_metadata syncs result to DuckDB, survivi
     CHECK(rows_rebuilt->front().result == std::int8_t {-1});
 }
 
-TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other column unchanged", "[motif-db][database_manager]")
+TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other column unchanged after rebuild",
+          "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"patch_elo_partial"};
 
@@ -1159,22 +1229,24 @@ TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other 
     };
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const game_id = mgr->store().insert(game);
+    auto const game_id = mgr->insert_game(game);
     REQUIRE(game_id.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->store().set_manual_provenance(*game_id, {}, "new").has_value());
+    REQUIRE(mgr->set_manual_game_provenance(*game_id, {}, "new").has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->rebuild_position_store().has_value());
+    REQUIRE(mgr->rebuild_position_postings().has_value());
 
     // Patch only white elo.
     auto patch = motif::db::game_patch {};
     patch.white_elo = patched_white_elo;
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(mgr->rebuild_position_postings().has_value());
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rows = mgr->positions().query_by_zobrist(start_hash);
+    auto rows = mgr->query_position_matches(start_hash);
     REQUIRE(rows.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(rows->size() == 1);

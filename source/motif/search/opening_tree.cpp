@@ -202,7 +202,7 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
 
     auto const max_depth = static_cast<std::uint16_t>(prefetch_depth);
 
-    auto rows_res = database.positions().query_tree_slice(root_hash, max_depth);
+    auto rows_res = database.query_tree_slice(root_hash, max_depth);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -430,7 +430,7 @@ auto open(motif::db::database_manager const& database,
 
     auto const max_depth = static_cast<std::uint16_t>(prefetch_depth);
 
-    auto all_ids_res = database.positions().distinct_game_ids_by_zobrist(root_hash);
+    auto all_ids_res = database.position_game_ids(root_hash);
     if (!all_ids_res) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -455,7 +455,7 @@ auto open(motif::db::database_manager const& database,
         };
     }
 
-    auto rows_res = database.positions().query_tree_slice(root_hash, max_depth, *filtered_ids_res);
+    auto rows_res = database.query_tree_slice(root_hash, max_depth, *filtered_ids_res);
     if (!rows_res) {
         return tl::unexpected {error_code::io_failure};
     }
