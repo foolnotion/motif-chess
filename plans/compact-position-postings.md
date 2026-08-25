@@ -2,16 +2,17 @@
 
 ## Status
 
-**Implemented and validated on the 1M corpus.** This plan follows the
-measured conclusion in `plans/shared-board-transition-replay.md`: replay sharing
-is not the next optimization. The current exact postings build takes 95.272 s,
-peaks at 5,962 MiB RSS, and produces a 3,196 MiB artifact for the 1M corpus.
-Its 88,221,427 occurrences spend only 12.316 s in replay. The avoidable costs
-are the persisted format, the full in-memory directory, and final assembly.
+**Implemented and validated on the 1M corpus.** This document preserves the
+version-4 baseline and the version-5 decision that followed it. The accepted
+implementation subsequently advanced to format version 6, reduced the artifact
+to 1,035 MiB, and incorporated the measured opening-tree follow-ups recorded in
+`docs/optimization-journey.md`. Statements below about the "current" version-4
+implementation and "next" work are historical planning context, not the present
+repository state.
 
-This plan replaces position-postings format version 4 with a compact version 5.
-It does not change SQLite, position-query semantics, opening-tree semantics, or
-the independent builder passes. It also does not add a replay tape.
+This plan replaced position-postings format version 4 with compact version 5.
+It did not change SQLite, position-query semantics, opening-tree semantics, or
+the independent builder passes, and it did not add a replay tape.
 
 ### Measured Result
 
@@ -313,9 +314,10 @@ decodes only game groups and skips ply values after validation. `occurrences()`
 decodes the complete selected block because offset and limit count occurrences,
 then attaches metadata to returned matches.
 
-The first implementation may decode one hash's full posting block before
-applying pagination. Add block-internal skip metadata only if popular-position
-benchmarks show this is material. Do not complicate version 5 preemptively.
+The accepted version-5 implementation decoded one hash's complete posting block
+before pagination. The later review fix now retains only the requested window
+while validating the complete encoded block; a block-internal skip index remains
+unnecessary until profiling justifies the additional format complexity.
 
 ## Internal Summary Stream
 
@@ -329,11 +331,10 @@ The callback receives hashes in strictly ascending order and may not retain a
 reader-owned view. The function streams compressed directory blocks and does
 not decode postings or allocate one object per hash.
 
-This API is required by the next optimization: the opening-tree builder will
-consume postings' `distinct_game_count` values instead of reconstructing the
-same full-depth child frequencies. Do not change opening-tree construction in
-the version-5 postings change. First establish format correctness and benchmark
-the postings build independently.
+The version-5 summary stream enabled the subsequent opening-tree optimization:
+the manager-backed builder now consumes postings `distinct_game_count` values
+instead of reconstructing the same full-depth child frequencies. The standalone
+tree builder remains the independent replay oracle.
 
 ## Publication And Compatibility
 
@@ -531,26 +532,30 @@ pass.
 Exit gate: accept version 5, revise it with one measured follow-up, or retain
 version 4. Do not stack speculative optimizations onto an unexplained result.
 
-### Phase 4: Opening-Tree Count Reuse
+### Phase 4: Opening-Tree Count Reuse — Completed
 
-After version 5 is accepted, use the sorted summary stream to replace the
-opening tree's duplicate child-visit spill and merge. This is a separate plan
-and benchmark decision. Its manager-backed path should reduce child-visit
-records, child spill runs, and child merge time to zero while preserving the
-standalone tree builder as an oracle or fallback.
+After version 5 was accepted, the sorted summary stream replaced the
+manager-backed tree builder's duplicate child-visit spill and merge. The
+standalone tree builder retains its independent replay counter as an oracle and
+fallback. Measurements and follow-on codec/scratch changes are recorded in
+`docs/optimization-journey.md`.
 
-## Deferred Work
+## Follow-up Inventory
 
-- High-hash partitioning and radix sorting of spill records.
-- Block-internal skip indexes for popular-hash pagination.
-- Computing the manifest checksum during final output.
-- Reusing postings counts in opening-tree construction.
-- Buffering the opening-tree codecs and reusing per-game tree scratch.
-- Compact move or transition replay tapes.
-- Joint publication of postings and opening-tree artifacts.
+Completed after the version-5 decision:
 
-Each deferred item requires a measurement against the accepted version-5
-baseline. None is required to validate the core format decision.
+- block-internal windowed pagination without a persisted skip index;
+- opening-tree reuse of postings counts;
+- buffered opening-tree codecs and retained per-game scratch capacity.
+
+Still measurement-gated:
+
+- high-hash partitioning and radix sorting of spill records;
+- computing the manifest checksum during final output;
+- compact move or transition replay tapes;
+- joint publication of postings and opening-tree artifacts.
+
+These items are not prerequisites for the accepted compact-postings format.
 
 ## Non-Goals
 

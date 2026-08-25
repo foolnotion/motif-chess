@@ -2,11 +2,11 @@
 
 ## Validation Status
 
-**Revise before implementation.** The sequential-consumer invariant is valid,
-but a full transition tape consumed by both builders is not yet supported by
-the benchmark evidence. The current implementation already constructs the
-postings and opening-tree builders sequentially, so the tape does not by itself
-fix a present builder-overlap RSS problem.
+**Historical rejected candidate.** The benchmark rejected a full transition
+tape as the next optimization. The repository retained sequential builders and
+implemented the higher-value format, child-count reuse, buffered-codec, and
+scratch-reuse work first. This document remains the rationale and design record
+for reconsidering replay sharing only if a new profile supports it.
 
 The 1M-game corpus has about 82 million positions. A 10-byte transition record
 therefore creates roughly 0.8-0.9 GiB of tape payload. The original pipeline
@@ -36,10 +36,10 @@ checksum, validation, and publication work in the end-to-end number. The tree
 spent 23.939 s in replay, 11.930 s merging child frequencies, 6.402 s merging
 edges, and 12.393 s writing the index.
 
-This rejects replay sharing as the next optimization. The dominant opportunities
-are the postings format's per-hash directory/storage amplification and the tree's
-duplicate reconstruction of child distinct-game counts. Before implementing a
-transition tape:
+This rejected replay sharing as the next optimization. The dominant measured
+opportunities were the postings format's per-hash directory/storage amplification
+and the tree's duplicate reconstruction of child distinct-game counts. The
+subsequent implementation completed those items without adding a transition tape:
 
 1. Version postings to store result/Elo once per game.
 2. Replace the flat 32-byte-per-hash directory with block-compressed hash and
@@ -246,35 +246,20 @@ The orchestrator must use scopes, not merely `clear()` calls:
   If power-loss durability is required, fsync staged files before rename and
   fsync the containing directory after artifact and manifest renames.
 
-## Primary Performance Work
+## Subsequent Performance Work
 
-The replay source is not currently the largest known source of avoidable work.
-Before committing to a tape format, optimize and measure these paths:
+The replay source was not the largest known source of avoidable work. Later
+iterations completed several items from this inventory:
 
-1. **Opening spill serialization.** `opening_tree_index.cpp` writes and reads
-   fixed-width values byte by byte through iostream calls. Encode complete
-   records into blocks and give merge cursors explicit read buffers.
-2. **Run-local opening aggregation.** Sort then combine equal edge keys within
-   each spill run before writing. Likewise encode roots as `(hash, count)` per
-   run. Common opening roots and edges should collapse dramatically.
-3. **Per-game scratch reuse.** Replace the shallow per-game hash containers
-   with fixed-capacity vectors and reuse full-depth visit scratch capacity.
-4. **Postings partition/radix construction.** Exact postings currently
-   comparison-sort every position and perform a global k-way merge. Partition
-   by high hash bits, radix-sort fixed-width keys per partition, and write
-   partitions in hash order.
-5. **Remove repeated artifact scans.** Compute checksums while writing, avoid
-   immediately checksumming a freshly built file again, and do not perform a
-   full validation parse before the next builder starts.
-6. **Compact postings payload.** Result and Elo are repeated per occurrence.
-   Store game metadata once and encode posting-list game-ID deltas plus ply.
-7. **Opening child-frequency join.** Replace the random-seek fallback and
-   per-edge binary searches with a sequential external merge join that writes
-   child-frequency-enriched edges once.
+- compact postings now store result/Elo once per game and use a compressed
+  directory;
+- final opening-tree writes use buffered codecs;
+- per-game tree scratch retains capacity;
+- manager-backed tree construction reuses postings child counts.
 
-The first three are low-risk changes to the current bounded-memory algorithm.
-They should be benchmarked before the replay-tape prototype because they attack
-large measured spill volumes without adding another staging artifact.
+High-hash partition/radix construction, checksum fusion, and replay tapes remain
+measurement-gated candidates. `docs/optimization-journey.md` records the
+implemented sequence and benchmark results.
 
 ## RSS Contract And Tests
 
