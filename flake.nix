@@ -136,7 +136,6 @@
               tl-expected
               spdlog
               sqlite
-              duckdb
               httplib
               reproc
               chesslib.packages.${system}.default
