@@ -51,6 +51,11 @@ class game_browser_presenter
 {
   public:
     explicit game_browser_presenter(motif::db::database_manager& database) noexcept;
+    game_browser_presenter(game_browser_presenter const&) = delete;
+    auto operator=(game_browser_presenter const&) -> game_browser_presenter& = delete;
+    game_browser_presenter(game_browser_presenter&&) = delete;
+    auto operator=(game_browser_presenter&&) -> game_browser_presenter& = delete;
+    ~game_browser_presenter() = default;
 
     auto load_games() -> result<void>;
     auto select_game(std::size_t row) -> result<void>;
