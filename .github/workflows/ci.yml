@@ -142,6 +142,7 @@ jobs:
         -B build/ci-fast
         -DCMAKE_BUILD_TYPE=Debug
         -Dmotif_DEVELOPER_MODE=ON
+        -Dmotif_ENABLE_SLINT_APP=ON
 
     - name: Build
       run: nix develop --command cmake --build build/ci-fast -j 2

@@ -222,7 +222,7 @@ auto game_browser_presenter::resize_column(std::size_t const column, std::int32_
     if (column >= browser_column_count) {
         return fail({.code = error_code::invalid_argument, .message = "Selected column is out of range"});
     }
-    state_.column_widths.at(column) = std::max(width, browser_minimum_column_width);
+    state_.column_widths.at(column) = std::clamp(width, browser_minimum_column_width, browser_maximum_column_width);
     state_.error_text.clear();
     return {};
 }

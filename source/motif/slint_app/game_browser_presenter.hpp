@@ -18,6 +18,7 @@ namespace motif::slint_app
 
 inline constexpr std::size_t browser_page_size {100};
 inline constexpr std::int32_t browser_minimum_column_width {70};
+inline constexpr std::int32_t browser_maximum_column_width {600};
 inline constexpr std::size_t browser_column_count {6};
 inline constexpr std::int32_t browser_player_column_width {145};
 inline constexpr std::int32_t browser_result_column_width {85};

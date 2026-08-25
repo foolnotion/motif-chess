@@ -13,9 +13,11 @@ component TableHeader inherits Rectangle {
     in property <string> title;
     in property <int> column;
     in property <length> column-width;
+    in property <bool> active;
+    in property <bool> ascending;
+    in property <bool> busy;
     callback sort(int, bool);
     callback resize(int, int);
-    property <bool> ascending: true;
 
     height: 36px;
     width: root.column-width;
@@ -26,14 +28,14 @@ component TableHeader inherits Rectangle {
         height: parent.height;
         vertical-alignment: center;
         color: #d7deea;
-        text: root.title + (root.ascending ? "  ^" : "  v");
+        text: root.title + (root.active ? (root.ascending ? "  ^" : "  v") : "");
         font-weight: 600;
     }
     TouchArea {
         width: parent.width - 5px;
+        enabled: !root.busy;
         clicked => {
-            root.ascending = !root.ascending;
-            root.sort(root.column, root.ascending);
+            root.sort(root.column, root.active ? !root.ascending : true);
         }
     }
     resize-handle := TouchArea {
@@ -50,7 +52,7 @@ component TableHeader inherits Rectangle {
         }
         moved => {
             if (self.pressed) {
-                root.resize(root.column, max(70, (self.start-width + self.mouse-x - self.start-mouse-x) / 1px));
+                root.resize(root.column, max(70, min(600, (self.start-width + self.mouse-x - self.start-mouse-x) / 1px)));
             }
         }
     }
@@ -68,6 +70,8 @@ export component GameBrowser inherits Rectangle {
     in-out property <string> player-filter;
     in-out property <string> result-filter;
     in property <[int]> column-widths;
+    in property <int> sort-column: 0;
+    in property <bool> sort-ascending: true;
     callback filters-changed(string, string);
     callback page-requested(int);
     callback select-row(int);
@@ -123,12 +127,12 @@ export component GameBrowser inherits Rectangle {
                 HorizontalLayout {
                     height: 36px;
                     spacing: 0px;
-                    TableHeader { title: "White"; column: 0; column-width: root.white-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Black"; column: 1; column-width: root.black-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Result"; column: 2; column-width: root.result-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Event"; column: 3; column-width: root.event-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Date"; column: 4; column-width: root.date-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "ECO"; column: 5; column-width: root.eco-width; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "White"; column: 0; column-width: root.white-width; active: root.sort-column == 0; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Black"; column: 1; column-width: root.black-width; active: root.sort-column == 1; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Result"; column: 2; column-width: root.result-width; active: root.sort-column == 2; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Event"; column: 3; column-width: root.event-width; active: root.sort-column == 3; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "Date"; column: 4; column-width: root.date-width; active: root.sort-column == 4; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    TableHeader { title: "ECO"; column: 5; column-width: root.eco-width; active: root.sort-column == 5; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
                 }
                 list := ListView {
                     horizontal-stretch: 1;
@@ -139,6 +143,9 @@ export component GameBrowser inherits Rectangle {
                         height: 34px;
                         focus-on-tab-navigation: index == root.selected-row;
                         key-pressed(event) => {
+                            if (root.busy) {
+                                return reject;
+                            }
                             if (event.text == Key.DownArrow) {
                                 root.move-selection(1);
                                 return accept;

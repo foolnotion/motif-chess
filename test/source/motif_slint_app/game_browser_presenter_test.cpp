@@ -318,6 +318,39 @@ TEST_CASE("game_browser_presenter: column resizing is validated and stored", "[m
     REQUIRE(presenter.resize_column(3, 20).has_value());
     CHECK(presenter.state().column_widths.at(3) == motif::slint_app::browser_minimum_column_width);
 
+    REQUIRE(presenter.resize_column(3, 5000).has_value());
+    CHECK(presenter.state().column_widths.at(3) == motif::slint_app::browser_maximum_column_width);
+
     CHECK_FALSE(presenter.resize_column(motif::slint_app::browser_column_count, 100).has_value());
     CHECK_FALSE(presenter.state().error_text.empty());
+}
+
+TEST_CASE("game_browser_presenter: move_selection starts fresh when the selection is off-page", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    insert_games(*database, selection_game_count);
+    auto presenter = motif::slint_app::game_browser_presenter {*database};
+
+    auto initial = presenter.prepare_initial_load();
+    REQUIRE(initial.has_value());
+    REQUIRE(load(presenter, *initial).value_or(false));
+    REQUIRE(presenter.select_game(4).has_value());
+    auto const selected_id = presenter.state().selected_game_id;
+
+    auto second_page = presenter.set_page(1);
+    REQUIRE(second_page.has_value());
+    REQUIRE(load(presenter, *second_page).value_or(false));
+    CHECK(presenter.state().has_selection);
+    CHECK(presenter.state().selected_game_id == selected_id);
+    CHECK_FALSE(presenter.state().selected_row.has_value());
+
+    auto moved_down = presenter.move_selection(1);
+    REQUIRE(moved_down.has_value());
+    CHECK(*moved_down == 1);
+    REQUIRE(presenter.state().selected_row.has_value());
+    CHECK(presenter.state().selected_row == 1);
+    CHECK(presenter.state().has_selection);
+    CHECK(presenter.state().selected_game_id == presenter.state().games.at(1).id);
+    CHECK(presenter.state().selected_game_id != selected_id);
 }
