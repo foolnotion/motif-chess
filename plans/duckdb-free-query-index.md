@@ -2,10 +2,10 @@
 
 ## Status
 
-Proposal for review. This plan defines a DuckDB replacement while retaining
-SQLite as the canonical store for games and headers. It does not authorize
-DuckDB removal until every replacement query passes exact-equivalence and
-performance gates.
+Implemented. SQLite is the canonical store; immutable exact postings are the
+sole durable full-depth position index. The design and delivery phases below
+remain as the decision record. Historical DuckDB comparisons are benchmark
+baselines, not descriptions of current runtime behavior.
 
 This plan supersedes the prefix-only candidate-index direction in
 `plans/opening-explorer-storage-redesign.md`. Prefix postings may remain a
@@ -17,16 +17,16 @@ queries do not depend on collision filtering for correctness or latency.
 Keep `games.db` as the authoritative relational store. It owns game headers,
 players, events, tags, provenance, results, Elo, and encoded moves.
 
-Replace `positions.duckdb` with immutable derived indexes:
+DuckDB was replaced by immutable derived indexes:
 
-1. `position_postings.idx` maps every full 64-bit Zobrist hash to the games
+1. `positions.postings.N` maps every full 64-bit Zobrist hash to the games
    and plies where it occurs.
-2. `opening_tree.idx` caches unfiltered direct-continuation aggregates through
-   a configured shallow depth, initially ply 20.
+2. `opening_tree.idx.N` caches unfiltered direct-continuation aggregates through
+   a configured shallow depth, with a complete canonical starting root.
 
 The general query path combines SQLite header filtering, exact posting
-intersection, and deterministic replay of only surviving games. It must return
-the same results as the current DuckDB path.
+intersection, and deterministic replay of only surviving games. Deterministic
+fixtures preserve the public behavior previously established against DuckDB.
 
 ## Scope
 
@@ -172,9 +172,10 @@ posting builder.
 Bulk import publishes one rebuilt immutable generation. Do not synchronously
 rebuild full postings for a single manual mutation.
 
-Initially, mark indexes stale after a manual insert, edit, or delete and route
-position queries through a correct replay fallback until rebuild. A mutable
-delta segment and compaction are later optimizations, not first-parity work.
+The implemented policy marks indexes stale before an insert, edit, or delete.
+Position queries then fail closed until rebuild; a mutable delta segment or
+live replay-on-demand fallback remains optional future work, not a removal
+prerequisite.
 
 ## Query Paths
 
@@ -266,18 +267,19 @@ Done:
   directly from canonical SQLite. Repair failure fails closed without
   publishing partial bytes. A valid bundle with a leftover
   `positions.duckdb` ignores that file and leaves it untouched.
-- Every query and mutation path (`query_position_matches`,
-  `position_game_ids`, `query_elo_distribution`,
-  `query_unfiltered_opening_stats`, `query_filtered_opening_stats`,
-  `query_tree_slice`, `find_games`, `patch_game_metadata`, `remove_game`)
-  uses postings and canonical replay, and fails closed (`error_code::io_failure`)
+- Every position query (`query_position_matches`, `position_game_ids`,
+  `query_elo_distribution`, `query_unfiltered_opening_stats`,
+  `query_filtered_opening_stats`, `query_tree_slice`, `find_games`) uses
+  postings and canonical replay, and fails closed (`error_code::io_failure`)
   rather than serving stale or absent derived data.
-- One-release migration window: `open()` makes a single best-effort attempt
-  to build and publish postings for a legacy bundle, using the same
-  staged-build/validate/atomic-publish path as every other postings rebuild.
+- Canonical mutations are routed through `database_manager`; public raw-store
+  mutation access is unavailable. The manager invalidates derived generations
+  before SQLite inserts, derived-affecting edits, and deletes.
+- One-release migration window: `open()` builds and publishes postings for a
+  legacy bundle through the normal staged-build/validate/atomic-publish path.
   Migration replays canonical SQLite and never reads or deletes a leftover
-  `positions.duckdb`. On failure, `open()` fails closed without changing the
-  published manifest; the attempt is safe to retry.
+  `positions.duckdb`. Failure leaves canonical SQLite unchanged and is safe to
+  retry; post-rename durability errors retain the manifest-referenced artifact.
 - `create_scratch()` uses the same on-disk `create()` path as a persistent
   bundle (games.db, manifest.json, and derived-index files) staged in a
   private temporary directory that is removed on close, rather than an
@@ -286,17 +288,17 @@ Done:
   `positions.duckdb` to mark a bundle available.
 - Clean close clears the legacy dirty marker when checksum-verified postings
   cover canonical SQLite.
-- Import and manual-game mutation paths update canonical SQLite and mark
-  postings stale immediately
-  (`prepare_canonical_mutation()`), consistent with this plan's "Manual
-  Mutations" policy, and every position-query path fails closed until an
-  explicit rebuild -- there is no live replay-on-demand fallback yet for a
-  postings-only bundle after a manual mutation.
+- Import and manual-game mutation paths mark postings stale before changing
+  canonical SQLite (`prepare_canonical_mutation()`). Every position-query path
+  fails closed until an explicit rebuild; no live replay-on-demand fallback is
+  required for DuckDB removal.
+- Persistent bundle factories hold an OS-level lock file for the manager
+  lifetime, preventing concurrent processes from racing manifest publication
+  or deleting each other's generation-qualified artifacts.
 
-Deferred follow-up work:
-- A live replay-on-demand fallback for manual mutations on a postings-only
-  bundle (today: fail closed until an explicit rebuild), if that gap proves
-  too disruptive in practice.
+Optional follow-up work:
+- A live replay-on-demand fallback after manual mutations, if fail-closed
+  behavior proves too disruptive in practice.
 - Moving `open()`'s migration attempt off the synchronous open path for very
   large legacy bundles, if it proves too slow in practice (no large-corpus
   measurement was taken for this change).
