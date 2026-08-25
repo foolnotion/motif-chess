@@ -277,30 +277,6 @@ auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_pa
         return tl::unexpected {error_code::invalid_state};
     }
 
-    auto const current_stat = stat_source(pgn_path);
-    if (!current_stat) {
-        return tl::unexpected {current_stat.error()};
-    }
-    // A checkpoint offset strictly beyond the current file's end can never be
-    // a valid resume point; exact EOF (the source was fully ingested) is
-    // valid. Reject anything past it rather than letting pgn_reader silently
-    // treat it as "nothing more to read".
-    if (checkpoint.byte_offset > current_stat->size) {
-        return tl::unexpected {error_code::invalid_state};
-    }
-    // Detect the source file being edited or replaced at the same path since
-    // the checkpoint was written -- either would make byte_offset point at
-    // content that no longer matches what was already ingested.
-    if (current_stat->size != checkpoint.source_size || current_stat->mtime_ns != checkpoint.source_mtime_ns) {
-        return tl::unexpected {error_code::invalid_state};
-    }
-    auto const current_hash = hash_source(pgn_path);
-    if (!current_hash) {
-        return tl::unexpected {current_hash.error()};
-    }
-    if (*current_hash != checkpoint.source_content_hash) {
-        return tl::unexpected {error_code::invalid_state};
-    }
     auto const index_exists = db_.writer().identity_index_exists();
     if (!index_exists) {
         return tl::unexpected {error_code::io_failure};

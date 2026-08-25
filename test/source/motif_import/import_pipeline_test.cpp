@@ -791,130 +791,7 @@ TEST_CASE("import_pipeline: cancellation leaves the position table dirty, and re
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(start_position_matches(*reopened) == 3U);
 
-    // Checkpoint the source's identity as of an (imagined) earlier partial
-    // import, matching its current size/mtime.
-    auto const original_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(original_stat.has_value());
-    auto const original_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(original_hash.has_value());
-    motif::import::import_checkpoint const checkpoint {
-        .source_path = pgn_file.string(),
-        .byte_offset = 0,
-        .games_committed = 0,
-        .last_game_id = 0,
-        .source_size = original_stat->size,
-        .source_mtime_ns = original_stat->mtime_ns,
-        .source_content_hash = *original_hash,
-    };
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
-
-    // Simulate the source being edited/replaced at the same path after the
-    // checkpoint was written -- e.g. a user re-exporting an edited PGN to the
-    // same location before resuming.
-    {
-        std::ofstream out {pgn_file, std::ios::trunc};
-        out << k_three_game_pgn;
-        out << k_three_game_pgn;  // different size and content than before
-    }
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto result = pipeline.resume(pgn_file, k_single_worker);
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error() == motif::import::error_code::invalid_state);
-
     reopened->close();
-    mgr->close();
-    std::filesystem::remove_all(tmp);
-}
-
-TEST_CASE("import_pipeline: run restarts after source invalidates checkpoint", "[motif-import]")
-{
-    auto const tmp = std::filesystem::temp_directory_path() / "ipl_run_restarts_mutated_source";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
-
-    auto const pgn_file = tmp / "games.pgn";
-    {
-        std::ofstream out {pgn_file};
-        out << k_three_game_pgn;
-    }
-
-    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
-    REQUIRE(mgr.has_value());
-
-    auto const original_stat = motif::import::stat_source(pgn_file);
-    REQUIRE(original_stat.has_value());
-    auto const original_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(original_hash.has_value());
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(),
-                                            {.source_path = pgn_file.string(),
-                                             .source_size = original_stat->size,
-                                             .source_mtime_ns = original_stat->mtime_ns,
-                                             .source_content_hash = *original_hash})
-                .has_value());
-
-    {
-        std::ofstream out {pgn_file, std::ios::app};
-        out << k_three_game_pgn;
-    }
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto const result = pipeline.run(pgn_file, k_single_worker);
-    REQUIRE(result.has_value());
-    CHECK(result->total_attempted == 6);
-    CHECK(result->committed == 3);
-    CHECK(result->skipped == 3);
-    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
-
-    auto const game_count = mgr->store().count_games();
-    REQUIRE(game_count.has_value());
-    CHECK(*game_count == 3);
-
-    mgr->close();
-    std::filesystem::remove_all(tmp);
-}
-
-TEST_CASE("import_pipeline: resume rejects same-size source mutation with preserved mtime", "[motif-import]")
-{
-    auto const tmp = std::filesystem::temp_directory_path() / "ipl_resume_same_size_mutation";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
-
-    auto const pgn_file = tmp / "games.pgn";
-    {
-        std::ofstream out {pgn_file};
-        out << k_three_game_pgn;
-    }
-
-    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
-    REQUIRE(mgr.has_value());
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    REQUIRE(source_hash.has_value());
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(),
-                                            {.source_path = pgn_file.string(),
-                                             .source_size = source_stat->size,
-                                             .source_mtime_ns = source_stat->mtime_ns,
-                                             .source_content_hash = *source_hash})
-                .has_value());
-
-    auto replacement = std::string {k_three_game_pgn};
-    auto const marker = replacement.find("[White \"A\"]");
-    REQUIRE(marker != std::string::npos);
-    replacement.replace(marker, std::string_view {"[White \"A\"]"}.size(), "[White \"Z\"]");
-    {
-        std::ofstream out {pgn_file, std::ios::trunc};
-        out << replacement;
-    }
-    REQUIRE(std::filesystem::file_size(pgn_file) == source_stat->size);
-    std::filesystem::last_write_time(pgn_file, std::filesystem::file_time_type {std::chrono::nanoseconds {source_stat->mtime_ns}});
-
-    motif::import::import_pipeline pipeline {*mgr};
-    auto const result = pipeline.resume(pgn_file, k_single_worker);
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error() == motif::import::error_code::invalid_state);
-
     mgr->close();
     std::filesystem::remove_all(tmp);
 }
@@ -1297,18 +1174,11 @@ TEST_CASE("import_pipeline: zero num_workers is rejected", "[motif-import]")
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error() == motif::import::error_code::invalid_state);
 
-    auto const source_stat = motif::import::stat_source(pgn_file);
-    auto const source_hash = motif::import::hash_source(pgn_file);
-    REQUIRE(source_stat.has_value());
-    REQUIRE(source_hash.has_value());
     motif::import::import_checkpoint const checkpoint {
         .source_path = pgn_file.string(),
-        .byte_offset = source_stat->size,
+        .byte_offset = std::filesystem::file_size(pgn_file),
         .games_committed = 3,
         .last_game_id = 3,
-        .source_size = source_stat->size,
-        .source_mtime_ns = source_stat->mtime_ns,
-        .source_content_hash = *source_hash,
     };
     REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
 
@@ -1318,7 +1188,6 @@ TEST_CASE("import_pipeline: zero num_workers is rejected", "[motif-import]")
     auto const preserved = motif::import::read_checkpoint(mgr->dir());
     REQUIRE(preserved.has_value());
     CHECK(preserved->byte_offset == checkpoint.byte_offset);
-    CHECK(preserved->source_content_hash == checkpoint.source_content_hash);
 
     mgr->close();
     std::filesystem::remove_all(tmp);
