@@ -1,5 +1,6 @@
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "motif/app/database_workspace.hpp"
@@ -147,6 +148,24 @@ TEST_CASE("database_workspace: recent_with_status marks unavailable paths", "[mo
     REQUIRE(statuses.size() == 1);
     REQUIRE_FALSE(statuses[0].available);
     REQUIRE(statuses[0].entry.path == "/nonexistent/missing_db");
+}
+
+TEST_CASE("database_workspace: recent_with_status accepts postings bundles without legacy DuckDB", "[motif-app]")
+{
+    tmp_dir const tmp {"recent-postings"};
+    auto games_file = std::ofstream {tmp.path / "games.db"};
+    auto manifest_file = std::ofstream {tmp.path / "manifest.json"};
+    REQUIRE(games_file.good());
+    REQUIRE(manifest_file.good());
+
+    motif::app::app_config cfg;
+    motif::app::push_recent(cfg, "Postings", tmp.path.string());
+
+    motif::app::database_workspace const workspace(&cfg);
+    auto const statuses = workspace.recent_with_status();
+
+    REQUIRE(statuses.size() == 1);
+    CHECK(statuses[0].available);
 }
 
 TEST_CASE("database_workspace: persistent_db is null for scratch", "[motif-app]")

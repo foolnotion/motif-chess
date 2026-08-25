@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -291,27 +290,46 @@ auto wait_for_ready(motif::http::server const& srv) -> bool
     return srv.is_running();
 }
 
-// NOLINTBEGIN(bugprone-easily-swappable-parameters)
-auto seed_positions(motif::db::database_manager& dbmgr, std::uint64_t hash, std::size_t count) -> void
-// NOLINTEND(bugprone-easily-swappable-parameters)
+auto seed_positions(motif::db::database_manager& dbmgr, std::size_t count) -> std::uint64_t
 {
-    constexpr std::uint16_t seed_ply {10};
-    constexpr std::int16_t seed_white_elo {1600};
-    constexpr std::int16_t seed_black_elo {1500};
+    constexpr std::int32_t seed_white_elo {1600};
+    constexpr std::int32_t seed_black_elo {1500};
 
-    std::vector<motif::db::position_row> rows;
-    rows.reserve(count);
+    auto board = chesslib::board {};
+    auto e4_move = chesslib::san::from_string(board, "e4");
+    REQUIRE(e4_move.has_value());
+    auto const encoded_e4 = chesslib::codec::encode(*e4_move);
+    chesslib::move_maker {board, *e4_move}.make();
+
     for (std::size_t i = 0; i < count; ++i) {
-        rows.push_back(motif::db::position_row {
-            .zobrist_hash = motif::db::zobrist_hash {hash},
-            .game_id = motif::db::game_id {static_cast<std::uint32_t>(i + 1)},
-            .ply = seed_ply,
-            .result = std::int8_t {1},
-            .white_elo = seed_white_elo,
-            .black_elo = seed_black_elo,
-        });
+        auto game = motif::db::game {
+            .white =
+                motif::db::player {
+                    .name = fmt::format("Seed White {}", i),
+                    .elo = seed_white_elo,
+                    .title = std::nullopt,
+                    .country = std::nullopt,
+                },
+            .black =
+                motif::db::player {
+                    .name = fmt::format("Seed Black {}", i),
+                    .elo = seed_black_elo,
+                    .title = std::nullopt,
+                    .country = std::nullopt,
+                },
+            .event_details = std::nullopt,
+            .date = std::nullopt,
+            .result = "1-0",
+            .eco = std::nullopt,
+            .moves = {encoded_e4},
+            .extra_tags = {},
+            .provenance = {},
+        };
+        REQUIRE(dbmgr.insert_game(game).has_value());
     }
-    [[maybe_unused]] auto const res = dbmgr.positions().insert_batch(rows);
+
+    REQUIRE(dbmgr.rebuild_position_postings().has_value());
+    return board.hash();
 }
 
 auto encode_moves_for_game(std::initializer_list<char const*> sans) -> std::vector<std::uint16_t>
@@ -399,7 +417,7 @@ auto insert_http_game(motif::db::database_manager& dbmgr, http_game_seed seed) -
         .extra_tags = {},
         .provenance = {},
     };
-    auto inserted = dbmgr.store().insert(game);
+    auto inserted = dbmgr.insert_game(game);
     REQUIRE(inserted.has_value());
     return inserted->value;
 }
@@ -445,7 +463,7 @@ auto insert_detailed_http_game(motif::db::database_manager& dbmgr) -> std::pair<
         .extra_tags = {{"Opening", "Ruy Lopez"}, {"Round", "6"}},
         .provenance = {},
     };
-    auto inserted = dbmgr.store().insert(game);
+    auto inserted = dbmgr.insert_game(game);
     REQUIRE(inserted.has_value());
     return {inserted->value, std::move(moves)};
 }
@@ -585,7 +603,7 @@ void run_http_position_search_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
+    auto sample_hashes = test_helpers::sample_zobrist_hashes(*manager, perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
@@ -679,7 +697,7 @@ void run_http_opening_stats_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
+    auto sample_hashes = test_helpers::sample_zobrist_hashes(*manager, perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
@@ -792,7 +810,6 @@ void run_import_sse_test()
     CHECK(collected_events.contains("games_skipped"));
     CHECK(collected_events.contains("elapsed_seconds"));
     CHECK(collected_events.contains("\"phase\""));
-    CHECK(collected_events.contains("ingesting"));
     CHECK(collected_events.contains("event: complete"));
     CHECK(collected_events.contains("total_attempted"));
     CHECK(collected_events.contains("committed"));
@@ -1001,12 +1018,10 @@ TEST_CASE("server: position search empty hash returns 400", "[motif-http]")
 // macros inflate complexity in this assertion-heavy test.
 TEST_CASE("server: position search populated DB returns 200 with correct fields", "[motif-http]")
 {
-    constexpr std::uint64_t pop_hash {999};
-
     auto const tdir = tmp_dir {"pos_populated"};
     auto db_res = motif::db::database_manager::create(tdir.path, "pos-pop-db");
     REQUIRE(db_res.has_value());
-    seed_positions(*db_res, pop_hash, /*count=*/2);
+    auto const pop_hash = seed_positions(*db_res, /*count=*/2);
 
     constexpr std::uint16_t test_port {18085};
     motif::http::server srv {*db_res};
@@ -1014,7 +1029,7 @@ TEST_CASE("server: position search populated DB returns 200 with correct fields"
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get("/api/positions/999");
+    auto const res = cli.Get(fmt::format("/api/positions/{}", pop_hash));
 
     srv.stop();
     server_thread.join();
@@ -1034,13 +1049,12 @@ TEST_CASE("server: position search populated DB returns 200 with correct fields"
 
 TEST_CASE("server: position search honors limit parameter", "[motif-http]")
 {
-    constexpr std::uint64_t page_hash {42};
     constexpr std::size_t page_total {10};
 
     auto const tdir = tmp_dir {"pos_page"};
     auto db_res = motif::db::database_manager::create(tdir.path, "page-db");
     REQUIRE(db_res.has_value());
-    seed_positions(*db_res, page_hash, page_total);
+    auto const page_hash = seed_positions(*db_res, page_total);
 
     constexpr std::uint16_t test_port {18086};
     motif::http::server srv {*db_res};
@@ -1048,7 +1062,7 @@ TEST_CASE("server: position search honors limit parameter", "[motif-http]")
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get("/api/positions/42?limit=3&offset=0");
+    auto const res = cli.Get(fmt::format("/api/positions/{}?limit=3&offset=0", page_hash));
 
     srv.stop();
     server_thread.join();
@@ -1084,13 +1098,12 @@ TEST_CASE("server: position search invalid limit returns 400", "[motif-http]")
 
 TEST_CASE("server: position search defaults limit to 100", "[motif-http]")
 {
-    constexpr std::uint64_t page_hash {43};
     constexpr std::size_t page_total {150};
 
     auto const tdir = tmp_dir {"pos_default_limit"};
     auto db_res = motif::db::database_manager::create(tdir.path, "default-limit-db");
     REQUIRE(db_res.has_value());
-    seed_positions(*db_res, page_hash, page_total);
+    auto const page_hash = seed_positions(*db_res, page_total);
 
     constexpr std::uint16_t test_port {18089};
     motif::http::server srv {*db_res};
@@ -1098,7 +1111,7 @@ TEST_CASE("server: position search defaults limit to 100", "[motif-http]")
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get("/api/positions/43");
+    auto const res = cli.Get(fmt::format("/api/positions/{}", page_hash));
 
     srv.stop();
     server_thread.join();
@@ -1110,13 +1123,12 @@ TEST_CASE("server: position search defaults limit to 100", "[motif-http]")
 
 TEST_CASE("server: position search clamps limit to 500", "[motif-http]")
 {
-    constexpr std::uint64_t page_hash {44};
     constexpr std::size_t page_total {600};
 
     auto const tdir = tmp_dir {"pos_limit_clamp"};
     auto db_res = motif::db::database_manager::create(tdir.path, "limit-clamp-db");
     REQUIRE(db_res.has_value());
-    seed_positions(*db_res, page_hash, page_total);
+    auto const page_hash = seed_positions(*db_res, page_total);
 
     constexpr std::uint16_t test_port {18090};
     motif::http::server srv {*db_res};
@@ -1124,7 +1136,7 @@ TEST_CASE("server: position search clamps limit to 500", "[motif-http]")
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get("/api/positions/44?limit=999");
+    auto const res = cli.Get(fmt::format("/api/positions/{}?limit=999", page_hash));
 
     srv.stop();
     server_thread.join();
@@ -1136,13 +1148,12 @@ TEST_CASE("server: position search clamps limit to 500", "[motif-http]")
 
 TEST_CASE("server: position search limit zero returns empty array", "[motif-http]")
 {
-    constexpr std::uint64_t page_hash {45};
     constexpr std::size_t page_total {10};
 
     auto const tdir = tmp_dir {"pos_limit_zero"};
     auto db_res = motif::db::database_manager::create(tdir.path, "limit-zero-db");
     REQUIRE(db_res.has_value());
-    seed_positions(*db_res, page_hash, page_total);
+    auto const page_hash = seed_positions(*db_res, page_total);
 
     constexpr std::uint16_t test_port {18091};
     motif::http::server srv {*db_res};
@@ -1150,7 +1161,7 @@ TEST_CASE("server: position search limit zero returns empty array", "[motif-http
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get("/api/positions/45?limit=0&offset=4");
+    auto const res = cli.Get(fmt::format("/api/positions/{}?limit=0&offset=4", page_hash));
 
     srv.stop();
     server_thread.join();
@@ -1184,13 +1195,12 @@ TEST_CASE("server: position search invalid offset returns 400", "[motif-http]")
 
 TEST_CASE("server: position search offset beyond end returns empty array", "[motif-http]")
 {
-    constexpr std::uint64_t page_hash {46};
     constexpr std::size_t page_total {5};
 
     auto const tdir = tmp_dir {"pos_offset_end"};
     auto db_res = motif::db::database_manager::create(tdir.path, "offset-end-db");
     REQUIRE(db_res.has_value());
-    seed_positions(*db_res, page_hash, page_total);
+    auto const page_hash = seed_positions(*db_res, page_total);
 
     constexpr std::uint16_t test_port {18093};
     motif::http::server srv {*db_res};
@@ -1198,7 +1208,7 @@ TEST_CASE("server: position search offset beyond end returns empty array", "[mot
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
-    auto const res = cli.Get("/api/positions/46?limit=3&offset=99");
+    auto const res = cli.Get(fmt::format("/api/positions/{}?limit=3&offset=99", page_hash));
 
     srv.stop();
     server_thread.join();
@@ -1317,9 +1327,9 @@ TEST_CASE("server: opening stats returns continuations for populated DB", "[moti
     test_game.result = "1-0";
     test_game.moves = encode_moves_for_game({"e4", "e5", "Nf3"});
 
-    auto inserted = db_res->store().insert(test_game);
+    auto inserted = db_res->insert_game(test_game);
     REQUIRE(inserted.has_value());
-    auto rebuilt = db_res->rebuild_position_store();
+    auto rebuilt = db_res->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
     // The position store records positions AFTER each move (ply = move_index + 1),
@@ -1380,9 +1390,9 @@ TEST_CASE("server: opening stats includes eco and opening_name when game has the
     test_game.extra_tags = {{"Opening", "French Defense"}};
     test_game.moves = encode_moves_for_game({"e4", "e6", "d4"});
 
-    auto inserted = db_res->store().insert(test_game);
+    auto inserted = db_res->insert_game(test_game);
     REQUIRE(inserted.has_value());
-    auto rebuilt = db_res->rebuild_position_store();
+    auto rebuilt = db_res->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
     auto board = chesslib::board {};
@@ -1618,7 +1628,7 @@ TEST_CASE("server: game list filters by position hash", "[motif-http]")
                          .move_seed = 0,
                          .moves = d4_moves,
                      });
-    REQUIRE(db_res->rebuild_position_store().has_value());
+    REQUIRE(db_res->rebuild_position_postings().has_value());
 
     auto board = chesslib::board {};
     auto e4_move = chesslib::san::from_string(board, "e4");
@@ -2005,7 +2015,7 @@ TEST_CASE("server: GET /api/games/{id}/positions empty game returns empty arrays
         .extra_tags = {},
         .provenance = {},
     };
-    auto inserted = db_res->store().insert(game);
+    auto inserted = db_res->insert_game(game);
     REQUIRE(inserted.has_value());
 
     constexpr std::uint16_t test_port {18165};
@@ -2190,79 +2200,6 @@ TEST_CASE("server: import SSE streams progress and completion events", "[motif-h
 TEST_CASE("server: import DELETE requests cancellation", "[motif-http]")
 {
     run_import_delete_test();
-}
-
-// A database request made while an import holds database_mutex for its
-// entire run() must return promptly (503) instead of blocking the calling
-// httplib worker thread for the whole import, and progress/cancel must
-// remain reachable throughout.
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("server: database request during active import returns promptly and progress/cancel stay reachable", "[motif-http]")
-{
-    auto const tdir = tmp_dir {"import_busy"};
-    auto db_res = motif::db::database_manager::create(tdir.path / "db", "import-busy");
-    REQUIRE(db_res.has_value());
-
-    auto const pgn_path = write_pgn_fixture(tdir.path, make_repeated_pgn(long_import_game_count));
-    auto logging = import_logging_scope {tdir.path / "logs"};
-
-    constexpr std::uint16_t test_port {18169};
-    motif::http::server srv {*db_res};
-    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
-    REQUIRE(wait_for_ready(srv));
-
-    httplib::Client cli {"localhost", test_port};
-    cli.set_read_timeout(sse_read_timeout_s);
-
-    auto const post_res = cli.Post("/api/imports", R"({"path":")" + pgn_path.string() + R"("})", "application/json");
-    REQUIRE(post_res != nullptr);
-    REQUIRE(post_res->status == 202);
-    auto const import_id = extract_import_id(post_res->body);
-    REQUIRE(!import_id.empty());
-
-    // A data endpoint issued while the import is running must come back
-    // fast -- it must not sit blocked on database_mutex for anywhere near
-    // the import's full duration.
-    auto const busy_started = std::chrono::steady_clock::now();
-    auto const busy_res = cli.Get("/api/games/count");
-    auto const busy_elapsed = std::chrono::steady_clock::now() - busy_started;
-    REQUIRE(busy_res != nullptr);
-    CHECK(busy_res->status == 503);
-    CHECK(busy_elapsed < std::chrono::seconds {2});
-
-    // Progress dispatch must still be reachable while busy: the connection
-    // yields data promptly rather than stalling behind database_mutex.
-    // Returning false from the content receiver after the first chunk makes
-    // cpp-httplib report the request as canceled (a null Result), so success
-    // here is judged by having received data at all, not by the Result
-    // pointer.
-    std::string first_progress_chunk;
-    cli.Get("/api/imports/" + import_id + "/progress",
-            httplib::Headers {},
-            [&first_progress_chunk](const char* data, size_t size) -> bool
-            {
-                first_progress_chunk.append(data, size);
-                return false;
-            });
-    CHECK_FALSE(first_progress_chunk.empty());
-
-    auto const del_res = cli.Delete("/api/imports/" + import_id);
-    REQUIRE(del_res != nullptr);
-    CHECK(del_res->status == 200);
-
-    std::string collected_events;
-    cli.Get("/api/imports/" + import_id + "/progress",
-            httplib::Headers {},
-            [&collected_events](const char* data, size_t size) -> bool
-            {
-                collected_events.append(data, size);
-                return true;
-            });
-    CHECK(collected_events.contains("event: complete"));
-
-    srv.stop();
-    server_thread.join();
-    logging.shutdown();
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

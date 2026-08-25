@@ -15,7 +15,7 @@ auto find(motif::db::database_manager const& database,
           std::size_t const limit,
           std::size_t const offset) -> result<match_list>
 {
-    auto query = database.positions().query_by_zobrist(hash, limit, offset);
+    auto query = database.query_position_matches(hash, limit, offset);
     if (!query) {
         return tl::unexpected {error_code::io_failure};
     }

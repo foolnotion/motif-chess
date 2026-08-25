@@ -124,11 +124,11 @@ auto make_game(game_spec const& spec) -> motif::db::game
 void insert_games_and_rebuild(motif::db::database_manager& manager, std::initializer_list<motif::db::game> games)
 {
     for (auto const& game : games) {
-        auto inserted = manager.store().insert(game);
+        auto inserted = manager.insert_game(game);
         REQUIRE(inserted.has_value());
     }
 
-    auto rebuilt = manager.rebuild_position_store();
+    auto rebuilt = manager.rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 }
 
@@ -255,7 +255,7 @@ void run_opening_stats_perf_test()
     REQUIRE(summary.has_value());
     REQUIRE(summary->committed > 0);
 
-    auto sample_hashes = manager->positions().sample_zobrist_hashes(perf_sample_hashes, perf_sample_seed);
+    auto sample_hashes = test_helpers::sample_zobrist_hashes(*manager, perf_sample_hashes, perf_sample_seed);
     REQUIRE(sample_hashes.has_value());
     REQUIRE_FALSE(sample_hashes->empty());
 
@@ -344,6 +344,40 @@ TEST_CASE("opening_stats::query aggregates continuation statistics", "[motif-sea
     CHECK(second.opening_name == std::optional<std::string> {"Vienna Game"});
 }
 
+TEST_CASE("opening_stats::query uses a matching shallow index and falls back for deep roots", "[motif-search][opening_stats]")
+{
+    tmp_dir const tdir {"shallow-index-dispatch"};
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "shallow-index-dispatch");
+    REQUIRE(manager.has_value());
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt}),
+                              make_game({.sans = {"d4", "d5", "c4", "e6"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::nullopt,
+                                         .opening_name = std::nullopt})});
+    REQUIRE(manager->rebuild_opening_tree_index().has_value());
+
+    auto const shallow_hash = hash_after_sans({});
+    auto const shallow = motif::search::opening_stats::query(*manager, shallow_hash);
+    REQUIRE(shallow.has_value());
+    // Two games diverge on the first move (e4 vs. d4): two continuations.
+    REQUIRE(shallow->continuations.size() == 2);
+
+    auto const deep_hash = hash_after_sans({"e4", "e5", "Nf3"});
+    auto const deep = motif::search::opening_stats::query(*manager, deep_hash);
+    REQUIRE(deep.has_value());
+    // Only the first game reaches this position, with a single continuation.
+    REQUIRE(deep->continuations.size() == 1);
+    CHECK(deep->continuations.front().san == "Nc6");
+}
+
 TEST_CASE("opening_stats::query ignores null Elo values in averages", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"elo"};
@@ -401,34 +435,45 @@ TEST_CASE("opening_stats::query returns empty statistics for missing positions",
     CHECK(stats->continuations.empty());
 }
 
-TEST_CASE("opening_stats::query skips orphaned rows and returns remaining stats", "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query fails closed on a game-count mismatch and recovers after rebuild", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"orphaned-row"};
 
     auto manager = motif::db::database_manager::create(tdir.path, "search-db");
     REQUIRE(manager.has_value());
 
-    auto orphaned_game_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
-                                                               .result = "1-0",
-                                                               .white_elo = white_elo_high,
-                                                               .black_elo = black_elo_high,
-                                                               .eco = std::string {"C40"},
-                                                               .opening_name = std::string {"King's Knight Opening"}}));
-    REQUIRE(orphaned_game_id.has_value());
+    auto removed_game_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                                           .result = "1-0",
+                                                           .white_elo = white_elo_high,
+                                                           .black_elo = black_elo_high,
+                                                           .eco = std::string {"C40"},
+                                                           .opening_name = std::string {"King's Knight Opening"}}));
+    REQUIRE(removed_game_id.has_value());
 
-    auto surviving_game_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
-                                                                .result = "0-1",
-                                                                .white_elo = white_elo_low,
-                                                                .black_elo = black_elo_other,
-                                                                .eco = std::string {"C25"},
-                                                                .opening_name = std::string {"Vienna Game"}}));
+    auto surviving_game_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                                                             .result = "0-1",
+                                                             .white_elo = white_elo_low,
+                                                             .black_elo = black_elo_other,
+                                                             .eco = std::string {"C25"},
+                                                             .opening_name = std::string {"Vienna Game"}}));
     REQUIRE(surviving_game_id.has_value());
 
-    auto rebuilt = manager->rebuild_position_store();
+    auto rebuilt = manager->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
-    auto removed = manager->store().remove(*orphaned_game_id);
+    // Removing a game directly through the SQLite store (bypassing
+    // database_manager::remove_game(), which would mark postings stale
+    // immediately) changes the canonical game count without touching
+    // postings at all. The next query must detect the mismatch and fail
+    // closed rather than silently serving an index that no longer describes
+    // canonical SQLite.
+    auto removed = manager->remove_game(*removed_game_id);
     REQUIRE(removed.has_value());
+
+    auto stale_stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
+    REQUIRE_FALSE(stale_stats.has_value());
+
+    REQUIRE(manager->rebuild_position_postings().has_value());
 
     auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
     REQUIRE(stats.has_value());
@@ -575,15 +620,16 @@ TEST_CASE("opening_stats::query total_games excludes duplicate position rows", "
     REQUIRE(stats_before.has_value());
     CHECK(stats_before->total_games == 1);
 
-    auto count_before = manager->positions().count_by_zobrist(start_hash);
-    REQUIRE(count_before.has_value());
-    CHECK(*count_before == 1);
+    auto summary_before = manager->position_summary(start_hash);
+    REQUIRE(summary_before.has_value());
+    REQUIRE(summary_before->has_value());
+    CHECK(summary_before->value_or(motif::db::position_postings_summary {}).distinct_game_count == 1);
 
-    auto const game_id = manager->store().insert(make_game(
+    auto const game_id = manager->insert_game(make_game(
         {.sans = {"e4", "d5"}, .result = "0-1", .white_elo = white_elo_mid, .black_elo = black_elo_other, .eco = {}, .opening_name = {}}));
     REQUIRE(game_id.has_value());
 
-    auto rebuilt = manager->rebuild_position_store();
+    auto rebuilt = manager->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
     auto stats_after = motif::search::opening_stats::query(*manager, start_hash);
@@ -595,7 +641,7 @@ TEST_CASE("opening_stats::query total_games excludes duplicate position rows", "
     CHECK(std::cmp_equal(stats_after->total_games, *game_count));
 }
 
-TEST_CASE("delete_by_game_id removes position rows and total_games stays consistent", "[motif-db][position_store]")
+TEST_CASE("delete_by_game_id removes position rows and total_games stays consistent", "[motif-db][position_postings]")
 {
     tmp_dir const tdir {"delete_consistency"};
 
@@ -604,23 +650,23 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
-    auto game1_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3"},
-                                                       .result = "1-0",
-                                                       .white_elo = white_elo_high,
-                                                       .black_elo = black_elo_high,
-                                                       .eco = {},
-                                                       .opening_name = {}}));
+    auto game1_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3"},
+                                                    .result = "1-0",
+                                                    .white_elo = white_elo_high,
+                                                    .black_elo = black_elo_high,
+                                                    .eco = {},
+                                                    .opening_name = {}}));
     REQUIRE(game1_id.has_value());
 
-    auto game2_id = manager->store().insert(make_game({.sans = {"e4", "c5", "Nf3"},
-                                                       .result = "0-1",
-                                                       .white_elo = white_elo_mid,
-                                                       .black_elo = std::nullopt,
-                                                       .eco = {},
-                                                       .opening_name = {}}));
+    auto game2_id = manager->insert_game(make_game({.sans = {"e4", "c5", "Nf3"},
+                                                    .result = "0-1",
+                                                    .white_elo = white_elo_mid,
+                                                    .black_elo = std::nullopt,
+                                                    .eco = {},
+                                                    .opening_name = {}}));
     REQUIRE(game2_id.has_value());
 
-    auto rebuilt = manager->rebuild_position_store();
+    auto rebuilt = manager->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
     auto stats_before = motif::search::opening_stats::query(*manager, start_hash);
@@ -630,6 +676,14 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
     auto const delete_res = manager->remove_game(*game1_id);
     REQUIRE(delete_res.has_value());
 
+    // remove_game() marks postings stale immediately: the query fails closed
+    // until an explicit rebuild rather than serving a game count that no
+    // longer matches canonical SQLite.
+    auto stats_immediately_after = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE_FALSE(stats_immediately_after.has_value());
+
+    REQUIRE(manager->rebuild_position_postings().has_value());
+
     auto stats_after = motif::search::opening_stats::query(*manager, start_hash);
     REQUIRE(stats_after.has_value());
     CHECK(stats_after->total_games == 1);
@@ -638,7 +692,7 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
     CHECK(stats_after->continuations.front().frequency == 1);
 }
 
-TEST_CASE("opening_stats::query orphaned rows inflate counts until position store is rebuilt", "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query fails closed for a game removed outside remove_game() until rebuilt", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"orphan_total_games"};
 
@@ -647,38 +701,41 @@ TEST_CASE("opening_stats::query orphaned rows inflate counts until position stor
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
 
-    auto game1_id = manager->store().insert(make_game({.sans = {"e4", "e5", "Nf3"},
-                                                       .result = "1-0",
-                                                       .white_elo = white_elo_high,
-                                                       .black_elo = black_elo_high,
-                                                       .eco = {},
-                                                       .opening_name = {}}));
+    auto game1_id = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3"},
+                                                    .result = "1-0",
+                                                    .white_elo = white_elo_high,
+                                                    .black_elo = black_elo_high,
+                                                    .eco = {},
+                                                    .opening_name = {}}));
     REQUIRE(game1_id.has_value());
 
-    auto game2_id = manager->store().insert(make_game(
+    auto game2_id = manager->insert_game(make_game(
         {.sans = {"e4", "c5"}, .result = "1/2-1/2", .white_elo = white_elo_mid, .black_elo = std::nullopt, .eco = {}, .opening_name = {}}));
     REQUIRE(game2_id.has_value());
 
-    auto rebuilt = manager->rebuild_position_store();
+    auto rebuilt = manager->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
-    // Remove game1 from SQLite only — position rows remain in DuckDB until
-    // delete_by_game_id() is called or the position store is rebuilt.
-    // Counts are based on the DuckDB position store, so they reflect its state.
-    auto removed = manager->store().remove(*game1_id);
+    // Removing game1 directly through the SQLite store -- bypassing
+    // database_manager::remove_game(), which would mark postings stale
+    // immediately -- silently changes the canonical game count under
+    // postings' feet. The next query must detect the count mismatch and
+    // fail closed rather than serving stale, orphaned data.
+    auto removed = manager->remove_game(*game1_id);
     REQUIRE(removed.has_value());
+
+    auto stale_stats = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE_FALSE(stale_stats.has_value());
+
+    REQUIRE(manager->rebuild_position_postings().has_value());
 
     auto stats = motif::search::opening_stats::query(*manager, start_hash);
     REQUIRE(stats.has_value());
-    // Orphaned game1 DuckDB rows still inflate the count until cleanup.
-    CHECK(stats->total_games == 2);
-
+    CHECK(stats->total_games == 1);
     REQUIRE(stats->continuations.size() == 1);
     auto const& cont = stats->continuations.front();
     CHECK(cont.san == "e4");
-    // game2 provides a valid ECO candidate — the e4 continuation is included.
-    // Orphaned game1 inflates the frequency count.
-    CHECK(cont.frequency == 2);
+    CHECK(cont.frequency == 1);
 }
 
 TEST_CASE("opening_stats::query counts terminal positions in total_games", "[motif-search][opening_stats]")
@@ -783,7 +840,7 @@ TEST_CASE("opening_stats::query separates direct frequency from transposition po
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("rebuild_position_store makes total_games consistent with game count", "[motif-db][database_manager]")
+TEST_CASE("rebuild_position_postings makes total_games consistent with game count", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"rebuild_consistency"};
 
@@ -796,16 +853,16 @@ TEST_CASE("rebuild_position_store makes total_games consistent with game count",
     constexpr int base_white_elo {2000};
     constexpr int base_black_elo {1900};
     for (int idx = 0; idx < game_count; ++idx) {
-        auto ins = manager->store().insert(make_game({.sans = {"e4", "e5"},
-                                                      .result = "1-0",
-                                                      .white_elo = base_white_elo + idx,
-                                                      .black_elo = base_black_elo + idx,
-                                                      .eco = {},
-                                                      .opening_name = {}}));
+        auto ins = manager->insert_game(make_game({.sans = {"e4", "e5"},
+                                                   .result = "1-0",
+                                                   .white_elo = base_white_elo + idx,
+                                                   .black_elo = base_black_elo + idx,
+                                                   .eco = {},
+                                                   .opening_name = {}}));
         REQUIRE(ins.has_value());
     }
 
-    auto rebuilt = manager->rebuild_position_store();
+    auto rebuilt = manager->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
     auto stats = motif::search::opening_stats::query(*manager, start_hash);
@@ -816,9 +873,10 @@ TEST_CASE("rebuild_position_store makes total_games consistent with game count",
     REQUIRE(count.has_value());
     CHECK(std::cmp_equal(stats->total_games, *count));
 
-    auto position_count = manager->positions().count_by_zobrist(start_hash);
-    REQUIRE(position_count.has_value());
-    CHECK(std::cmp_equal(stats->total_games, *position_count));
+    auto summary = manager->position_summary(start_hash);
+    REQUIRE(summary.has_value());
+    REQUIRE(summary->has_value());
+    CHECK(std::cmp_equal(stats->total_games, summary->value_or(motif::db::position_postings_summary {}).distinct_game_count));
 }
 
 // ─── Filtered opening stats (3b-2) ───────────────────────────────────────────
@@ -1551,4 +1609,238 @@ TEST_CASE("query_elo_distribution rejects negative bucket_width", "[motif-search
     auto dist = motif::search::opening_stats::query_elo_distribution(*manager, hash_after_sans({"e4", "e5"}), {}, negative_bucket_width);
     REQUIRE_FALSE(dist.has_value());
     CHECK(dist.error() == motif::search::error_code::invalid_argument);
+}
+
+// ─── Unfiltered total_games fast path (postings summary) ────────────────────
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- field-for-field expectation checks require many assertions.
+TEST_CASE("opening_stats::query unfiltered total_games and continuations match hand-computed expectations",
+          "[motif-search][opening_stats][postings]")
+{
+    // Three known games: all three reach "e4 e5"; two continue 2.Nf3 (one to
+    // Nc6, one to d6) and one continues 2.Nc3 Nc6. Expected totals below are
+    // computed by hand from this fixed fixture, independent of any
+    // production aggregation path.
+    tmp_dir const tdir {"postings_fastpath_equivalence"};
+    auto manager = motif::db::database_manager::create(tdir.path, "postings-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5", "Nf3", "Nc6"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::string {"King's Knight Opening"}}),
+                              make_game({.sans = {"e4", "e5", "Nf3", "d6"},
+                                         .result = "1/2-1/2",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = std::nullopt,
+                                         .eco = std::string {"C40"},
+                                         .opening_name = std::string {"King's Knight Opening"}}),
+                              make_game({.sans = {"e4", "e5", "Nc3", "Nc6"},
+                                         .result = "0-1",
+                                         .white_elo = std::nullopt,
+                                         .black_elo = black_elo_other,
+                                         .eco = std::string {"C25"},
+                                         .opening_name = std::string {"Vienna Game"}})});
+    REQUIRE(manager->manifest().position_postings.has_value());
+
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+
+    auto const summary = manager->position_summary(after_e4e5);
+    REQUIRE(summary.has_value());
+    REQUIRE(summary->has_value());
+    CHECK(summary->value_or(motif::db::position_postings_summary {}).distinct_game_count == 3U);
+
+    auto const stats = motif::search::opening_stats::query(*manager, after_e4e5);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 3U);
+    REQUIRE(stats->continuations.size() == 2U);
+
+    auto sorted_continuations = stats->continuations;
+    std::ranges::sort(sorted_continuations, {}, &motif::search::opening_stats::continuation::san);
+    CHECK(sorted_continuations[0].san == "Nc3");
+    CHECK(sorted_continuations[0].frequency == 1U);
+    CHECK(sorted_continuations[0].direct_frequency == 1U);
+    CHECK(sorted_continuations[1].san == "Nf3");
+    CHECK(sorted_continuations[1].frequency == 2U);
+    CHECK(sorted_continuations[1].direct_frequency == 2U);
+
+    auto const stats_start = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats_start.has_value());
+    CHECK(stats_start->total_games == 3U);
+    REQUIRE(stats_start->continuations.size() == 1U);
+    CHECK(stats_start->continuations.front().san == "e4");
+    CHECK(stats_start->continuations.front().frequency == 3U);
+}
+
+TEST_CASE("opening_stats::query with valid postings reports zero total_games for an unindexed hash",
+          "[motif-search][opening_stats][postings]")
+{
+    tmp_dir const tdir {"postings_fastpath_absent"};
+    auto manager = motif::db::database_manager::create(tdir.path, "postings-absent-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "c5", "Nf3"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_sicilian,
+                                         .black_elo = black_elo_sicilian,
+                                         .eco = std::string {"B20"},
+                                         .opening_name = std::string {"Sicilian Defense"}})});
+    REQUIRE(manager->manifest().position_postings.has_value());
+
+    auto const unindexed_hash = hash_after_sans({"c4", "e5", "Nc3"});
+    auto const summary = manager->position_summary(unindexed_hash);
+    REQUIRE(summary.has_value());
+    CHECK_FALSE(summary->has_value());
+
+    auto stats = motif::search::opening_stats::query(*manager, unindexed_hash);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == 0U);
+    CHECK(stats->continuations.empty());
+}
+
+TEST_CASE("opening_stats::query fails closed once postings go stale and recovers after rebuild", "[motif-search][opening_stats][postings]")
+{
+    // A game lands directly in SQLite without a postings rebuild:
+    // position_summary() must report the postings as stale (game-count
+    // mismatch), and the unfiltered query must fail closed rather than
+    // reporting the now-outdated postings total.
+    tmp_dir const tdir {"postings_fastpath_stale"};
+    auto manager = motif::db::database_manager::create(tdir.path, "postings-stale-db");
+    REQUIRE(manager.has_value());
+
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+
+    insert_games_and_rebuild(*manager,
+                             {make_game({.sans = {"e4", "e5"},
+                                         .result = "1-0",
+                                         .white_elo = white_elo_high,
+                                         .black_elo = black_elo_high,
+                                         .eco = {},
+                                         .opening_name = {}})});
+    REQUIRE(manager->manifest().position_postings.has_value());
+
+    auto const stats_before = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats_before.has_value());
+    CHECK(stats_before->total_games == 1U);
+
+    auto const second_game_id = manager->insert_game(make_game(
+        {.sans = {"d4", "d5"}, .result = "0-1", .white_elo = white_elo_mid, .black_elo = black_elo_other, .eco = {}, .opening_name = {}}));
+    REQUIRE(second_game_id.has_value());
+
+    // SQLite now has 2 games but postings still describe 1 (their old
+    // generation): a query trusting the stale postings summary would report
+    // 1; the correct behavior is to fail closed until an explicit rebuild.
+    auto const stale_summary = manager->position_summary(start_hash);
+    REQUIRE(stale_summary.has_value());
+    CHECK_FALSE(stale_summary->has_value());
+
+    auto const stats_stale = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE_FALSE(stats_stale.has_value());
+
+    REQUIRE(manager->rebuild_position_postings().has_value());
+    auto const stats_after_rebuild = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(stats_after_rebuild.has_value());
+    CHECK(stats_after_rebuild->total_games == 2U);
+}
+
+TEST_CASE("a canonical mutation invalidates same-count postings after replacement", "[motif-search][opening_stats][postings]")
+{
+    tmp_dir const tdir {"postings_fastpath_same_count"};
+    auto manager = motif::db::database_manager::create(tdir.path, "postings-same-count-db");
+    REQUIRE(manager.has_value());
+
+    auto const old_hash = hash_after_sans({"e4", "e5"});
+    auto const new_hash = hash_after_sans({"d4", "d5"});
+    auto const old_game = manager->insert_game(make_game({.sans = {"e4", "e5", "Nf3"},
+                                                          .result = "1-0",
+                                                          .white_elo = white_elo_high,
+                                                          .black_elo = black_elo_high,
+                                                          .eco = {},
+                                                          .opening_name = {}}));
+    REQUIRE(old_game.has_value());
+    REQUIRE(manager->rebuild_position_postings().has_value());
+    auto const old_summary = manager->position_summary(old_hash);
+    REQUIRE(old_summary.has_value());
+    REQUIRE(old_summary->has_value());
+
+    // remove_game() marks postings stale (bumping source_generation)
+    // immediately; the replacement game below brings the canonical game
+    // count back to 1 -- the same count the still-published (but now
+    // superseded) postings generation had -- so a same-count check alone
+    // would wrongly consider them valid. The manifest already has no
+    // postings entry at all: has_valid_derived_index()'s
+    // source_generation check on the *next* published generation ensures
+    // this can never be fooled either, once a rebuild does happen.
+    REQUIRE(manager->remove_game(*old_game).has_value());
+    CHECK_FALSE(manager->manifest().position_postings.has_value());
+    REQUIRE(manager
+                ->insert_game(make_game({.sans = {"d4", "d5", "c4"},
+                                         .result = "0-1",
+                                         .white_elo = white_elo_mid,
+                                         .black_elo = black_elo_other,
+                                         .eco = {},
+                                         .opening_name = {}}))
+                .has_value());
+
+    auto const old_stats_before_rebuild = motif::search::opening_stats::query(*manager, old_hash);
+    REQUIRE_FALSE(old_stats_before_rebuild.has_value());
+
+    REQUIRE(manager->rebuild_position_postings().has_value());
+
+    auto const old_stats = motif::search::opening_stats::query(*manager, old_hash);
+    auto const new_stats = motif::search::opening_stats::query(*manager, new_hash);
+    REQUIRE(old_stats.has_value());
+    REQUIRE(new_stats.has_value());
+    CHECK(old_stats->total_games == 0U);
+    CHECK(new_stats->total_games == 1U);
+    REQUIRE(new_stats->continuations.size() == 1U);
+    CHECK(new_stats->continuations.front().san == "c4");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- scaled fixture setup uses repeated checked inserts.
+TEST_CASE("opening_stats::query unfiltered total_games scales with occurrence count via summary, not decode",
+          "[motif-search][opening_stats][postings]")
+{
+    // Many distinct games share one root position and one continuation. This
+    // verifies the summary count at a useful scale; the 1M benchmark guards
+    // the no-payload-decode performance property.
+    tmp_dir const tdir {"postings_fastpath_scale"};
+    auto manager = motif::db::database_manager::create(tdir.path, "postings-scale-db");
+    REQUIRE(manager.has_value());
+
+    constexpr int game_count {500};
+    std::vector<motif::db::game> games;
+    games.reserve(game_count);
+    for (int index = 0; index < game_count; ++index) {
+        auto game = make_game({.sans = {"e4", "e5", "Nf3"},
+                               .result = "1-0",
+                               .white_elo = white_elo_high,
+                               .black_elo = black_elo_high,
+                               .eco = {},
+                               .opening_name = {}});
+        game.extra_tags.emplace_back("Round", std::to_string(index + 1));
+        games.push_back(std::move(game));
+    }
+    for (auto const& game : games) {
+        REQUIRE(manager->insert_game(game).has_value());
+    }
+    REQUIRE(manager->rebuild_position_postings().has_value());
+    REQUIRE(manager->manifest().position_postings.has_value());
+
+    auto const after_e4e5 = hash_after_sans({"e4", "e5"});
+    auto const summary = manager->position_summary(after_e4e5);
+    REQUIRE(summary.has_value());
+    REQUIRE(summary->has_value());
+    CHECK(summary->value_or(motif::db::position_postings_summary {}).distinct_game_count == static_cast<std::uint32_t>(game_count));
+
+    auto stats = motif::search::opening_stats::query(*manager, after_e4e5);
+    REQUIRE(stats.has_value());
+    CHECK(stats->total_games == static_cast<std::uint32_t>(game_count));
+    REQUIRE(stats->continuations.size() == 1);
+    CHECK(stats->continuations.front().frequency == game_count);
 }

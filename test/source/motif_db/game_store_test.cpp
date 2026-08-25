@@ -466,6 +466,64 @@ TEST_CASE("game_store: same player name is reused across games", "[motif_db][gam
     CHECK(fix.count_rows("player") == expected_player_rows);
 }
 
+TEST_CASE("game_store: elo-only patch does not mutate a player row shared by another game", "[motif_db][game_store]")
+{
+    db_fixture fix;
+
+    constexpr std::int32_t shared_white_elo = 2400;
+    constexpr std::int32_t patched_white_elo = 2500;
+
+    auto game1 = motif::db::game {
+        .white = {.name = "Shared Player", .elo = shared_white_elo, .title = std::nullopt, .country = std::nullopt},
+        .black = make_player("Opponent One"),
+        .event_details = std::nullopt,
+        .date = std::nullopt,
+        .result = "1-0",
+        .eco = std::nullopt,
+        .moves = {move_a},
+        .extra_tags = {},
+        .provenance = {},
+    };
+    auto game2 = motif::db::game {
+        .white = {.name = "Shared Player", .elo = shared_white_elo, .title = std::nullopt, .country = std::nullopt},
+        .black = make_player("Opponent Two"),
+        .event_details = std::nullopt,
+        .date = std::nullopt,
+        .result = "0-1",
+        .eco = std::nullopt,
+        .moves = {move_b},
+        .extra_tags = {},
+        .provenance = {},
+    };
+
+    auto const game1_id = fix.store.insert(game1);
+    REQUIRE(game1_id.has_value());
+    auto const game2_id = fix.store.insert(game2);
+    REQUIRE(game2_id.has_value());
+
+    // Both games resolve "Shared Player" to the same player row.
+    constexpr int expected_player_rows = 3;  // Shared Player, Opponent One, Opponent Two
+    CHECK(fix.count_rows("player") == expected_player_rows);
+
+    REQUIRE(fix.store.set_manual_provenance(*game1_id, {}, "new").has_value());
+
+    auto patch = motif::db::game_patch {};
+    patch.white_elo = patched_white_elo;
+    REQUIRE(fix.store.patch_metadata(*game1_id, patch).has_value());
+
+    // Game 1 is the patch target and must show the new elo.
+    auto game1_after = fix.store.get(*game1_id);
+    REQUIRE(game1_after.has_value());
+    CHECK(game1_after->white.elo == std::optional<std::int32_t> {patched_white_elo});
+
+    // Game 2 was never patched and must retain the original shared elo,
+    // even though it resolves to the same player row that game 1's patch
+    // touched.
+    auto game2_after = fix.store.get(*game2_id);
+    REQUIRE(game2_after.has_value());
+    CHECK(game2_after->white.elo == std::optional<std::int32_t> {shared_white_elo});
+}
+
 // ── AC #1: Event deduplication ───────────────────────────────────────────────
 
 TEST_CASE("game_store: same event name is reused across games", "[motif_db][game_store]")
