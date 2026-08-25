@@ -6,6 +6,7 @@ find_package(tl-expected REQUIRED)
 add_library(motif_slint_app_service STATIC
     import_service.cpp
     workspace_service.cpp
+    game_browser_presenter.cpp
 )
 target_link_libraries(motif_slint_app_service PUBLIC
     motif_db

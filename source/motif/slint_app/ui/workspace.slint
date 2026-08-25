@@ -1,3 +1,4 @@
+import { GameBrowser, GameRow } from "game_browser.slint";
 import { Button, LineEdit } from "std-widgets.slint";
 
 export struct RecentEntry {
@@ -9,6 +10,7 @@ export component WorkspaceWindow inherits Window {
     in property <bool> has-database: false;
     in property <bool> is-scratch: false;
     in property <bool> busy: false;
+    in property <bool> browser-busy: false;
     in property <string> display-name;
     in property <string> active-path;
     in-out property <string> error-text;
@@ -25,8 +27,17 @@ export component WorkspaceWindow inherits Window {
     in property <int> import-total: 0;
     in property <int> import-committed: 0;
     in property <int> import-skipped: 0;
-
     in property <int> import-errors: 0;
+    in property <[GameRow]> game-rows;
+    in property <int> game-total-count;
+    in property <int> game-page-index;
+    in property <bool> game-has-previous-page;
+    in property <bool> game-has-next-page;
+    in-out property <int> game-selected-row: -1;
+    in-out property <string> game-player-filter;
+    in-out property <string> game-result-filter;
+    in property <string> game-active-title;
+    in property <[int]> game-column-widths;
 
     callback create-requested(string, string);
     callback open-requested(string);
@@ -36,18 +47,24 @@ export component WorkspaceWindow inherits Window {
     callback recent-activated(string);
     callback import-requested(string);
     callback cancel-import-requested();
+    callback game-filters-changed(string, string);
+    callback game-page-requested(int);
+    callback game-selected(int);
+    callback game-move-selection(int);
+    callback game-activate-requested();
+    callback game-sort-requested(int, bool);
+    callback game-column-resized(int, int);
 
     title: "Motif Chess";
-    preferred-width: 900px;
-    preferred-height: 600px;
-    min-width: 640px;
-    min-height: 420px;
+    preferred-width: 1100px;
+    preferred-height: 700px;
+    min-width: 720px;
+    min-height: 480px;
     background: #11151d;
 
     VerticalLayout {
-        padding: 24px;
-        spacing: 18px;
-        alignment: start;
+        padding: 14px;
+        spacing: 12px;
 
         if !root.has-database: VerticalLayout {
             spacing: 14px;
@@ -149,53 +166,95 @@ export component WorkspaceWindow inherits Window {
             }
         }
 
-        if root.has-database: Rectangle {
-            border-radius: 5px;
-            border-width: 1px;
-            border-color: #313949;
-            background: #171c26;
-            VerticalLayout {
-                padding: 18px;
-                spacing: 10px;
-                Text {
-                    text: root.is-scratch ? "Scratch database (temporary)" : "Database: " + root.display-name;
-                    font-size: 20px;
-                    color: #f1f4f8;
-                }
-                if !root.is-scratch: Text { text: root.active-path; color: #91a4c4; font-size: 12px; }
-                if !root.import-active: HorizontalLayout {
-                    spacing: 8px;
-                    LineEdit {
+        if root.has-database: VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 8px;
+            Rectangle {
+                height: 62px;
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: #313949;
+                background: #171c26;
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+                    VerticalLayout {
                         horizontal-stretch: 1;
-                        placeholder-text: "PGN file path";
-                        text <=> root.import-path-text;
-                        enabled: !root.busy;
+                        Text {
+                            text: root.is-scratch ? "Scratch database (temporary)" : "Database: " + root.display-name;
+                            font-size: 18px;
+                            color: #f1f4f8;
+                        }
+                        if !root.is-scratch: Text { text: root.active-path; color: #91a4c4; font-size: 11px; }
                     }
                     Button {
-                        text: "Import PGN";
-                        enabled: !root.busy && root.import-path-text != "";
-                        clicked => { root.import-requested(root.import-path-text); }
+                        text: "Close Database";
+                        enabled: !root.busy && !root.browser-busy && !root.import-active;
+                        clicked => { root.close-requested(); }
                     }
                 }
-                if root.import-status-visible: VerticalLayout {
+            }
+            GameBrowser {
+                vertical-stretch: 1;
+                games: root.game-rows;
+                total-count: root.game-total-count;
+                page-index: root.game-page-index;
+                has-previous-page: root.game-has-previous-page;
+                has-next-page: root.game-has-next-page;
+                busy: root.browser-busy;
+                active-game-title: root.game-active-title;
+                selected-row <=> root.game-selected-row;
+                player-filter <=> root.game-player-filter;
+                result-filter <=> root.game-result-filter;
+                column-widths: root.game-column-widths;
+                filters-changed(player, result) => { root.game-filters-changed(player, result); }
+                page-requested(page) => { root.game-page-requested(page); }
+                select-row(row) => { root.game-selected(row); }
+                move-selection(delta) => { root.game-move-selection(delta); }
+                activate-selected() => { root.game-activate-requested(); }
+                sort-requested(column, ascending) => { root.game-sort-requested(column, ascending); }
+                column-resized(column, width) => { root.game-column-resized(column, width); }
+            }
+            Rectangle {
+                height: root.import-status-visible ? 86px : 48px;
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: #313949;
+                background: #171c26;
+                VerticalLayout {
+                    padding: 8px;
                     spacing: 6px;
-                    Text { text: root.import-state-text + " · " + root.import-phase-text; color: #d4bc78; }
-                    Text {
-                        text: root.import-processed + " / " + root.import-total
-                            + " processed · " + root.import-committed + " committed · "
-                            + root.import-skipped + " skipped · " + root.import-errors + " errors";
-                        color: #91a4c4;
+                    if !root.import-active: HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            placeholder-text: "PGN file path";
+                            text <=> root.import-path-text;
+                            enabled: !root.busy && !root.browser-busy;
+                        }
+                        Button {
+                            text: "Import PGN";
+                            enabled: !root.busy && !root.browser-busy && root.import-path-text != "";
+                            clicked => { root.import-requested(root.import-path-text); }
+                        }
                     }
-                    if root.import-active: Button {
-                        text: "Cancel Import";
-                        enabled: root.import-state-text != "Canceling";
-                        clicked => { root.cancel-import-requested(); }
+                    if root.import-status-visible: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.import-state-text + " · " + root.import-phase-text + " · "
+                                + root.import-processed + " / " + root.import-total + " processed · "
+                                + root.import-committed + " committed · " + root.import-skipped + " skipped · "
+                                + root.import-errors + " errors";
+                            color: #91a4c4;
+                            vertical-alignment: center;
+                        }
+                        if root.import-active: Button {
+                            text: "Cancel Import";
+                            enabled: root.import-state-text != "Canceling";
+                            clicked => { root.cancel-import-requested(); }
+                        }
                     }
-                }
-                Button {
-                    text: "Close Database";
-                    enabled: !root.busy && !root.import-active;
-                    clicked => { root.close-requested(); }
                 }
             }
         }
