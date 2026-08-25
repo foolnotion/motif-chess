@@ -129,6 +129,8 @@ void clear_browser(WorkspaceWindow& window)
     window.set_game_has_previous_page(false);
     window.set_game_has_next_page(false);
     window.set_game_selected_row(-1);
+    window.set_game_player_filter("");
+    window.set_game_result_filter("");
     window.set_game_active_title("");
     window.set_game_column_widths(std::make_shared<slint::VectorModel<std::int32_t>>());
     window.set_browser_busy(false);
@@ -156,6 +158,8 @@ void publish_browser(WorkspaceWindow& window, motif::slint_app::game_browser_sta
     window.set_game_selected_row(state.selected_row ? to_ui_count(*state.selected_row) : -1);
     window.set_game_player_filter(shared_string(state.player_filter));
     window.set_game_result_filter(shared_string(state.result_filter));
+    window.set_game_sort_column(static_cast<std::int32_t>(state.sort_column));
+    window.set_game_sort_ascending(state.sort_ascending);
     window.set_error_text(shared_string(state.error_text));
     auto column_widths = std::vector<std::int32_t> {state.column_widths.begin(), state.column_widths.end()};
     window.set_game_column_widths(std::make_shared<slint::VectorModel<std::int32_t>>(std::move(column_widths)));
@@ -599,7 +603,7 @@ void register_workspace_callbacks(WorkspaceWindow& window,
     window.on_create_requested(
         [&](slint::SharedString const& dir_path, slint::SharedString const& name) -> void
         {
-            if (importer.active()) {
+            if (importer.active() || browser.is_busy()) {
                 return;
             }
             window.set_error_text("");
@@ -610,7 +614,7 @@ void register_workspace_callbacks(WorkspaceWindow& window,
     window.on_open_requested(
         [&](slint::SharedString const& dir_path) -> void
         {
-            if (importer.active()) {
+            if (importer.active() || browser.is_busy()) {
                 return;
             }
             window.set_error_text("");
@@ -621,7 +625,7 @@ void register_workspace_callbacks(WorkspaceWindow& window,
     window.on_recent_activated(
         [&](slint::SharedString const& path) -> void
         {
-            if (importer.active()) {
+            if (importer.active() || browser.is_busy()) {
                 return;
             }
             window.set_error_text("");
@@ -659,39 +663,63 @@ void register_workspace_callbacks(WorkspaceWindow& window,
         });
 }
 
-void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& browser)
+void register_browser_callbacks(WorkspaceWindow& window, async_browser_runner& browser, motif::slint_app::import_service const& importer)
 {
-    window.on_game_filters_changed([&](slint::SharedString const& player, slint::SharedString const& result) -> void
-                                   { browser.set_filters(std::string {player}, std::string {result}); });
+    window.on_game_filters_changed(
+        [&](slint::SharedString const& player, slint::SharedString const& result) -> void
+        {
+            if (importer.active()) {
+                return;
+            }
+            browser.set_filters(std::string {player}, std::string {result});
+        });
     window.on_game_page_requested(
         [&](std::int32_t page) -> void
         {
-            if (page >= 0) {
-                browser.set_page(static_cast<std::size_t>(page));
+            if (importer.active() || page < 0) {
+                return;
             }
+            browser.set_page(static_cast<std::size_t>(page));
         });
     window.on_game_selected(
         [&](std::int32_t row) -> void
         {
-            if (row >= 0) {
-                browser.select(static_cast<std::size_t>(row));
+            if (importer.active() || row < 0) {
+                return;
             }
+            browser.select(static_cast<std::size_t>(row));
         });
-    window.on_game_move_selection([&](std::int32_t delta) -> void { browser.move_selection(delta); });
-    window.on_game_activate_requested([&]() -> void { browser.activate(); });
+    window.on_game_move_selection(
+        [&](std::int32_t delta) -> void
+        {
+            if (importer.active()) {
+                return;
+            }
+            browser.move_selection(delta);
+        });
+    window.on_game_activate_requested(
+        [&]() -> void
+        {
+            if (importer.active()) {
+                return;
+            }
+            browser.activate();
+        });
     window.on_game_sort_requested(
         [&](std::int32_t column, bool ascending) -> void
         {
-            if (column >= 0) {
-                browser.sort(static_cast<std::size_t>(column), ascending);
+            if (importer.active() || column < 0) {
+                return;
             }
+            browser.sort(static_cast<std::size_t>(column), ascending);
         });
     window.on_game_column_resized(
         [&](std::int32_t column, std::int32_t width) -> void
         {
-            if (column >= 0) {
-                browser.resize_column(static_cast<std::size_t>(column), width);
+            if (importer.active() || column < 0) {
+                return;
             }
+            browser.resize_column(static_cast<std::size_t>(column), width);
         });
 }
 
@@ -742,7 +770,7 @@ auto main() -> int
     publish_workspace(*window, service);
     clear_browser(*window);
     register_workspace_callbacks(*window, service, importer, runner, browser);
-    register_browser_callbacks(*window, browser);
+    register_browser_callbacks(*window, browser, importer);
     register_import_callbacks(*window, service, importer, runner, browser, import_timer);
 
     window->run();

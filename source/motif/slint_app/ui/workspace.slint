@@ -38,6 +38,8 @@ export component WorkspaceWindow inherits Window {
     in-out property <string> game-result-filter;
     in property <string> game-active-title;
     in property <[int]> game-column-widths;
+    in property <int> game-sort-column: 0;
+    in property <bool> game-sort-ascending: true;
 
     callback create-requested(string, string);
     callback open-requested(string);
@@ -206,6 +208,8 @@ export component WorkspaceWindow inherits Window {
                 selected-row <=> root.game-selected-row;
                 player-filter <=> root.game-player-filter;
                 result-filter <=> root.game-result-filter;
+                sort-column: root.game-sort-column;
+                sort-ascending: root.game-sort-ascending;
                 column-widths: root.game-column-widths;
                 filters-changed(player, result) => { root.game-filters-changed(player, result); }
                 page-requested(page) => { root.game-page-requested(page); }
