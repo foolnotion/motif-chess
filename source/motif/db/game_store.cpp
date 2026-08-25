@@ -311,10 +311,7 @@ auto read_game_list_entry(sqlite3_stmt* stmt) -> game_list_entry
 }
 
 // Shared SELECT column list, join/filter predicate, and LIMIT/OFFSET tail for
-// find_games and find_games_with_ids. `extra_from_join` supplies any join
-// clause the caller needs between `FROM game g` and the player/event joins
-// (e.g. find_games_with_ids' `_position_game_ids` restriction); pass "" when
-// none is needed.
+// find_games and find_games_with_ids.
 // language=sql
 constexpr auto game_list_select_sql = R"sql(
     SELECT
@@ -333,8 +330,12 @@ constexpr auto game_list_select_sql = R"sql(
     FROM game g
 )sql";
 
+// `extra_from_join` supplies any join clause the caller needs between
+// `FROM game g` and the player/event joins below (e.g. find_games_with_ids'
+// `_position_game_ids` restriction); pass "" when none is needed. The actual
+// `ORDER BY` clause is appended separately via `game_order_clause(filter)`.
 // language=sql
-constexpr auto game_list_filter_and_order_sql = R"sql(
+constexpr auto game_list_where_sql = R"sql(
     JOIN player w ON w.id = g.white_id
     JOIN player b ON b.id = g.black_id
     LEFT JOIN event e ON e.id = g.event_id
@@ -357,10 +358,12 @@ constexpr auto game_list_limit_offset_sql = R"sql(
     LIMIT ? OFFSET ?
 )sql";
 
-auto fetch_game_list_page(sqlite3* conn, std::string_view extra_from_join, search_filter const& filter, std::size_t const effective_limit)
-    -> result<std::vector<game_list_entry>>
+[[nodiscard]] auto fetch_game_list_page(sqlite3* conn,
+                                        std::string_view extra_from_join,
+                                        search_filter const& filter,
+                                        std::size_t const effective_limit) -> result<std::vector<game_list_entry>>
 {
-    auto const data_sql = std::string {game_list_select_sql} + std::string {extra_from_join} + std::string {game_list_filter_and_order_sql}
+    auto const data_sql = std::string {game_list_select_sql} + std::string {extra_from_join} + std::string {game_list_where_sql}
         + game_order_clause(filter) + std::string {game_list_limit_offset_sql};
 
     auto data_stmt = prepare(conn, data_sql.c_str());
@@ -379,7 +382,7 @@ auto fetch_game_list_page(sqlite3* conn, std::string_view extra_from_join, searc
     auto entries = std::vector<game_list_entry> {};
     entries.reserve(std::min(effective_limit + 1, max_game_list_reserve));
 
-    int step_rc = SQLITE_ROW;
+    int step_rc {};
     while ((step_rc = sqlite3_step(data_stmt->get())) == SQLITE_ROW) {
         entries.push_back(read_game_list_entry(data_stmt->get()));
     }
