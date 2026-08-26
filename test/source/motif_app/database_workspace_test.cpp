@@ -153,6 +153,7 @@ TEST_CASE("database_workspace: recent_with_status marks unavailable paths", "[mo
 TEST_CASE("database_workspace: recent_with_status accepts postings bundles without legacy DuckDB", "[motif-app]")
 {
     tmp_dir const tmp {"recent-postings"};
+    REQUIRE(std::filesystem::create_directories(tmp.path));
     auto games_file = std::ofstream {tmp.path / "games.db"};
     auto manifest_file = std::ofstream {tmp.path / "manifest.json"};
     REQUIRE(games_file.good());
