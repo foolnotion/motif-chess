@@ -355,3 +355,39 @@ TEST_CASE("game_browser_presenter: move_selection starts fresh when the selectio
     CHECK(presenter.state().selected_game_id == presenter.state().games.at(1).id);
     CHECK(presenter.state().selected_game_id != selected_id);
 }
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertions expand to control flow.
+TEST_CASE("game_browser_presenter: external activation loads by id independent of row selection", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    auto const selected_id = database->insert_game(make_game("Selected White", "Selected Black"));
+    auto const external_id = database->insert_game(make_game("External White", "External Black"));
+    REQUIRE(selected_id.has_value());
+    REQUIRE(external_id.has_value());
+    auto presenter = motif::slint_app::game_browser_presenter {*database};
+
+    auto const initial = presenter.prepare_initial_load();
+    REQUIRE(initial.has_value());
+    auto page = presenter.execute_query(*initial);
+    REQUIRE(page.has_value());
+    REQUIRE(presenter.apply_query(std::move(*page)).value_or(false));
+    REQUIRE(presenter.select_game(0).has_value());
+
+    auto request = presenter.prepare_external_activation(*external_id);
+    REQUIRE(request.has_value());
+    auto loaded = presenter.execute_activation(*request);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->game_id == *external_id);
+    auto applied = presenter.apply_external_activation(std::move(*loaded));
+    REQUIRE(applied.has_value());
+    REQUIRE(*applied);
+
+    CHECK(presenter.state().active_game_id == *external_id);
+    CHECK(presenter.state().selected_game_id == *external_id);
+    if (auto const selected_row = presenter.state().selected_row) {
+        CHECK(presenter.state().games[*selected_row].id == *external_id);
+    } else {
+        FAIL("external activation must select its game row");
+    }
+}

@@ -120,9 +120,11 @@ endif()
 
 if(motif_ENABLE_SLINT_APP)
     add_executable(motif_slint_app_service_test
+        source/motif_slint_app/board_presenter_test.cpp
         source/motif_slint_app/import_service_test.cpp
         source/motif_slint_app/workspace_service_test.cpp
         source/motif_slint_app/game_browser_presenter_test.cpp
+        source/motif_slint_app/search_presenter_test.cpp
     )
     target_link_libraries(motif_slint_app_service_test PRIVATE
         motif_slint_app_service
@@ -130,7 +132,7 @@ if(motif_ENABLE_SLINT_APP)
     )
     target_compile_features(motif_slint_app_service_test PRIVATE cxx_std_23)
     target_include_directories(motif_slint_app_service_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
-    catch_discover_tests(motif_slint_app_service_test)
+    catch_discover_tests(motif_slint_app_service_test PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 # ---- End-of-file commands ----

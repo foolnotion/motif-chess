@@ -10,13 +10,13 @@ qt_standard_project_setup(REQUIRES 6.5)
 add_library(motif_app_lib STATIC
     app_config.cpp
     database_workspace.cpp
-    game_navigator.cpp
     pgn_launch_queue.cpp
 )
 
 target_link_libraries(motif_app_lib PUBLIC
     motif_chess
     motif_db
+    motif_game_navigator
     motif_import
     fmt::fmt
     glaze::glaze

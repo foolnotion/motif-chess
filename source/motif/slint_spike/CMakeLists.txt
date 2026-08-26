@@ -1,16 +1,12 @@
 find_package(tl-expected REQUIRED)
 
-# game_navigator.cpp is recompiled here rather than linked from motif_app_lib
-# because that library's CMakeLists.txt unconditionally calls
-# find_package(Qt6 ...)/find_package(KDDockWidgets-qt6 ...) at file scope.
-# Linking it would force Qt discovery onto this Qt-free Slint target.
 add_library(motif_slint_spike_presenter STATIC
     game_browser_presenter.cpp
-    ../app/game_navigator.cpp
 )
 target_link_libraries(motif_slint_spike_presenter PUBLIC
     motif_chess
     motif_db
+    motif_game_navigator
     tl::expected
 )
 target_include_directories(motif_slint_spike_presenter PUBLIC

@@ -1083,14 +1083,15 @@ auto game_store::find_games_with_ids(std::vector<game_id> const& game_ids, searc
         return tl::unexpected {error {error_code::io_failure, "limit or offset exceeds sqlite3_int64 max"}};
     }
 
-    if (auto res = populate_position_temp_table(db_, game_ids); !res) {
-        return tl::unexpected {res.error()};
-    }
-
-    // Wrap COUNT + SELECT in a single read transaction for consistency.
+    // Rebuild the temporary ID set and read its page atomically. Keeping the
+    // batched inserts in this transaction avoids one SQLite commit per batch
+    // for high-frequency positions before the read-only COUNT and page query.
     txn_guard txn {db_};
     if (!txn.began()) {
         return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+    }
+    if (auto res = populate_position_temp_table(db_, game_ids); !res) {
+        return tl::unexpected {res.error()};
     }
 
     // language=sql

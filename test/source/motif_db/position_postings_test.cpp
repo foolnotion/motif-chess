@@ -291,6 +291,28 @@ TEST_CASE("database_manager uses persisted position postings for exact position 
     CHECK((*matches)[2].ply == 1U);
     CHECK_FALSE((*matches)[2].white_elo.has_value());
     CHECK((*matches)[2].black_elo == std::optional<std::int16_t> {2400});
+    auto const requested_game_ids = std::array<motif::db::game_id, 2> {motif::db::game_id {1U}, motif::db::game_id {2U}};
+    auto const first_matches = manager->query_position_first_matches(target_hash, requested_game_ids);
+    REQUIRE(first_matches.has_value());
+    REQUIRE(first_matches->size() == requested_game_ids.size());
+    CHECK((*first_matches)[0].game_id == motif::db::game_id {1U});
+    CHECK((*first_matches)[0].ply == 1U);
+    CHECK((*first_matches)[1].game_id == motif::db::game_id {2U});
+    CHECK((*first_matches)[1].ply == 1U);
+
+    auto const no_requested_game_ids = std::array<motif::db::game_id, 0> {};
+    auto const no_first_matches = manager->query_position_first_matches(target_hash, no_requested_game_ids);
+    REQUIRE(no_first_matches.has_value());
+    CHECK(no_first_matches->empty());
+    {
+        auto const generation_lock = manager->lock_generation();
+        REQUIRE(manager->writer().begin_transaction().has_value());
+        REQUIRE(manager->writer().insert(make_game({"d4"}, "White Three", "Black Three")).has_value());
+        REQUIRE(manager->writer().commit_transaction().has_value());
+    }
+    auto const mismatched_first_matches = manager->query_position_first_matches(target_hash, requested_game_ids);
+    CHECK_FALSE(mismatched_first_matches.has_value());
+    REQUIRE(manager->rebuild_position_postings().has_value());
 
     REQUIRE(manager->set_manual_game_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
     auto patch = motif::db::game_patch {};
@@ -304,6 +326,8 @@ TEST_CASE("database_manager uses persisted position postings for exact position 
     CHECK(patched_game->white.elo == std::optional<std::int32_t> {patched_white_elo});
     auto const stale_matches = manager->query_position_matches(target_hash);
     REQUIRE_FALSE(stale_matches.has_value());
+    auto const stale_first_matches = manager->query_position_first_matches(target_hash, requested_game_ids);
+    CHECK_FALSE(stale_first_matches.has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
     auto const patched_matches = manager->query_position_matches(target_hash);
     REQUIRE(patched_matches.has_value());
@@ -614,6 +638,55 @@ TEST_CASE("position_postings occurrences pagination boundaries", "[motif-db][pos
     auto const max_offset = reopened.occurrences(hash, 0U, std::numeric_limits<std::size_t>::max());
     REQUIRE(max_offset.has_value());
     CHECK(max_offset->empty());
+}
+
+TEST_CASE("position_postings first_occurrences returns only requested games at their earliest ply", "[motif-db][position_postings]")
+{
+    temporary_file const file;
+    constexpr auto target_hash = std::uint64_t {0xabcd};
+    auto postings = motif::db::position_postings {file.path()};
+    auto const rows = std::vector<motif::db::position_row> {
+        row(target_hash, 1U, 1U),
+        row(target_hash, 1U, 5U),
+        row(target_hash, 2U, 3U),
+        row(target_hash, 3U, 2U),
+    };
+    REQUIRE(postings.append(rows).has_value());
+    REQUIRE(postings.finalize().has_value());
+
+    auto reopened = motif::db::position_postings {file.path()};
+    REQUIRE(reopened.open().has_value());
+    auto const requested = std::vector<motif::db::game_id> {motif::db::game_id {3U}, motif::db::game_id {1U}};
+    auto const matches = reopened.first_occurrences(motif::db::zobrist_hash {target_hash}, requested);
+
+    REQUIRE(matches.has_value());
+    REQUIRE(matches->size() == 2U);
+    CHECK((*matches)[0].game_id == motif::db::game_id {1U});
+    CHECK((*matches)[0].ply == 1U);
+    CHECK((*matches)[1].game_id == motif::db::game_id {3U});
+    CHECK((*matches)[1].ply == 2U);
+}
+
+TEST_CASE("position_postings first_occurrences handles empty and missing requested IDs", "[motif-db][position_postings]")
+{
+    temporary_file const file;
+    constexpr auto target_hash = std::uint64_t {0xabcd};
+    auto postings = motif::db::position_postings {file.path()};
+    auto const rows = std::vector<motif::db::position_row> {row(target_hash, 1U, 2U)};
+    REQUIRE(postings.append(rows).has_value());
+    REQUIRE(postings.finalize().has_value());
+
+    auto reopened = motif::db::position_postings {file.path()};
+    REQUIRE(reopened.open().has_value());
+    CHECK(
+        reopened.first_occurrences(motif::db::zobrist_hash {target_hash}, {}).value_or(std::vector<motif::db::position_match> {}).empty());
+
+    auto const requested = std::vector<motif::db::game_id> {motif::db::game_id {1U}, motif::db::game_id {99U}, motif::db::game_id {99U}};
+    auto const matches = reopened.first_occurrences(motif::db::zobrist_hash {target_hash}, requested);
+    REQUIRE(matches.has_value());
+    REQUIRE(matches->size() == 1U);
+    CHECK(matches->front().game_id == motif::db::game_id {1U});
+    CHECK(matches->front().ply == 2U);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- checks the streamed order plus each summary field per hash.
