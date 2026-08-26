@@ -123,6 +123,12 @@ class game_browser_presenter
     [[nodiscard]] auto execute_activation(activation_request const& request) const -> browser_result<loaded_game>;
     auto apply_activation(loaded_game game) -> browser_result<bool>;
     auto apply_activation_error(std::uint64_t generation, browser_error activation_error) -> browser_result<bool>;
+    // Activation entry point for callers outside the browser's own row
+    // selection (e.g. a search-result row): reuses the identical
+    // generation-guarded, single-read activation pipeline as row
+    // activation, but does not require or depend on browser row selection.
+    auto prepare_external_activation(motif::db::game_id game_id) -> browser_result<activation_request>;
+    auto apply_external_activation(loaded_game game) -> browser_result<bool>;
     auto resize_column(std::size_t column, std::int32_t width) -> browser_result<void>;
 
     void dismiss_error() noexcept;

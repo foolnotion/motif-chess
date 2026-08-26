@@ -91,6 +91,10 @@ class database_manager
     // closed with error_code::io_failure when postings are stale or absent.
     auto query_position_matches(zobrist_hash hash, std::size_t limit = 0, std::size_t offset = 0) const
         -> result<std::vector<position_match>>;
+    // First (lowest-ply) occurrence for only the requested game IDs. This
+    // avoids materializing a position's complete occurrence set when joining
+    // one metadata page to its matched plies.
+    auto query_position_first_matches(zobrist_hash hash, std::span<game_id const> game_ids) const -> result<std::vector<position_match>>;
 
     // One ascending game ID per game reaching hash. Fails closed when
     // postings are stale or absent.

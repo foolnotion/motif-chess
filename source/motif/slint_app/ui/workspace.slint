@@ -1,4 +1,6 @@
 import { GameBrowser, GameRow } from "game_browser.slint";
+import { GameReviewPanel, SquareHighlight } from "board_notation.slint";
+import { ContinuationRow, PositionSearchPanel, SearchMatchRow } from "position_search.slint";
 import { Button, LineEdit } from "std-widgets.slint";
 
 export struct RecentEntry {
@@ -14,6 +16,9 @@ export component WorkspaceWindow inherits Window {
     in property <string> display-name;
     in property <string> active-path;
     in-out property <string> error-text;
+    in property <string> browser-error-text: "";
+    in property <string> board-error-text: "";
+    in property <string> search-error-text: "";
     in property <[RecentEntry]> recent-databases;
     in-out property <string> create-path-text;
     in-out property <string> create-name-text;
@@ -40,6 +45,30 @@ export component WorkspaceWindow inherits Window {
     in property <[int]> game-column-widths;
     in property <int> game-sort-column: 0;
     in property <bool> game-sort-ascending: true;
+    in property <bool> board-loaded;
+    in property <[string]> board-square-pieces;
+    in property <[SquareHighlight]> board-square-highlights;
+    in property <bool> board-flipped;
+    in property <string> board-white-name;
+    in property <string> board-black-name;
+    in property <string> board-event-name;
+    in property <string> board-date;
+    in property <string> board-result;
+    in property <[string]> board-san-moves;
+    in property <int> board-current-ply;
+    in property <bool> board-panel-visible: true;
+    in property <bool> search-panel-visible: true;
+    in property <[SearchMatchRow]> search-matches;
+    in property <int> search-total-matches;
+    in property <int> search-page-index;
+    in property <bool> search-has-previous-page;
+    in property <bool> search-has-next-page;
+    in property <[ContinuationRow]> search-continuations;
+    in property <int> search-total-games;
+    in property <string> search-active-filter-summary;
+    in property <bool> search-searching: false;
+    in property <bool> search-auto-search: true;
+    in property <bool> search-busy: false;
 
     callback create-requested(string, string);
     callback open-requested(string);
@@ -56,12 +85,32 @@ export component WorkspaceWindow inherits Window {
     callback game-activate-requested();
     callback game-sort-requested(int, bool);
     callback game-column-resized(int, int);
+    callback board-square-activated(int, int);
+    callback board-ply-activated(int);
+    callback board-navigate-first();
+    callback board-navigate-previous();
+    callback board-navigate-next();
+    callback board-navigate-last();
+    callback board-orientation-toggled();
+    callback board-panel-visibility-toggled();
+    callback search-requested();
+    callback search-auto-search-toggled(bool);
+    callback search-match-activated(int);
+    callback search-page-requested(int);
+    callback search-panel-visibility-toggled();
+    property <bool> board-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy;
+    property <bool> search-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy;
+    // Direct workspace/import errors retain precedence; panel-specific
+    // cleared state cannot erase an error owned by another source.
+    property <string> merged-error-text: root.error-text != "" ? root.error-text
+        : (root.search-error-text != "" ? root.search-error-text
+        : (root.board-error-text != "" ? root.board-error-text
+        : root.browser-error-text));
 
-    title: "Motif Chess";
-    preferred-width: 1100px;
-    preferred-height: 700px;
-    min-width: 720px;
-    min-height: 480px;
+    min-width: 1180px;
+    preferred-width: 1440px;
+    preferred-height: 760px;
+    min-height: 520px;
     background: #11151d;
 
     VerticalLayout {
@@ -168,9 +217,12 @@ export component WorkspaceWindow inherits Window {
             }
         }
 
-        if root.has-database: VerticalLayout {
+        if root.has-database: HorizontalLayout {
             vertical-stretch: 1;
             spacing: 8px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 8px;
             Rectangle {
                 height: 62px;
                 border-radius: 5px;
@@ -191,7 +243,7 @@ export component WorkspaceWindow inherits Window {
                     }
                     Button {
                         text: "Close Database";
-                        enabled: !root.busy && !root.browser-busy && !root.import-active;
+                        enabled: !root.busy && !root.browser-busy && !root.search-busy && !root.import-active;
                         clicked => { root.close-requested(); }
                     }
                 }
@@ -203,7 +255,7 @@ export component WorkspaceWindow inherits Window {
                 page-index: root.game-page-index;
                 has-previous-page: root.game-has-previous-page;
                 has-next-page: root.game-has-next-page;
-                busy: root.browser-busy;
+                busy: root.browser-busy || root.search-busy;
                 active-game-title: root.game-active-title;
                 selected-row <=> root.game-selected-row;
                 player-filter <=> root.game-player-filter;
@@ -234,11 +286,11 @@ export component WorkspaceWindow inherits Window {
                             horizontal-stretch: 1;
                             placeholder-text: "PGN file path";
                             text <=> root.import-path-text;
-                            enabled: !root.busy && !root.browser-busy;
+                            enabled: !root.busy && !root.browser-busy && !root.search-busy;
                         }
                         Button {
                             text: "Import PGN";
-                            enabled: !root.busy && !root.browser-busy && root.import-path-text != "";
+                            enabled: !root.busy && !root.browser-busy && !root.search-busy && root.import-path-text != "";
                             clicked => { root.import-requested(root.import-path-text); }
                         }
                     }
@@ -261,9 +313,108 @@ export component WorkspaceWindow inherits Window {
                     }
                 }
             }
+            }
+            if root.board-panel-visible: GameReviewPanel {
+                board-loaded: root.board-loaded;
+                square-pieces: root.board-square-pieces;
+                square-highlights: root.board-square-highlights;
+                flipped: root.board-flipped;
+                white-name: root.board-white-name;
+                black-name: root.board-black-name;
+                event-name: root.board-event-name;
+                date: root.board-date;
+                result: root.board-result;
+                san-moves: root.board-san-moves;
+                current-ply: root.board-current-ply;
+                interaction-enabled: root.board-interaction-enabled;
+                square-activated(file, rank) => { root.board-square-activated(file, rank); }
+                ply-activated(ply) => { root.board-ply-activated(ply); }
+                navigate-first() => { root.board-navigate-first(); }
+                navigate-previous() => { root.board-navigate-previous(); }
+                navigate-next() => { root.board-navigate-next(); }
+                navigate-last() => { root.board-navigate-last(); }
+                orientation-toggled() => { root.board-orientation-toggled(); }
+                panel-visibility-toggled() => { root.board-panel-visibility-toggled(); }
+            }
+            if !root.board-panel-visible: Rectangle {
+                width: 34px;
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: #313949;
+                background: #171c26;
+                board-restore-scope := FocusScope {
+                    focus-on-tab-navigation: root.board-interaction-enabled;
+                    key-pressed(event) => {
+                        if (root.board-interaction-enabled && (event.text == "\n" || event.text == " ")) {
+                            root.board-panel-visibility-toggled();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    VerticalLayout {
+                        padding: 4px;
+                        Button {
+                            enabled: root.board-interaction-enabled;
+                            text: "Show";
+                            clicked => {
+                                board-restore-scope.focus();
+                                root.board-panel-visibility-toggled();
+                            }
+                        }
+                    }
+                }
+            }
+            if root.search-panel-visible: PositionSearchPanel {
+                width: 340px;
+                has-database: root.has-database;
+                matches: root.search-matches;
+                total-matches: root.search-total-matches;
+                page-index: root.search-page-index;
+                has-previous-page: root.search-has-previous-page;
+                has-next-page: root.search-has-next-page;
+                continuations: root.search-continuations;
+                total-games: root.search-total-games;
+                active-filter-summary: root.search-active-filter-summary;
+                searching: root.search-searching;
+                auto-search: root.search-auto-search;
+                interaction-enabled: root.search-interaction-enabled;
+                search-requested() => { root.search-requested(); }
+                auto-search-toggled(enabled) => { root.search-auto-search-toggled(enabled); }
+                panel-visibility-toggled() => { root.search-panel-visibility-toggled(); }
+                match-activated(row) => { root.search-match-activated(row); }
+                page-requested(page) => { root.search-page-requested(page); }
+            }
+            if !root.search-panel-visible: Rectangle {
+                width: 34px;
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: #313949;
+                background: #171c26;
+                search-restore-scope := FocusScope {
+                    focus-on-tab-navigation: root.search-interaction-enabled;
+                    key-pressed(event) => {
+                        if (root.search-interaction-enabled && (event.text == "\n" || event.text == " ")) {
+                            root.search-panel-visibility-toggled();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    VerticalLayout {
+                        padding: 4px;
+                        Button {
+                            enabled: root.search-interaction-enabled;
+                            text: "Show";
+                            clicked => {
+                                search-restore-scope.focus();
+                                root.search-panel-visibility-toggled();
+                            }
+                        }
+                    }
+                }
+            }
         }
         if root.busy: Text { text: "Working…"; color: #d4bc78; }
-        if root.error-text != "": Rectangle {
+        if root.merged-error-text != "": Rectangle {
             min-height: 38px;
             background: #52252b;
             border-radius: 3px;
@@ -272,7 +423,7 @@ export component WorkspaceWindow inherits Window {
                 spacing: 8px;
                 Text {
                     horizontal-stretch: 1;
-                    text: root.error-text;
+                    text: root.merged-error-text;
                     color: #ffd6d9;
                     wrap: word-wrap;
                     vertical-alignment: center;

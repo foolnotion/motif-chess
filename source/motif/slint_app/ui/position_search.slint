@@ -1,0 +1,290 @@
+import { Button, CheckBox, ListView } from "std-widgets.slint";
+
+export struct SearchMatchRow {
+    white: string,
+    black: string,
+    result: string,
+    event: string,
+    date: string,
+    eco: string,
+    white-elo: string,
+    black-elo: string,
+    ply: int,
+}
+
+export struct ContinuationRow {
+    san: string,
+    frequency: int,
+    direct-frequency: int,
+    white-wins: int,
+    draws: int,
+    black-wins: int,
+    white-elo: string,
+    black-elo: string,
+    eco: string,
+    opening-name: string,
+}
+
+component ColumnHeader inherits Text {
+    color: #7791b8;
+    font-size: 10px;
+    font-weight: 600;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+// Renders the current-position matching-games list and continuation
+// statistics. All rows and derived text (percentages, ECO/opening summary)
+// are precomputed by search_presenter/main.cpp; this component only
+// indexes and renders supplied data, matching board_notation.slint's and
+// game_browser.slint's precomputation discipline.
+export component PositionSearchPanel inherits Rectangle {
+    in property <bool> has-database: false;
+    in property <[SearchMatchRow]> matches;
+    in property <int> total-matches;
+    in property <int> page-index;
+    in property <bool> has-previous-page;
+    in property <bool> has-next-page;
+    in property <[ContinuationRow]> continuations;
+    in property <int> total-games;
+    in property <string> active-filter-summary;
+    in property <bool> searching;
+    in property <bool> auto-search: true;
+    in property <bool> interaction-enabled: true;
+    in-out property <int> focused-match-index: -1;
+    callback search-requested();
+    callback auto-search-toggled(bool);
+    callback match-activated(int);
+    callback page-requested(int);
+    callback panel-visibility-toggled();
+
+    background: #171c26;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: "Position Search";
+                color: #f1f4f8;
+                font-weight: 700;
+                font-size: 15px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Hide";
+                enabled: root.interaction-enabled;
+                clicked => { root.panel-visibility-toggled(); }
+            }
+            if root.searching: Text {
+                text: "Searching…";
+                color: #91a4c4;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            CheckBox {
+                text: "Auto-search";
+                checked: root.auto-search;
+                enabled: root.interaction-enabled;
+                toggled => { root.auto-search-toggled(self.checked); }
+            }
+            Button {
+                text: "Search";
+                enabled: root.interaction-enabled && !root.searching;
+                clicked => { root.search-requested(); }
+            }
+        }
+
+        if root.active-filter-summary != "": Text {
+            text: "Active filters: " + root.active-filter-summary;
+            color: #91a4c4;
+            font-size: 11px;
+            overflow: elide;
+        }
+
+        if !root.has-database: Text { text: "No database open"; color: #91a4c4; }
+
+        if root.has-database: VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 6px;
+
+            Text { text: "Matching Games (" + root.total-matches + ")"; color: #d7deea; font-weight: 600; font-size: 12px; }
+            if root.searching: Text { text: "Searching…"; color: #91a4c4; font-size: 12px; }
+            if !root.searching && root.matches.length == 0: Text { text: "No matching games"; color: #91a4c4; font-size: 12px; }
+            if root.matches.length > 0: VerticalLayout {
+                spacing: 2px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    padding-left: 4px;
+                    ColumnHeader { width: 44px; text: "Ply"; }
+                    ColumnHeader { width: 46px; text: "Result"; }
+                    ColumnHeader { horizontal-stretch: 1; text: "Players / Event"; }
+                    ColumnHeader { width: 64px; text: "ECO"; }
+                    ColumnHeader { width: 62px; text: "Date"; }
+                }
+                Rectangle {
+                    height: 130px;
+                    border-width: 1px;
+                    border-color: #313949;
+                    ListView {
+                        for row[index] in root.matches: row-scope := FocusScope {
+                            height: 26px;
+                            focus-on-tab-navigation: root.interaction-enabled;
+                            accessible-role: list-item;
+                            accessible-label: row.white + " vs " + row.black + ", " + row.result + ", ply " + row.ply;
+                            accessible-action-default => {
+                                if (root.interaction-enabled) {
+                                    root.match-activated(index);
+                                }
+                            }
+                            key-pressed(event) => {
+                                if (!root.interaction-enabled) {
+                                    return reject;
+                                }
+                                if (event.text == Key.UpArrow && root.focused-match-index > 0) {
+                                    root.focused-match-index = root.focused-match-index - 1;
+                                    return accept;
+                                }
+                                if (event.text == Key.DownArrow && root.focused-match-index + 1 < root.matches.length) {
+                                    root.focused-match-index = root.focused-match-index + 1;
+                                    return accept;
+                                }
+                                if (event.text == "\n" || event.text == " ") {
+                                    root.match-activated(root.focused-match-index < 0 ? index : root.focused-match-index);
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                            Rectangle {
+                                background: row-scope.has-focus || root.focused-match-index == index ? #232b3a : (Math.mod(index, 2) == 0 ? #1b2230 : #171c26);
+                                border-width: row-scope.has-focus ? 1px : 0px;
+                                border-color: #4fc3f7;
+                                HorizontalLayout {
+                                    padding-left: 4px;
+                                    padding-right: 4px;
+                                    spacing: 6px;
+                                    Text {
+                                        width: 44px;
+                                        text: "Ply " + row.ply;
+                                        color: #91a4c4;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        width: 46px;
+                                        text: row.result;
+                                        color: #d4bc78;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: row.white + " (" + row.white-elo + ") – " + row.black + " (" + row.black-elo + ") · " + row.event;
+                                        color: #e5eaf2;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        width: 64px;
+                                        text: row.eco;
+                                        color: #bbc5d6;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        width: 62px;
+                                        text: row.date;
+                                        color: #bbc5d6;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                                TouchArea {
+                                    enabled: root.interaction-enabled;
+                                    clicked => {
+                                        root.focused-match-index = index;
+                                        row-scope.focus();
+                                    }
+                                    double-clicked => { root.match-activated(index); }
+                                }
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+                    Button {
+                        text: "‹ Prev";
+                        enabled: root.interaction-enabled && root.has-previous-page;
+                        clicked => { root.page-requested(root.page-index - 1); }
+                    }
+                    Text {
+                        text: "Page " + (root.page-index + 1);
+                        color: #91a4c4;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: "Next ›";
+                        enabled: root.interaction-enabled && root.has-next-page;
+                        clicked => { root.page-requested(root.page-index + 1); }
+                    }
+                }
+            }
+
+            Text { text: "Continuations (" + root.total-games + " games)"; color: #d7deea; font-weight: 600; font-size: 12px; }
+            if root.searching: Text { text: "Searching…"; color: #91a4c4; font-size: 12px; }
+            if !root.searching && root.continuations.length == 0: Text { text: "No continuations"; color: #91a4c4; font-size: 12px; }
+            if root.continuations.length > 0: VerticalLayout {
+                spacing: 2px;
+                vertical-stretch: 1;
+                HorizontalLayout {
+                    spacing: 6px;
+                    padding-left: 4px;
+                    ColumnHeader { width: 44px; text: "SAN"; }
+                    ColumnHeader { width: 40px; text: "Games"; }
+                    ColumnHeader { width: 38px; text: "Direct"; }
+                    ColumnHeader { width: 64px; text: "W/D/L"; }
+                    ColumnHeader { width: 54px; text: "Elo W/B"; }
+                    ColumnHeader { horizontal-stretch: 1; text: "ECO / Opening"; }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-width: 1px;
+                    border-color: #313949;
+                    ListView {
+                        for row[index] in root.continuations: Rectangle {
+                            height: 26px;
+                            background: Math.mod(index, 2) == 0 ? #1b2230 : #171c26;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                spacing: 6px;
+                                Text { width: 44px; text: "  " + row.san; color: #f1f4f8; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 40px; text: row.frequency; color: #bbc5d6; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 38px; text: row.direct-frequency; color: #bbc5d6; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 64px; text: row.white-wins + "/" + row.draws + "/" + row.black-wins; color: #bbc5d6; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 54px; text: row.white-elo + "/" + row.black-elo; color: #91a4c4; font-size: 11px; vertical-alignment: center; }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: row.eco + " " + row.opening-name;
+                                    color: #91a4c4;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

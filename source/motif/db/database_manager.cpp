@@ -1026,6 +1026,27 @@ auto database_manager::query_position_matches(zobrist_hash const hash, std::size
     return matches;
 }
 
+auto database_manager::query_position_first_matches(zobrist_hash const hash, std::span<game_id const> const game_ids) const
+    -> result<std::vector<position_match>>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    if (!store_) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (!position_postings_ || !manifest_.position_postings || !has_valid_derived_index(*manifest_.position_postings)) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto matches = position_postings_->first_occurrences(hash, game_ids);
+    if (!matches) {
+        return tl::unexpected {matches.error()};
+    }
+    return matches;
+}
+
 auto database_manager::position_summary(zobrist_hash const hash) const -> result<std::optional<position_postings_summary>>
 {
     auto const lock = std::scoped_lock {generation_mutex_};
@@ -1478,6 +1499,38 @@ auto database_manager::find_games(search_filter const& filter) -> result<game_li
 
     if (!filter.position.has_value()) {
         return store_->find_games(filter);
+    }
+
+    if (!position_postings_ || !manifest_.position_postings || !has_valid_derived_index(*manifest_.position_postings)) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const game_count = store_->count_games();
+    if (!game_count || *game_count < 0 || static_cast<std::uint64_t>(*game_count) != position_postings_->indexed_game_count()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
+    auto const has_metadata_filter = filter.player_name || filter.result || filter.eco_prefix || filter.min_elo || filter.max_elo;
+    if (!has_metadata_filter) {
+        auto const summary = position_postings_->summary(*filter.position);
+        if (!summary) {
+            return tl::unexpected {summary.error()};
+        }
+        if (!*summary) {
+            return game_list_result {};
+        }
+        auto page_game_ids = position_postings_->distinct_game_ids(*filter.position, filter.limit, filter.offset);
+        if (!page_game_ids) {
+            return tl::unexpected {page_game_ids.error()};
+        }
+        auto metadata_filter = filter;
+        metadata_filter.position.reset();
+        metadata_filter.offset = 0U;
+        auto page = store_->find_games_with_ids(*page_game_ids, metadata_filter);
+        if (!page) {
+            return tl::unexpected {page.error()};
+        }
+        page->total_count = static_cast<std::int64_t>((*summary)->distinct_game_count);
+        return page;
     }
 
     auto game_ids = position_game_ids(*filter.position);

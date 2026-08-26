@@ -1,9 +1,10 @@
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
-#include "motif/app/game_navigator.hpp"
+#include "motif/navigator/game_navigator.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -33,7 +34,7 @@ auto make_game(std::vector<std::string> const& san_moves) -> motif::db::game
 
 TEST_CASE("game_navigator: initial state", "[game_navigator]")
 {
-    motif::app::game_navigator const nav;
+    motif::navigator::game_navigator const nav;
 
     SECTION("no game loaded — reports empty")
     {
@@ -50,9 +51,17 @@ TEST_CASE("game_navigator: initial state", "[game_navigator]")
     }
 }
 
+TEST_CASE("game_navigator: loaded game has a current hash", "[game_navigator]")
+{
+    auto navigator = motif::navigator::game_navigator {};
+    navigator.load(make_game({"e4", "e5"}));
+
+    CHECK(navigator.current_hash().has_value());
+}
+
 TEST_CASE("game_navigator: load and basic properties", "[game_navigator]")
 {
-    motif::app::game_navigator nav;
+    motif::navigator::game_navigator nav;
     auto const game = make_game({"e4", "e5", "Nf3", "Nc6", "Bb5"});
     nav.load(game);
 
@@ -64,7 +73,7 @@ TEST_CASE("game_navigator: load and basic properties", "[game_navigator]")
 
 TEST_CASE("game_navigator: advance and retreat", "[game_navigator]")
 {
-    motif::app::game_navigator nav;
+    motif::navigator::game_navigator nav;
     auto const game = make_game({"e4", "e5", "Nf3"});
     nav.load(game);
 
@@ -105,7 +114,7 @@ TEST_CASE("game_navigator: advance and retreat", "[game_navigator]")
 
 TEST_CASE("game_navigator: jump to start and end", "[game_navigator]")
 {
-    motif::app::game_navigator nav;
+    motif::navigator::game_navigator nav;
     auto const game = make_game({"d4", "d5", "c4", "c6", "Nc3", "Nf6"});
     nav.load(game);
 
@@ -127,7 +136,7 @@ TEST_CASE("game_navigator: jump to start and end", "[game_navigator]")
 
 TEST_CASE("game_navigator: navigate_to", "[game_navigator]")
 {
-    motif::app::game_navigator nav;
+    motif::navigator::game_navigator nav;
     auto const game = make_game({"e4", "e5", "Nf3", "Nc6"});
     nav.load(game);
 
@@ -155,7 +164,7 @@ TEST_CASE("game_navigator: navigate_to", "[game_navigator]")
 
 TEST_CASE("game_navigator: FEN reflects position at current ply", "[game_navigator]")
 {
-    motif::app::game_navigator nav;
+    motif::navigator::game_navigator nav;
     auto const game = make_game({"e4", "e5"});
     nav.load(game);
 
@@ -178,7 +187,7 @@ TEST_CASE("game_navigator: FEN reflects position at current ply", "[game_navigat
 
 TEST_CASE("game_navigator: move_list returns SAN for all moves", "[game_navigator]")
 {
-    motif::app::game_navigator nav;
+    motif::navigator::game_navigator nav;
     auto const game = make_game({"e4", "e5", "Nf3", "Nc6", "Bb5"});
     nav.load(game);
 
@@ -193,7 +202,7 @@ TEST_CASE("game_navigator: move_list returns SAN for all moves", "[game_navigato
 
 TEST_CASE("game_navigator: clear resets state", "[game_navigator]")
 {
-    motif::app::game_navigator nav;
+    motif::navigator::game_navigator nav;
     auto const game = make_game({"e4", "e5"});
     nav.load(game);
     nav.jump_to_end();
@@ -203,4 +212,34 @@ TEST_CASE("game_navigator: clear resets state", "[game_navigator]")
     CHECK_FALSE(nav.has_game());
     CHECK(nav.current_ply() == 0);
     CHECK(nav.total_plies() == 0);
+}
+
+TEST_CASE("game_navigator: last_move reports from/to squares of the played move", "[game_navigator]")
+{
+    motif::navigator::game_navigator nav;
+    auto const game = make_game({"e4", "e5", "Nf3"});
+    nav.load(game);
+
+    CHECK_FALSE(nav.last_move().has_value());
+
+    nav.advance();
+    auto const after_e4 = nav.last_move();
+    REQUIRE(after_e4.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- REQUIRE above establishes the optional value for Catch2.
+    CHECK(after_e4->from == "e2");
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- REQUIRE above establishes the optional value for Catch2.
+    CHECK(after_e4->to == "e4");
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- REQUIRE above establishes the optional value for Catch2.
+    CHECK(after_e4->san == "e4");
+
+    nav.advance();
+    auto const after_e5 = nav.last_move();
+    REQUIRE(after_e5.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- REQUIRE above establishes the optional value for Catch2.
+    CHECK(after_e5->from == "e7");
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- REQUIRE above establishes the optional value for Catch2.
+    CHECK(after_e5->to == "e5");
+
+    nav.jump_to_start();
+    CHECK_FALSE(nav.last_move().has_value());
 }

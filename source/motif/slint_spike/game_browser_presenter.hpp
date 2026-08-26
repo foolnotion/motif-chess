@@ -7,9 +7,9 @@
 
 #include <tl/expected.hpp>
 
-#include "motif/app/game_navigator.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
+#include "motif/navigator/game_navigator.hpp"
 
 namespace motif::slint_spike
 {
@@ -67,7 +67,7 @@ class game_browser_presenter
 
   private:
     motif::db::database_manager* database_;
-    motif::app::game_navigator navigator_;
+    motif::navigator::game_navigator navigator_;
     game_browser_state state_;
 
     void update_navigation_state();

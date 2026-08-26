@@ -217,6 +217,35 @@ auto game_browser_presenter::apply_activation_error(std::uint64_t const generati
     return true;
 }
 
+auto game_browser_presenter::prepare_external_activation(motif::db::game_id const game_id) -> browser_result<activation_request>
+{
+    ++state_.activation_generation;
+    state_.error_text.clear();
+    return activation_request {.generation = state_.activation_generation, .game_id = game_id};
+}
+
+auto game_browser_presenter::apply_external_activation(loaded_game game) -> browser_result<bool>
+{
+    if (game.generation != state_.activation_generation) {
+        return false;
+    }
+    state_.active_game_id = game.game_id;
+    state_.active_game = std::move(game.game);
+    // Keep the row selection in sync with the activated game so the list
+    // highlights the game now on the board even when activation came from
+    // outside the browser (e.g. a search-match row).
+    state_.selected_game_id = state_.active_game_id;
+    state_.has_selection = true;
+    auto const selected = std::ranges::find(state_.games, state_.active_game_id, &motif::db::game_list_entry::id);
+    if (selected != state_.games.end()) {
+        state_.selected_row = static_cast<std::size_t>(std::distance(state_.games.begin(), selected));
+    } else {
+        state_.selected_row.reset();
+    }
+    state_.error_text.clear();
+    return true;
+}
+
 auto game_browser_presenter::resize_column(std::size_t const column, std::int32_t const width) -> browser_result<void>
 {
     if (column >= browser_column_count) {

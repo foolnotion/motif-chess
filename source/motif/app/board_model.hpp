@@ -4,7 +4,7 @@
 #include <QStringList>
 
 #include "motif/app/database_workspace.hpp"
-#include "motif/app/game_navigator.hpp"
+#include "motif/navigator/game_navigator.hpp"
 
 namespace motif::app
 {
@@ -55,7 +55,7 @@ class board_model : public QObject
 
   private:
     database_workspace* workspace_ {nullptr};
-    game_navigator navigator_;
+    motif::navigator::game_navigator navigator_;
     QStringList move_list_;
     QString white_name_;
     QString black_name_;
