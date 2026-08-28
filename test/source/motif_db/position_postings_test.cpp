@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <vector>
@@ -26,7 +27,11 @@ class temporary_file
 {
   public:
     temporary_file()
-        : path_ {std::filesystem::temp_directory_path() / "motif-position-postings-test.idx"}
+        // A per-instance random nonce, not a fixed filename: ctest runs
+        // many TEST_CASEs from this file as separate concurrent processes
+        // under -j, and every one of them constructs a temporary_file.
+        : path_ {std::filesystem::temp_directory_path()
+                 / ("motif-position-postings-test-" + std::to_string(std::random_device {}()) + ".idx")}
     {
         std::filesystem::remove(path_);
     }
