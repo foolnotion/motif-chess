@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -76,14 +77,18 @@ struct search_state
 class search_presenter
 {
   public:
-    explicit search_presenter(motif::db::database_manager& database) noexcept;
+    explicit search_presenter(motif::db::database_manager& database);
 
     // Async query pipeline: search() runs on the caller's thread and is
     // cheap; execute_query() performs the (potentially blocking) database
     // reads and should run off the UI event loop; apply_query()/
     // apply_query_error() must run back on the UI thread and are guarded by
     // generation so a stale completion can never replace newer state.
-    auto search(motif::db::zobrist_hash hash, motif::db::search_filter filter) -> search_result<search_query>;
+    //
+    // search() returns std::nullopt when the request was served
+    // synchronously from the starting-position cache (see below): state()
+    // already reflects the result and there is nothing to dispatch.
+    auto search(motif::db::zobrist_hash hash, motif::db::search_filter filter) -> search_result<std::optional<search_query>>;
     [[nodiscard]] auto execute_query(search_query const& query) const -> search_result<search_page>;
     auto apply_query(search_page page) -> search_result<bool>;
     auto apply_query_error(std::uint64_t generation, search_error query_error) -> search_result<bool>;
@@ -91,11 +96,20 @@ class search_presenter
     void set_auto_search(bool enabled) noexcept;
     void dismiss_error() noexcept;
 
+    // The starting position is the single heaviest, most common query (every
+    // game is indexed at ply 0, so it decodes the whole posting block) and
+    // is re-issued every time board navigation returns to ply 0. Its result
+    // is cached after the first real fetch and served synchronously from
+    // then on, until the underlying data changes.
+    void invalidate_starting_position_cache() noexcept;
+
     [[nodiscard]] auto state() const noexcept -> search_state const&;
 
   private:
     motif::db::database_manager* database_;
     search_state state_;
+    motif::db::zobrist_hash starting_position_hash_;
+    std::optional<search_page> starting_position_cache_;
 
     static auto from_database_error(motif::db::error const& database_error) -> search_error;
     static auto from_search_error(motif::search::error const& search_error_value) -> search_error;

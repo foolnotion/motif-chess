@@ -58,6 +58,14 @@ export component PositionSearchPanel inherits Rectangle {
     callback page-requested(int);
     callback panel-visibility-toggled();
 
+    // Row scopes lose has-focus whenever the ListView rebuilds (new
+    // search results), but a stale focused-match-index would otherwise
+    // keep pointing at a row identity that no longer matches what's
+    // rendered, letting Enter/activation load the wrong game.
+    changed matches => {
+        root.focused-match-index = -1;
+    }
+
     background: #171c26;
 
     VerticalLayout {

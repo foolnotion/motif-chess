@@ -1510,7 +1510,8 @@ auto database_manager::find_games(search_filter const& filter) -> result<game_li
     }
 
     auto const has_metadata_filter = filter.player_name || filter.result || filter.eco_prefix || filter.min_elo || filter.max_elo;
-    if (!has_metadata_filter) {
+    auto const fast_path_eligible = !has_metadata_filter && filter.sort_column == game_sort_column::id && filter.sort_ascending;
+    if (fast_path_eligible) {
         auto const summary = position_postings_->summary(*filter.position);
         if (!summary) {
             return tl::unexpected {summary.error()};
