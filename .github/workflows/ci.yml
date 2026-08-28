@@ -156,6 +156,40 @@ jobs:
         -j 2
         -E "(performance|perf|latency target|query_latency|server:)"
 
+  test-macos:
+    needs: [lint]
+
+    runs-on: macos-14
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Nix
+      uses: cachix/install-nix-action@v30
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Configure
+      run: >
+        nix develop --command cmake
+        -S .
+        -B build/ci-fast-macos
+        -DCMAKE_BUILD_TYPE=Debug
+        -Dmotif_DEVELOPER_MODE=ON
+        -Dmotif_ENABLE_SLINT_APP=ON
+
+    - name: Build
+      run: nix develop --command cmake --build build/ci-fast-macos -j 3
+
+    - name: Fast tests
+      run: >
+        nix develop --command ctest
+        --test-dir build/ci-fast-macos
+        --output-on-failure
+        --no-tests=error
+        -j 3
+        -E "(performance|perf|latency target|query_latency|server:)"
+
   docs:
     # Deploy docs only when builds succeed
     needs: [sanitize, test]
