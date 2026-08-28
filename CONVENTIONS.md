@@ -146,11 +146,11 @@ When a dependency is absent from Nix and needed: open an issue, tell Bogdan, wai
 
 ## Read docs before grepping headers
 
-When integrating a library API (DuckDB, SQLite, spdlog, glaze, taskflow, pgnlib, chesslib):
+When integrating a library API (Slint, SQLite, spdlog, glaze, taskflow, pgnlib, chesslib):
 **read the library's documentation first.** Grepping headers to reverse-engineer an API has already
-caused a mid-implementation discovery (Clang 21 / DuckDB C++ API incompatibility) that could have
-been caught during planning. If official docs are unavailable, read the library's `README` and
-`examples/` before any header.
+caused a mid-implementation discovery (Clang 21 / the since-removed DuckDB dependency's C++ API
+incompatibility) that could have been caught during planning. If official docs are unavailable, read
+the library's `README` and `examples/` before any header.
 
 ---
 
