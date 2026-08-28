@@ -1,5 +1,7 @@
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 #include "motif/slint_app/workspace_service.hpp"
@@ -26,6 +28,22 @@ struct tmp_dir
     tmp_dir(tmp_dir&&) = delete;
     auto operator=(tmp_dir&&) -> tmp_dir& = delete;
 };
+
+struct tmp_config
+{
+    std::filesystem::path path;
+
+    explicit tmp_config(std::filesystem::path const& root)
+        : path(root / "motif-chess" / "config.json")
+    {
+    }
+};
+
+auto read_file(std::filesystem::path const& path) -> std::string
+{
+    auto file = std::ifstream {path};
+    return {std::istreambuf_iterator<char> {file}, {}};
+}
 
 }  // namespace
 
@@ -174,4 +192,86 @@ TEST_CASE("workspace_service: recent list orders newest first without duplicates
     REQUIRE(recent.size() == 2);
     REQUIRE(recent[0].path == tmp_a.path.string());
     REQUIRE(recent[1].path == tmp_b.path.string());
+}
+
+TEST_CASE("workspace_service: recent databases persist across service instances", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"persist_recents"};
+    auto const config = tmp_config {tmp.path};
+
+    {
+        motif::slint_app::workspace_service service {config.path};
+        REQUIRE(service.create_database(tmp.path.string(), "PersistentDB").has_value());
+    }
+
+    motif::slint_app::workspace_service const restored {config.path};
+    REQUIRE(restored.recent_databases().size() == 1);
+    REQUIRE(restored.recent_databases().front().name == "PersistentDB");
+    REQUIRE(restored.recent_databases().front().path == tmp.path.string());
+}
+
+TEST_CASE("workspace_config: serializes and restores preferences", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"config_round_trip"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto config = motif::slint_app::workspace_config {};
+    config.database_directory = "/my/db";
+    config.ui_preferences.board_theme = "dark";
+    config.ui_preferences.prefetch_depth = 3;
+
+    REQUIRE(motif::slint_app::save_config(config, config_path).has_value());
+    auto const restored = motif::slint_app::load_config(config_path);
+    REQUIRE(restored.has_value());
+    REQUIRE(restored->database_directory == "/my/db");
+    REQUIRE(restored->ui_preferences.board_theme == "dark");
+    REQUIRE(restored->ui_preferences.prefetch_depth == 3);
+}
+
+TEST_CASE("workspace_config: malformed input remains untouched", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"config_malformed"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    std::filesystem::create_directories(config_path.parent_path());
+    {
+        auto file = std::ofstream {config_path};
+        file << "{ this is not valid json";
+    }
+    auto const original = read_file(config_path);
+
+    auto const result = motif::slint_app::load_config(config_path);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error() == motif::slint_app::config_error_code::malformed_config);
+    REQUIRE(read_file(config_path) == original);
+}
+
+TEST_CASE("workspace_service: failed persistence preserves active workspace and recents", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"persistence_failure"};
+    std::filesystem::create_directories(tmp.path);
+    auto const config_path = tmp.path / "not-a-directory" / "config.json";
+    {
+        auto file = std::ofstream {tmp.path / "not-a-directory"};
+        file << "blocking file";
+    }
+    motif::slint_app::workspace_service service {config_path};
+    auto const database_path = tmp.path / "database";
+
+    auto const result = service.create_database(database_path.string(), "PersistentDB");
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error() == motif::slint_app::error_code::database_failure);
+    REQUIRE_FALSE(service.has_active());
+    REQUIRE(service.recent_databases().empty());
+}
+
+TEST_CASE("workspace_config: write leaves no temporary file", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"config_atomic_write"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto const config = motif::slint_app::workspace_config {};
+
+    REQUIRE(motif::slint_app::save_config(config, config_path).has_value());
+    REQUIRE(std::filesystem::exists(config_path));
+    for (auto const& entry : std::filesystem::directory_iterator {config_path.parent_path()}) {
+        REQUIRE_FALSE(entry.path().filename().string().starts_with("config.json.tmp-"));
+    }
 }
