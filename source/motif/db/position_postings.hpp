@@ -93,7 +93,15 @@ class position_postings
     [[nodiscard]] auto open() -> result<void>;
     [[nodiscard]] auto occurrences(zobrist_hash hash, std::size_t limit = 0, std::size_t offset = 0) const
         -> result<std::vector<position_match>>;
+    // Returns the first (lowest-ply) occurrence for each requested game ID.
+    // requested_game_ids need not be sorted; output follows canonical game-ID
+    // order and omits IDs that do not reach hash.
+    [[nodiscard]] auto first_occurrences(zobrist_hash hash, std::span<game_id const> requested_game_ids) const
+        -> result<std::vector<position_match>>;
     [[nodiscard]] auto distinct_game_ids(zobrist_hash hash) const -> result<std::vector<game_id>>;
+    // Returns a page of ascending distinct IDs while still decoding and
+    // validating the entire immutable posting block.
+    [[nodiscard]] auto distinct_game_ids(zobrist_hash hash, std::size_t limit, std::size_t offset) const -> result<std::vector<game_id>>;
     [[nodiscard]] auto summary(zobrist_hash hash) const -> result<std::optional<position_postings_summary>>;
     [[nodiscard]] auto indexed_game_count() const noexcept -> std::uint64_t;
 

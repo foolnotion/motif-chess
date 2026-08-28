@@ -74,7 +74,7 @@ Reuse existing toolkit-free code:
 
 - `motif::db::database_manager` and `game_store` to open an existing database
   bundle and call `find_games(search_filter)` / `get(game_id)`.
-- `motif::app::game_navigator` for SAN move lists, FEN, and move navigation.
+- `motif::navigator::game_navigator` for SAN move lists, FEN, and move navigation.
 - `motif::db::{game_list_entry, game, game_id, search_filter}`.
 
 Do not reuse Qt adapters:

@@ -148,6 +148,17 @@ enum class player_color : std::uint8_t
     black,
 };
 
+enum class game_sort_column : std::uint8_t
+{
+    id,
+    white,
+    black,
+    result,
+    event,
+    date,
+    eco,
+};
+
 inline constexpr std::size_t default_search_limit {100};
 inline constexpr std::size_t max_search_limit {500};
 
@@ -162,6 +173,8 @@ struct search_filter
     std::optional<zobrist_hash> position;
     std::size_t offset {0};
     std::size_t limit {default_search_limit};
+    game_sort_column sort_column {game_sort_column::id};
+    bool sort_ascending {true};
 };
 
 struct game_list_result

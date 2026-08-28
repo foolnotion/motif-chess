@@ -585,6 +585,69 @@ auto decode_posting_block_game_ids(std::span<char const> const bytes, directory_
     return game_ids;
 }
 
+// Decodes and validates one posting block while retaining only the first
+// (therefore lowest-ply) occurrence for requested game IDs. The full block is
+// still decoded so a bounded lookup cannot hide trailing corruption.
+auto decode_posting_block_first_occurrences(std::span<char const> const bytes,
+                                            directory_block_entry const& entry,
+                                            std::span<game_id const> const requested_game_ids) -> result<std::vector<decoded_occurrence>>
+{
+    auto requested = std::vector<game_id> {requested_game_ids.begin(), requested_game_ids.end()};
+    std::ranges::sort(requested);
+    auto occurrences = std::vector<decoded_occurrence> {};
+    occurrences.reserve(requested.size());
+    auto offset = std::size_t {0};
+    auto previous_game_id = std::uint64_t {0};
+    auto total_occurrences = std::uint64_t {0};
+    auto min_ply = std::numeric_limits<std::uint16_t>::max();
+    auto max_ply = std::uint16_t {0};
+    for (std::uint32_t group = 0; group < entry.distinct_game_count; ++group) {
+        auto game_id_delta = std::uint64_t {};
+        if (!read_uleb128(bytes, offset, game_id_delta) || (group > 0U && game_id_delta == 0U)
+            || previous_game_id > std::numeric_limits<std::uint64_t>::max() - game_id_delta)
+        {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        auto const current_game_id = previous_game_id + game_id_delta;
+        if (current_game_id == 0U || current_game_id > std::numeric_limits<std::uint32_t>::max()) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        previous_game_id = current_game_id;
+        auto ply_count = std::uint64_t {};
+        auto first_ply = std::uint64_t {};
+        if (!read_uleb128(bytes, offset, ply_count) || ply_count == 0U || !read_uleb128(bytes, offset, first_ply)
+            || first_ply > std::numeric_limits<std::uint16_t>::max())
+        {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        auto ply = static_cast<std::uint16_t>(first_ply);
+        auto const game_key = game_id {static_cast<std::uint32_t>(current_game_id)};
+        if (std::ranges::binary_search(requested, game_key)) {
+            occurrences.push_back(decoded_occurrence {.id = game_key, .ply = ply});
+        }
+        min_ply = std::min(min_ply, ply);
+        max_ply = std::max(max_ply, ply);
+        for (std::uint64_t index = 1; index < ply_count; ++index) {
+            auto ply_delta = std::uint64_t {};
+            if (!read_uleb128(bytes, offset, ply_delta) || ply_delta == 0U
+                || static_cast<std::uint64_t>(ply) + ply_delta > std::numeric_limits<std::uint16_t>::max())
+            {
+                return tl::unexpected {error_code::schema_mismatch};
+            }
+            ply = static_cast<std::uint16_t>(ply + ply_delta);
+            min_ply = std::min(min_ply, ply);
+            max_ply = std::max(max_ply, ply);
+        }
+        if (!checked_add(total_occurrences, ply_count, total_occurrences)) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+    }
+    if (offset != bytes.size() || total_occurrences != entry.occurrence_count || min_ply != entry.min_ply || max_ply != entry.max_ply) {
+        return tl::unexpected {error_code::schema_mismatch};
+    }
+    return occurrences;
+}
+
 // Removes a fixed set of owned scratch paths on destruction, always --
 // success or failure -- so a merge that fails partway through never leaks
 // .spill*/.dirspool/.tmp files. Never touches the final artifact path
@@ -1621,14 +1684,14 @@ auto position_postings::distinct_game_ids(zobrist_hash const hash) const -> resu
     if (!entry_result) {
         return tl::unexpected {entry_result.error()};
     }
-    auto entry_option = *entry_result;
-    if (!entry_option.has_value()) {
+    auto const entry_option = *entry_result;
+    if (!entry_option) {
         return std::vector<game_id> {};
     }
     auto const entry = *entry_option;
     std::ifstream input {path_, std::ios::binary};
     input.seekg(static_cast<std::streamoff>(entry.posting_offset));
-    std::vector<char> bytes(entry.posting_byte_length);
+    auto bytes = std::vector<char>(entry.posting_byte_length);
     if (!input || !input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -1637,13 +1700,74 @@ auto position_postings::distinct_game_ids(zobrist_hash const hash) const -> resu
         return tl::unexpected {game_ids.error()};
     }
     for (auto const game_key : *game_ids) {
-        auto const metadata_iterator =
-            std::ranges::lower_bound(metadata_, game_key, {}, [](auto const& record) -> game_id { return record.id; });
-        if (metadata_iterator == metadata_.end() || metadata_iterator->id != game_key) {
+        auto const metadata = std::ranges::lower_bound(metadata_, game_key, {}, [](auto const& record) -> game_id { return record.id; });
+        if (metadata == metadata_.end() || metadata->id != game_key) {
             return tl::unexpected {error_code::schema_mismatch};
         }
     }
     return *game_ids;
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- public pagination order matches query_position_matches(limit, offset).
+auto position_postings::distinct_game_ids(zobrist_hash const hash, std::size_t const limit, std::size_t const offset) const
+    -> result<std::vector<game_id>>
+{
+    auto game_ids = distinct_game_ids(hash);
+    if (!game_ids) {
+        return tl::unexpected {game_ids.error()};
+    }
+    if (offset >= game_ids->size()) {
+        return std::vector<game_id> {};
+    }
+    auto const begin = game_ids->begin() + static_cast<std::ptrdiff_t>(offset);
+    auto const remaining = static_cast<std::size_t>(game_ids->end() - begin);
+    auto const end = limit == 0U ? game_ids->end() : begin + static_cast<std::ptrdiff_t>(std::min(limit, remaining));
+    return std::vector<game_id> {begin, end};
+}
+
+auto position_postings::first_occurrences(zobrist_hash const hash, std::span<game_id const> const requested_game_ids) const
+    -> result<std::vector<position_match>>
+{
+    if (!is_open_) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    if (requested_game_ids.empty()) {
+        return std::vector<position_match> {};
+    }
+    auto entry_result = find_directory_block_entry(path_, sparse_directory_, hash);
+    if (!entry_result) {
+        return tl::unexpected {entry_result.error()};
+    }
+    auto const& optional_entry = *entry_result;
+    if (!optional_entry) {
+        return std::vector<position_match> {};
+    }
+    auto const entry = *optional_entry;
+    std::ifstream input {path_, std::ios::binary};
+    input.seekg(static_cast<std::streamoff>(entry.posting_offset));
+    std::vector<char> bytes(entry.posting_byte_length);
+    if (!input || !input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto decoded = decode_posting_block_first_occurrences(bytes, entry, requested_game_ids);
+    if (!decoded) {
+        return tl::unexpected {decoded.error()};
+    }
+    auto matches = std::vector<position_match> {};
+    matches.reserve(decoded->size());
+    for (auto const& occurrence : *decoded) {
+        auto const metadata_iterator =
+            std::ranges::lower_bound(metadata_, occurrence.id, {}, [](auto const& record) -> game_id { return record.id; });
+        if (metadata_iterator == metadata_.end() || metadata_iterator->id != occurrence.id) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        matches.push_back(position_match {.game_id = occurrence.id,
+                                          .ply = occurrence.ply,
+                                          .result = metadata_iterator->result,
+                                          .white_elo = metadata_iterator->white_elo,
+                                          .black_elo = metadata_iterator->black_elo});
+    }
+    return matches;
 }
 
 auto position_postings::occurrences(zobrist_hash const hash, std::size_t const limit, std::size_t const offset) const
