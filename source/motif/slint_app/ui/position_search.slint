@@ -1,4 +1,4 @@
-import { Button, CheckBox, ListView } from "std-widgets.slint";
+import { Button, CheckBox, ListView, Palette } from "std-widgets.slint";
 
 export struct SearchMatchRow {
     white: string,
@@ -26,7 +26,7 @@ export struct ContinuationRow {
 }
 
 component ColumnHeader inherits Text {
-    color: #7791b8;
+    color: Palette.alternate-foreground;
     font-size: 10px;
     font-weight: 600;
     vertical-alignment: center;
@@ -66,7 +66,7 @@ export component PositionSearchPanel inherits Rectangle {
         root.focused-match-index = -1;
     }
 
-    background: #171c26;
+    background: Palette.background;
 
     VerticalLayout {
         padding: 10px;
@@ -76,7 +76,7 @@ export component PositionSearchPanel inherits Rectangle {
             spacing: 8px;
             Text {
                 text: "Position Search";
-                color: #f1f4f8;
+                color: Palette.foreground;
                 font-weight: 700;
                 font-size: 15px;
                 vertical-alignment: center;
@@ -89,7 +89,7 @@ export component PositionSearchPanel inherits Rectangle {
             }
             if root.searching: Text {
                 text: "Searching…";
-                color: #91a4c4;
+                color: Palette.alternate-foreground;
                 font-size: 11px;
                 vertical-alignment: center;
             }
@@ -108,20 +108,20 @@ export component PositionSearchPanel inherits Rectangle {
 
         if root.active-filter-summary != "": Text {
             text: "Active filters: " + root.active-filter-summary;
-            color: #91a4c4;
+            color: Palette.alternate-foreground;
             font-size: 11px;
             overflow: elide;
         }
 
-        if !root.has-database: Text { text: "No database open"; color: #91a4c4; }
+        if !root.has-database: Text { text: "No database open"; color: Palette.alternate-foreground; }
 
         if root.has-database: VerticalLayout {
             vertical-stretch: 1;
             spacing: 6px;
 
-            Text { text: "Matching Games (" + root.total-matches + ")"; color: #d7deea; font-weight: 600; font-size: 12px; }
-            if root.searching: Text { text: "Searching…"; color: #91a4c4; font-size: 12px; }
-            if !root.searching && root.matches.length == 0: Text { text: "No matching games"; color: #91a4c4; font-size: 12px; }
+            Text { text: "Matching Games (" + root.total-matches + ")"; color: Palette.foreground; font-weight: 600; font-size: 12px; }
+            if root.searching: Text { text: "Searching…"; color: Palette.alternate-foreground; font-size: 12px; }
+            if !root.searching && root.matches.length == 0: Text { text: "No matching games"; color: Palette.alternate-foreground; font-size: 12px; }
             if root.matches.length > 0: VerticalLayout {
                 spacing: 2px;
                 HorizontalLayout {
@@ -136,7 +136,7 @@ export component PositionSearchPanel inherits Rectangle {
                 Rectangle {
                     height: 130px;
                     border-width: 1px;
-                    border-color: #313949;
+                    border-color: Palette.border;
                     ListView {
                         for row[index] in root.matches: row-scope := FocusScope {
                             height: 26px;
@@ -167,9 +167,9 @@ export component PositionSearchPanel inherits Rectangle {
                                 return reject;
                             }
                             Rectangle {
-                                background: row-scope.has-focus || root.focused-match-index == index ? #232b3a : (Math.mod(index, 2) == 0 ? #1b2230 : #171c26);
+                                background: row-scope.has-focus || root.focused-match-index == index ? Palette.selection-background : (Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background);
                                 border-width: row-scope.has-focus ? 1px : 0px;
-                                border-color: #4fc3f7;
+                                border-color: Palette.selection-foreground;
                                 HorizontalLayout {
                                     padding-left: 4px;
                                     padding-right: 4px;
@@ -177,21 +177,21 @@ export component PositionSearchPanel inherits Rectangle {
                                     Text {
                                         width: 44px;
                                         text: "Ply " + row.ply;
-                                        color: #91a4c4;
+                                        color: Palette.alternate-foreground;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                     }
                                     Text {
                                         width: 46px;
                                         text: row.result;
-                                        color: #d4bc78;
+                                        color: Palette.accent-foreground;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                     }
                                     Text {
                                         horizontal-stretch: 1;
                                         text: row.white + " (" + row.white-elo + ") – " + row.black + " (" + row.black-elo + ") · " + row.event;
-                                        color: #e5eaf2;
+                                        color: Palette.foreground;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                         overflow: elide;
@@ -199,7 +199,7 @@ export component PositionSearchPanel inherits Rectangle {
                                     Text {
                                         width: 64px;
                                         text: row.eco;
-                                        color: #bbc5d6;
+                                        color: Palette.alternate-foreground;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                         overflow: elide;
@@ -207,7 +207,7 @@ export component PositionSearchPanel inherits Rectangle {
                                     Text {
                                         width: 62px;
                                         text: row.date;
-                                        color: #bbc5d6;
+                                        color: Palette.alternate-foreground;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                         overflow: elide;
@@ -235,7 +235,7 @@ export component PositionSearchPanel inherits Rectangle {
                     }
                     Text {
                         text: "Page " + (root.page-index + 1);
-                        color: #91a4c4;
+                        color: Palette.alternate-foreground;
                         font-size: 11px;
                         vertical-alignment: center;
                     }
@@ -247,9 +247,9 @@ export component PositionSearchPanel inherits Rectangle {
                 }
             }
 
-            Text { text: "Continuations (" + root.total-games + " games)"; color: #d7deea; font-weight: 600; font-size: 12px; }
-            if root.searching: Text { text: "Searching…"; color: #91a4c4; font-size: 12px; }
-            if !root.searching && root.continuations.length == 0: Text { text: "No continuations"; color: #91a4c4; font-size: 12px; }
+            Text { text: "Continuations (" + root.total-games + " games)"; color: Palette.foreground; font-weight: 600; font-size: 12px; }
+            if root.searching: Text { text: "Searching…"; color: Palette.alternate-foreground; font-size: 12px; }
+            if !root.searching && root.continuations.length == 0: Text { text: "No continuations"; color: Palette.alternate-foreground; font-size: 12px; }
             if root.continuations.length > 0: VerticalLayout {
                 spacing: 2px;
                 vertical-stretch: 1;
@@ -266,24 +266,24 @@ export component PositionSearchPanel inherits Rectangle {
                 Rectangle {
                     vertical-stretch: 1;
                     border-width: 1px;
-                    border-color: #313949;
+                    border-color: Palette.border;
                     ListView {
                         for row[index] in root.continuations: Rectangle {
                             height: 26px;
-                            background: Math.mod(index, 2) == 0 ? #1b2230 : #171c26;
+                            background: Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background;
                             HorizontalLayout {
                                 padding-left: 4px;
                                 padding-right: 4px;
                                 spacing: 6px;
-                                Text { width: 44px; text: "  " + row.san; color: #f1f4f8; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 40px; text: row.frequency; color: #bbc5d6; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 38px; text: row.direct-frequency; color: #bbc5d6; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 64px; text: row.white-wins + "/" + row.draws + "/" + row.black-wins; color: #bbc5d6; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 54px; text: row.white-elo + "/" + row.black-elo; color: #91a4c4; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 44px; text: "  " + row.san; color: Palette.foreground; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 40px; text: row.frequency; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 38px; text: row.direct-frequency; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 64px; text: row.white-wins + "/" + row.draws + "/" + row.black-wins; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
+                                Text { width: 54px; text: row.white-elo + "/" + row.black-elo; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
                                 Text {
                                     horizontal-stretch: 1;
                                     text: row.eco + " " + row.opening-name;
-                                    color: #91a4c4;
+                                    color: Palette.alternate-foreground;
                                     font-size: 11px;
                                     vertical-alignment: center;
                                     overflow: elide;

@@ -115,8 +115,7 @@ TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db]
     CHECK(second.error() == motif::db::error_code::io_failure);
 }
 
-// Catch2 assertion macros inflate this test's measured cognitive complexity.
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- fork/waitpid branching for the concurrent-writer check.
 TEST_CASE("database_manager::open rejects a concurrent writer process for the same bundle", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"bundle_lock"};

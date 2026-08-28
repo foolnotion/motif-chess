@@ -1,7 +1,7 @@
 import { GameBrowser, GameRow } from "game_browser.slint";
 import { GameReviewPanel, SquareHighlight } from "board_notation.slint";
 import { ContinuationRow, PositionSearchPanel, SearchMatchRow } from "position_search.slint";
-import { Button, LineEdit } from "std-widgets.slint";
+import { Button, LineEdit, Palette } from "std-widgets.slint";
 
 export struct RecentEntry {
     name: string,
@@ -111,8 +111,32 @@ export component WorkspaceWindow inherits Window {
     preferred-width: 1440px;
     preferred-height: 760px;
     min-height: 520px;
-    background: #11151d;
+    background: Palette.background;
+    forward-focus: global-board-navigation;
 
+    global-board-navigation := FocusScope {
+        key-pressed(event) => {
+            if (!root.board-interaction-enabled || !root.board-loaded || !root.board-panel-visible) {
+                return reject;
+            }
+            if (event.text == Key.LeftArrow) {
+                root.board-navigate-previous();
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.board-navigate-next();
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.board-navigate-first();
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.board-navigate-last();
+                return accept;
+            }
+            return reject;
+        }
     VerticalLayout {
         padding: 14px;
         spacing: 12px;
@@ -123,17 +147,17 @@ export component WorkspaceWindow inherits Window {
                 text: "No database open";
                 font-size: 22px;
                 font-weight: 700;
-                color: #f1f4f8;
+                color: Palette.foreground;
             }
             Rectangle {
                 border-radius: 5px;
                 border-width: 1px;
-                border-color: #313949;
-                background: #171c26;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
                 VerticalLayout {
                     padding: 16px;
                     spacing: 10px;
-                    Text { text: "Create a new database"; color: #91a4c4; font-weight: 700; }
+                    Text { text: "Create a new database"; color: Palette.alternate-foreground; font-weight: 700; }
                     HorizontalLayout {
                         spacing: 8px;
                         LineEdit {
@@ -154,8 +178,8 @@ export component WorkspaceWindow inherits Window {
                             clicked => { root.create-requested(root.create-path-text, root.create-name-text); }
                         }
                     }
-                    Rectangle { height: 1px; background: #313949; }
-                    Text { text: "Open an existing database"; color: #91a4c4; font-weight: 700; }
+                    Rectangle { height: 1px; background: Palette.border; }
+                    Text { text: "Open an existing database"; color: Palette.alternate-foreground; font-weight: 700; }
                     HorizontalLayout {
                         spacing: 8px;
                         LineEdit {
@@ -170,7 +194,7 @@ export component WorkspaceWindow inherits Window {
                             clicked => { root.open-requested(root.open-path-text); }
                         }
                     }
-                    Rectangle { height: 1px; background: #313949; }
+                    Rectangle { height: 1px; background: Palette.border; }
                     Button {
                         text: "Use Scratch Database";
                         enabled: !root.busy;
@@ -181,12 +205,12 @@ export component WorkspaceWindow inherits Window {
             if root.recent-databases.length > 0: Rectangle {
                 border-radius: 5px;
                 border-width: 1px;
-                border-color: #313949;
-                background: #171c26;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
                 VerticalLayout {
                     padding: 16px;
                     spacing: 6px;
-                    Text { text: "Recent databases"; color: #91a4c4; font-weight: 700; }
+                    Text { text: "Recent databases"; color: Palette.alternate-foreground; font-weight: 700; }
                     for entry[index] in root.recent-databases: entry-scope := FocusScope {
                         height: 44px;
                         key-pressed(event) => {
@@ -198,7 +222,7 @@ export component WorkspaceWindow inherits Window {
                         }
                         Rectangle {
                             border-radius: 3px;
-                            background: entry-scope.has-focus ? #232b3a : transparent;
+                            background: entry-scope.has-focus ? Palette.selection-background : transparent;
                             TouchArea {
                                 enabled: !root.busy;
                                 clicked => {
@@ -207,8 +231,8 @@ export component WorkspaceWindow inherits Window {
                                 }
                                 VerticalLayout {
                                     padding: 6px;
-                                    Text { text: entry.name; color: #f1f4f8; font-weight: 600; }
-                                    Text { text: entry.path; color: #91a4c4; font-size: 11px; }
+                                    Text { text: entry.name; color: Palette.foreground; font-weight: 600; }
+                                    Text { text: entry.path; color: Palette.alternate-foreground; font-size: 11px; }
                                 }
                             }
                         }
@@ -227,8 +251,8 @@ export component WorkspaceWindow inherits Window {
                 height: 62px;
                 border-radius: 5px;
                 border-width: 1px;
-                border-color: #313949;
-                background: #171c26;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
                 HorizontalLayout {
                     padding: 12px;
                     spacing: 10px;
@@ -237,9 +261,9 @@ export component WorkspaceWindow inherits Window {
                         Text {
                             text: root.is-scratch ? "Scratch database (temporary)" : "Database: " + root.display-name;
                             font-size: 18px;
-                            color: #f1f4f8;
+                            color: Palette.foreground;
                         }
-                        if !root.is-scratch: Text { text: root.active-path; color: #91a4c4; font-size: 11px; }
+                        if !root.is-scratch: Text { text: root.active-path; color: Palette.alternate-foreground; font-size: 11px; }
                     }
                     Button {
                         text: "Close Database";
@@ -255,7 +279,7 @@ export component WorkspaceWindow inherits Window {
                 page-index: root.game-page-index;
                 has-previous-page: root.game-has-previous-page;
                 has-next-page: root.game-has-next-page;
-                busy: root.browser-busy || root.search-busy;
+                busy: root.browser-busy;
                 active-game-title: root.game-active-title;
                 selected-row <=> root.game-selected-row;
                 player-filter <=> root.game-player-filter;
@@ -275,8 +299,8 @@ export component WorkspaceWindow inherits Window {
                 height: root.import-status-visible ? 86px : 48px;
                 border-radius: 5px;
                 border-width: 1px;
-                border-color: #313949;
-                background: #171c26;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
                 VerticalLayout {
                     padding: 8px;
                     spacing: 6px;
@@ -302,7 +326,7 @@ export component WorkspaceWindow inherits Window {
                                 + root.import-processed + " / " + root.import-total + " processed · "
                                 + root.import-committed + " committed · " + root.import-skipped + " skipped · "
                                 + root.import-errors + " errors";
-                            color: #91a4c4;
+                            color: Palette.alternate-foreground;
                             vertical-alignment: center;
                         }
                         if root.import-active: Button {
@@ -340,8 +364,8 @@ export component WorkspaceWindow inherits Window {
                 width: 34px;
                 border-radius: 5px;
                 border-width: 1px;
-                border-color: #313949;
-                background: #171c26;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
                 board-restore-scope := FocusScope {
                     focus-on-tab-navigation: root.board-interaction-enabled;
                     key-pressed(event) => {
@@ -388,8 +412,8 @@ export component WorkspaceWindow inherits Window {
                 width: 34px;
                 border-radius: 5px;
                 border-width: 1px;
-                border-color: #313949;
-                background: #171c26;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
                 search-restore-scope := FocusScope {
                     focus-on-tab-navigation: root.search-interaction-enabled;
                     key-pressed(event) => {
@@ -413,10 +437,10 @@ export component WorkspaceWindow inherits Window {
                 }
             }
         }
-        if root.busy: Text { text: "Working…"; color: #d4bc78; }
+        if root.busy: Text { text: "Working…"; color: Palette.accent-foreground; }
         if root.merged-error-text != "": Rectangle {
             min-height: 38px;
-            background: #52252b;
+            background: Palette.selection-background;
             border-radius: 3px;
             HorizontalLayout {
                 padding: 9px;
@@ -424,12 +448,13 @@ export component WorkspaceWindow inherits Window {
                 Text {
                     horizontal-stretch: 1;
                     text: root.merged-error-text;
-                    color: #ffd6d9;
+                    color: Palette.selection-foreground;
                     wrap: word-wrap;
                     vertical-alignment: center;
                 }
                 Button { text: "Dismiss"; clicked => { root.dismiss-error(); } }
             }
         }
+    }
     }
 }

@@ -1,4 +1,4 @@
-import { Button, ComboBox, LineEdit, ListView } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ListView, Palette } from "std-widgets.slint";
 
 export struct GameRow {
     white: string,
@@ -21,13 +21,13 @@ component TableHeader inherits Rectangle {
 
     height: 36px;
     width: root.column-width;
-    background: #202633;
+    background: Palette.alternate-background;
     Text {
         x: 10px;
         width: parent.width - 18px;
         height: parent.height;
         vertical-alignment: center;
-        color: #d7deea;
+        color: Palette.alternate-foreground;
         text: root.title + (root.active ? (root.ascending ? "  ^" : "  v") : "");
         font-weight: 600;
     }
@@ -90,7 +90,7 @@ export component GameBrowser inherits Rectangle {
     property <length> table-width: white-width + black-width + result-width + event-width + date-width + eco-width;
 
 
-    background: #171c26;
+    background: Palette.background;
 
     VerticalLayout {
         padding: 10px;
@@ -120,8 +120,8 @@ export component GameBrowser inherits Rectangle {
         Rectangle {
             vertical-stretch: 1;
             border-width: 1px;
-            border-color: #313949;
-            background: #171c26;
+            border-color: Palette.border;
+            background: Palette.alternate-background;
 
             VerticalLayout {
                 spacing: 0px;
@@ -162,15 +162,17 @@ export component GameBrowser inherits Rectangle {
                             return reject;
                         }
                         Rectangle {
-                            background: index == root.selected-row ? #315d86 : (Math.mod(index, 2) == 0 ? #1b2230 : #171c26);
+                            background: index == root.selected-row ? Palette.alternate-background : (Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background);
+                            border-width: index == root.selected-row ? 1px : 0px;
+                            border-color: Palette.accent-foreground;
                             HorizontalLayout {
                                 spacing: 0px;
-                                Text { width: root.white-width; text: "  " + row.white; color: #e5eaf2; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.black-width; text: "  " + row.black; color: #e5eaf2; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.result-width; text: "  " + row.result; color: #d4bc78; vertical-alignment: center; }
-                                Text { width: root.event-width; text: "  " + row.event; color: #bbc5d6; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.date-width; text: "  " + row.date; color: #bbc5d6; vertical-alignment: center; }
-                                Text { width: root.eco-width; text: "  " + row.eco; color: #91a4c4; vertical-alignment: center; }
+                                Text { width: root.white-width; text: "  " + row.white; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.black-width; text: "  " + row.black; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.result-width; text: "  " + row.result; color: Palette.accent-foreground; vertical-alignment: center; }
+                                Text { width: root.event-width; text: "  " + row.event; color: Palette.alternate-foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.date-width; text: "  " + row.date; color: Palette.alternate-foreground; vertical-alignment: center; }
+                                Text { width: root.eco-width; text: "  " + row.eco; color: Palette.alternate-foreground; vertical-alignment: center; }
                             }
                             TouchArea {
                                 enabled: !root.busy;
@@ -199,10 +201,10 @@ export component GameBrowser inherits Rectangle {
             Text {
                 horizontal-stretch: 1;
                 text: root.total-count == 0 ? "No games" : "Games " + (root.page-index * 100 + 1) + "–" + min(root.total-count, (root.page-index + 1) * 100) + " of " + root.total-count;
-                color: #91a4c4;
+                color: Palette.alternate-foreground;
                 vertical-alignment: center;
             }
-            if root.active-game-title != "": Text { text: "Loaded: " + root.active-game-title; color: #d4bc78; font-size: 11px; }
+            if root.active-game-title != "": Text { text: "Loaded: " + root.active-game-title; color: Palette.accent-foreground; font-size: 11px; }
             Button {
                 text: "Previous Page";
                 enabled: !root.busy && root.has-previous-page;

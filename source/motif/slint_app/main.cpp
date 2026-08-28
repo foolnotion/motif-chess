@@ -41,6 +41,16 @@ auto shared_string(std::string_view value) -> slint::SharedString
     return slint::SharedString {value};
 }
 
+auto trim_whitespace(std::string_view value) -> std::string_view
+{
+    constexpr auto whitespace = " \t\n\r\f\v";
+    auto const begin = value.find_first_not_of(whitespace);
+    if (begin == std::string_view::npos) {
+        return {};
+    }
+    return value.substr(begin, value.find_last_not_of(whitespace) - begin + 1);
+}
+
 auto to_ui_count(std::size_t count) -> int
 {
     constexpr auto maximum = static_cast<std::size_t>(std::numeric_limits<int>::max());
@@ -1410,7 +1420,12 @@ void register_workspace_callbacks(WorkspaceWindow& window,
                 return;
             }
             window.set_error_text("");
-            if (runner.run_create(std::string {dir_path}, std::string {name}) == async_workspace_runner::start_outcome::accepted) {
+            auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
+            auto const trimmed_name = trim_whitespace(std::string_view {name.data(), name.size()});
+            window.set_create_path_text(shared_string(trimmed_path));
+            window.set_create_name_text(shared_string(trimmed_name));
+            if (runner.run_create(std::string {trimmed_path}, std::string {trimmed_name})
+                == async_workspace_runner::start_outcome::accepted) {
                 window.set_busy(true);
             }
         });
@@ -1421,7 +1436,9 @@ void register_workspace_callbacks(WorkspaceWindow& window,
                 return;
             }
             window.set_error_text("");
-            if (runner.run_open(std::string {dir_path}) == async_workspace_runner::start_outcome::accepted) {
+            auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
+            window.set_open_path_text(shared_string(trimmed_path));
+            if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
                 window.set_busy(true);
             }
         });
@@ -1432,7 +1449,8 @@ void register_workspace_callbacks(WorkspaceWindow& window,
                 return;
             }
             window.set_error_text("");
-            if (runner.run_open(std::string {path}) == async_workspace_runner::start_outcome::accepted) {
+            auto const trimmed_path = trim_whitespace(std::string_view {path.data(), path.size()});
+            if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
                 window.set_busy(true);
             }
         });
@@ -1686,7 +1704,9 @@ void register_import_callbacks(WorkspaceWindow& window,
                 return;
             }
             window.set_error_text("");
-            auto started = importer.start(service.active_database(), std::filesystem::path {std::string {path}});
+            auto const trimmed_path = trim_whitespace(std::string_view {path.data(), path.size()});
+            window.set_import_path_text(shared_string(trimmed_path));
+            auto started = importer.start(service.active_database(), std::filesystem::path {trimmed_path});
             if (!started) {
                 publish_import_start_error(window, started.error());
                 return;
@@ -1712,7 +1732,7 @@ void register_import_callbacks(WorkspaceWindow& window,
 
 auto main() -> int
 {
-    auto service = motif::slint_app::workspace_service {};
+    auto service = motif::slint_app::workspace_service {motif::slint_app::config_path()};
     auto importer = motif::slint_app::import_service {};
     auto window = WorkspaceWindow::create();
     auto browser = async_browser_runner {window};
@@ -1741,6 +1761,7 @@ auto main() -> int
     clear_browser(*window);
     clear_board(*window);
     clear_search(*window);
+    publish_workspace(*window, service);
     register_workspace_callbacks(*window, service, importer, runner, browser, board, search);
     register_browser_callbacks(*window, browser, importer, runner, board, search);
     register_board_callbacks(*window, board, importer, runner, browser, search);
