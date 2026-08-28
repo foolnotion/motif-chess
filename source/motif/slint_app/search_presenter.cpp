@@ -8,6 +8,7 @@
 
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/types.hpp"
 #include "motif/search/error.hpp"
@@ -16,14 +17,40 @@
 namespace motif::slint_app
 {
 
-search_presenter::search_presenter(motif::db::database_manager& database) noexcept
+namespace
+{
+
+auto has_metadata_filter(motif::db::search_filter const& filter) -> bool
+{
+    return filter.player_name.has_value() || filter.result.has_value() || filter.eco_prefix.has_value() || filter.min_elo.has_value()
+        || filter.max_elo.has_value();
+}
+
+}  // namespace
+
+search_presenter::search_presenter(motif::db::database_manager& database)
     : database_(&database)
+    , starting_position_hash_ {motif::db::zobrist_hash {motif::chess::board {}.hash()}}
 {
 }
 
-auto search_presenter::search(motif::db::zobrist_hash const hash, motif::db::search_filter filter) -> search_result<search_query>
+auto search_presenter::search(motif::db::zobrist_hash const hash, motif::db::search_filter filter)
+    -> search_result<std::optional<search_query>>
 {
     filter.position = hash;
+    auto const cache_hit = hash == starting_position_hash_ && starting_position_cache_ && !has_metadata_filter(filter)
+        && filter.offset == starting_position_cache_->filter.offset && filter.limit == starting_position_cache_->filter.limit
+        && filter.sort_column == starting_position_cache_->filter.sort_column
+        && filter.sort_ascending == starting_position_cache_->filter.sort_ascending;
+    if (cache_hit) {
+        ++state_.query_generation;
+        auto cached_page = *starting_position_cache_;
+        cached_page.generation = state_.query_generation;
+        cached_page.filter = filter;
+        (void)apply_query(std::move(cached_page));
+        return std::optional<search_query> {std::nullopt};
+    }
+
     ++state_.query_generation;
     state_.matches.clear();
     state_.total_matches = 0;
@@ -36,7 +63,7 @@ auto search_presenter::search(motif::db::zobrist_hash const hash, motif::db::sea
     state_.error_text.clear();
     state_.searching = true;
     state_.current_hash = hash;
-    return search_query {.generation = state_.query_generation, .hash = hash, .filter = std::move(filter)};
+    return std::optional<search_query> {search_query {.generation = state_.query_generation, .hash = hash, .filter = std::move(filter)}};
 }
 
 auto search_presenter::execute_query(search_query const& query) const -> search_result<search_page>
@@ -96,6 +123,9 @@ auto search_presenter::apply_query(search_page page) -> search_result<bool>
     if (page.generation != state_.query_generation) {
         return false;
     }
+    if (page.hash == starting_position_hash_ && !has_metadata_filter(page.filter)) {
+        starting_position_cache_ = page;
+    }
     state_.current_hash = page.hash;
     auto const next_offset = page.filter.offset + page.matches.size();
     state_.matches = std::move(page.matches);
@@ -109,6 +139,11 @@ auto search_presenter::apply_query(search_page page) -> search_result<bool>
     state_.searching = false;
     state_.error_text.clear();
     return true;
+}
+
+void search_presenter::invalidate_starting_position_cache() noexcept
+{
+    starting_position_cache_.reset();
 }
 
 auto search_presenter::apply_query_error(std::uint64_t const generation, search_error query_error) -> search_result<bool>

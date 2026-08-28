@@ -1040,6 +1040,16 @@ class async_search_runner
         }
     }
 
+    // Must run before a forced refresh (e.g. after an import commits new
+    // games) so the refresh does not serve the starting-position cache's
+    // now-stale data.
+    void invalidate_position_cache()
+    {
+        if (state_->presenter) {
+            state_->presenter->invalidate_starting_position_cache();
+        }
+    }
+
     [[nodiscard]] auto is_busy() const noexcept -> bool { return state_->busy.load(std::memory_order_acquire); }
 
     void search(motif::db::zobrist_hash const hash, motif::db::search_filter const& filter)
@@ -1050,7 +1060,17 @@ class async_search_runner
         state_->last_hash = hash;
         auto query = state_->presenter->search(hash, filter);
         publish();
-        run_query(state_, std::move(query), state_->epoch);
+        if (!query) {
+            run_query(state_, search_query_result {tl::unexpected {query.error()}}, state_->epoch);
+            return;
+        }
+        auto& dispatchable = *query;
+        if (!dispatchable) {
+            // Served synchronously from the starting-position cache;
+            // state() already reflects it via publish() above.
+            return;
+        }
+        run_query(state_, search_query_result {std::move(*dispatchable)}, state_->epoch);
     }
 
     void search(std::optional<motif::db::zobrist_hash> const& hash, motif::db::search_filter const& filter)
@@ -1681,6 +1701,7 @@ void register_import_callbacks(WorkspaceWindow& window,
                             }
                             timer.stop();
                             browser.load_initial();
+                            search.invalidate_position_cache();
                             search.refresh_if_auto(board.current_hash(), browser.active_filter());
                         });
         });
