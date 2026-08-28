@@ -16,11 +16,7 @@ option(
     OFF
 )
 
-option(
-    motif_ENABLE_APP
-    "Build the motif_app Qt module"
-    OFF
-)
+
 
 option(
     motif_ENABLE_SLINT_SPIKE
@@ -63,9 +59,6 @@ add_subdirectory(source/motif/search)
 add_subdirectory(source/motif/navigator)
 add_subdirectory(source/motif/engine)
 add_subdirectory(source/motif/http)
-if(motif_ENABLE_APP)
-  add_subdirectory(source/motif/app)
-endif()
 if(motif_ENABLE_SLINT_SPIKE)
   add_subdirectory(source/motif/slint_spike)
 endif()

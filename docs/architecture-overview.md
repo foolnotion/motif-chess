@@ -13,9 +13,9 @@ Backend:
 
 Desktop presentation:
 
-- Slint is the production presentation direction
+- Slint is the sole production desktop presentation layer; Qt/QML and KDDockWidgets have been retired
 - toolkit-neutral workspace and import services own UI-facing behavior
-- the existing Qt application remains a working migration baseline until Slint reaches parity
+- generated Slint types and event-loop APIs stay confined to the `motif_slint_app` executable
 
 The local HTTP/SSE adapter remains available for experimental web clients and automation. It is not
 the production desktop presentation layer.
@@ -63,6 +63,7 @@ Engine analysis flow:
 ## Known Limitations
 
 - SQLite mutations invalidate derived indexes before changing canonical data; queries fail closed until rebuild
-- the production Slint shell currently covers workspace and import lifecycle; game browsing, board,
-  notation, and search parity remain migration work
-- some historical specs describe Qt as the target GUI; Qt now serves only as the working migration baseline
+- the Slint shell covers workspace lifecycle, game browsing, board/notation navigation, PGN import, and
+  position search/opening-explorer parity; the engine analysis panel from the historical Qt spec has not
+  yet been ported
+- Windows release readiness remains blocked until an approved Slint package is available through vcpkg
