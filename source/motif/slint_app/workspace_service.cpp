@@ -1,6 +1,6 @@
-#include <algorithm>
 #include <filesystem>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include "motif/slint_app/workspace_service.hpp"
@@ -22,6 +22,21 @@ auto to_service_message(motif::db::error const& database_error) -> std::string
 
 }  // namespace
 
+workspace_service::workspace_service(std::filesystem::path config_file)
+    : config_file_ {std::move(config_file)}
+{
+    if (config_file_.empty()) {
+        return;
+    }
+
+    auto config = load_config(config_file_);
+    if (config) {
+        config_ = std::move(*config);
+    } else {
+        error_message_ = config.error().message;
+    }
+}
+
 auto workspace_service::create_database(std::string const& dir_path, std::string const& name) -> result<void>
 {
     if (dir_path.empty() || name.empty()) {
@@ -35,11 +50,20 @@ auto workspace_service::create_database(std::string const& dir_path, std::string
         return tl::unexpected {error_code::database_failure};
     }
 
+    auto next_config = config_;
+    push_recent(next_config, name, dir_path);
+    if (auto persisted = persist_config(next_config); !persisted) {
+        created->close();
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(std::filesystem::path {dir_path}, cleanup_error);
+        return persisted;
+    }
+
     db_.emplace(std::move(*created));
+    config_ = std::move(next_config);
     kind_ = database_kind::persistent;
     display_name_ = name;
     active_path_ = dir_path;
-    promote_recent(name, dir_path);
     error_message_.clear();
     return {};
 }
@@ -58,11 +82,17 @@ auto workspace_service::open_database(std::string const& dir_path) -> result<voi
     }
 
     auto opened_name = std::string {opened->manifest().name};
+    auto next_config = config_;
+    push_recent(next_config, opened_name, dir_path);
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+
     db_.emplace(std::move(*opened));
+    config_ = std::move(next_config);
     kind_ = database_kind::persistent;
     display_name_ = opened_name;
     active_path_ = dir_path;
-    promote_recent(opened_name, dir_path);
     error_message_.clear();
     return {};
 }
@@ -95,10 +125,18 @@ void workspace_service::close_active() noexcept
     error_message_.clear();
 }
 
-void workspace_service::promote_recent(std::string const& name, std::string const& path)
+auto workspace_service::persist_config(workspace_config const& config) -> result<void>
 {
-    std::erase_if(recent_, [&path](recent_entry const& entry) -> bool { return entry.path == path; });
-    recent_.insert(recent_.begin(), recent_entry {.name = name, .path = path});
+    if (config_file_.empty()) {
+        return {};
+    }
+
+    auto const saved = save_config(config, config_file_);
+    if (!saved) {
+        error_message_ = saved.error().message;
+        return tl::unexpected {error_code::database_failure};
+    }
+    return {};
 }
 
 }  // namespace motif::slint_app
