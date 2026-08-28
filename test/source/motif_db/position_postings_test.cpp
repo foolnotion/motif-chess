@@ -27,16 +27,26 @@ class temporary_file
 {
   public:
     temporary_file()
-        // A per-instance random nonce, not a fixed filename: ctest runs
-        // many TEST_CASEs from this file as separate concurrent processes
-        // under -j, and every one of them constructs a temporary_file.
-        : path_ {std::filesystem::temp_directory_path()
-                 / ("motif-position-postings-test-" + std::to_string(std::random_device {}()) + ".idx")}
     {
-        std::filesystem::remove(path_);
+        // Reserve a directory atomically instead of merely hoping a random
+        // filename is unique: ctest runs many TEST_CASEs from this file as
+        // separate concurrent processes under -j, and every one of them
+        // constructs a temporary_file. std::filesystem::create_directory
+        // is atomic (POSIX mkdir / Win32 CreateDirectory), so a collision
+        // is detected and retried instead of silently overwriting another
+        // process's file.
+        std::filesystem::path dir;
+        for (;;) {
+            dir = std::filesystem::temp_directory_path() / ("motif-position-postings-test-" + std::to_string(std::random_device {}()));
+            if (std::filesystem::create_directory(dir)) {
+                break;
+            }
+        }
+        dir_ = dir;
+        path_ = dir / "postings.idx";
     }
 
-    ~temporary_file() { std::filesystem::remove(path_); }
+    ~temporary_file() { std::filesystem::remove_all(dir_); }
 
     temporary_file(temporary_file const&) = delete;
     auto operator=(temporary_file const&) -> temporary_file& = delete;
@@ -46,6 +56,7 @@ class temporary_file
     [[nodiscard]] auto path() const -> std::filesystem::path const& { return path_; }
 
   private:
+    std::filesystem::path dir_;
     std::filesystem::path path_;
 };
 
