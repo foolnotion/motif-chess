@@ -184,7 +184,10 @@
     {
       "name": "dev",
       "binaryDir": "${sourceDir}/build/dev",
-      "inherits": "dev-linux"
+      "inherits": "dev-linux",
+      "cacheVariables": {
+        "motif_ENABLE_SLINT_APP": "ON"
+      }
     },
     {
       "name": "perf-release",

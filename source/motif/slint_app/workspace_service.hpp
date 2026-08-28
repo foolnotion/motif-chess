@@ -9,15 +9,10 @@
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
+#include "motif/slint_app/error.hpp"
 
 namespace motif::slint_app
 {
-
-enum class error_code : std::uint8_t
-{
-    database_failure,
-    invalid_argument,
-};
 
 template<typename T>
 using result = tl::expected<T, error_code>;

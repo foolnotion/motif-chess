@@ -1,15 +1,16 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "motif/app/game_navigator.hpp"
+#include "motif/navigator/game_navigator.hpp"
 
 #include "motif/chess/chess.hpp"
 #include "motif/db/types.hpp"
 
-namespace motif::app
+namespace motif::navigator
 {
 
 void game_navigator::load(motif::db::game const& game)
@@ -62,6 +63,15 @@ auto game_navigator::current_fen() const -> std::string
     return motif::chess::write_fen(*result);
 }
 
+auto game_navigator::current_hash() const -> std::optional<motif::db::zobrist_hash>
+{
+    auto result = motif::chess::replay(moves_, static_cast<std::uint16_t>(ply_));
+    if (!result) {
+        return std::nullopt;
+    }
+    return motif::db::zobrist_hash {result->hash()};
+}
+
 auto game_navigator::current_san() const -> std::string
 {
     if (ply_ == 0 || moves_.empty()) {
@@ -87,4 +97,22 @@ auto game_navigator::move_list() const -> std::vector<std::string>
     return result;
 }
 
-}  // namespace motif::app
+auto game_navigator::last_move() const -> std::optional<motif::chess::move_info>
+{
+    if (ply_ == 0) {
+        return std::nullopt;
+    }
+    auto board_before = motif::chess::replay(moves_, static_cast<std::uint16_t>(ply_ - 1));
+    if (!board_before) {
+        return std::nullopt;
+    }
+    auto const legal = motif::chess::legal_moves(*board_before);
+    auto const played = moves_[ply_ - 1];
+    auto const found = std::ranges::find(legal, played, &motif::chess::move_info::encoded_move);
+    if (found == legal.end()) {
+        return std::nullopt;
+    }
+    return *found;
+}
+
+}  // namespace motif::navigator

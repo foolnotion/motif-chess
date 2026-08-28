@@ -115,6 +115,8 @@ TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db]
     CHECK(second.error() == motif::db::error_code::io_failure);
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("database_manager::open rejects a concurrent writer process for the same bundle", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"bundle_lock"};
@@ -735,6 +737,64 @@ TEST_CASE("database_manager::find_games intersects position and metadata filters
     REQUIRE(games->games.size() == 1);
     CHECK(games->total_count == 1);
     CHECK(games->games.front().id == *matching_id);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("database_manager::find_games with a position filter respects a non-default sort", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"find_games_position_sort"};
+
+    auto mgr = motif::db::database_manager::create(tdir.path, "find-games-position-sort-db");
+    REQUIRE(mgr.has_value());
+
+    chesslib::move e2e4 {};
+    e2e4.source_square = chesslib::square::e2;
+    e2e4.target_square = chesslib::square::e4;
+    e2e4.double_pawn = 1;
+
+    // Insert in an order where ascending game-id order does NOT match
+    // ascending white-name order: id 1 = Charlie, id 2 = Alice, id 3 = Bob.
+    // The position-postings fast path (no metadata filter) must not
+    // paginate by game-id order and only re-sort the resulting page --
+    // that silently drops Bob (id 3) from a white-ascending, limit-2 page.
+    for (auto const& name : {"Charlie", "Alice", "Bob"}) {
+        auto game = motif::db::game {
+            .white = {.name = name, .elo = {}, .title = {}, .country = {}},
+            .black = {.name = "Opponent", .elo = {}, .title = {}, .country = {}},
+            .event_details = {},
+            .date = "2024.01.01",
+            .result = "1-0",
+            .eco = "B90",
+            .moves = {chesslib::codec::encode(e2e4)},
+            .extra_tags = {},
+            .provenance = {},
+        };
+        REQUIRE(mgr->insert_game(game).has_value());
+    }
+    REQUIRE(mgr->rebuild_position_postings().has_value());
+
+    auto board = chesslib::board {};
+    chesslib::move_maker {board, e2e4}.make();
+
+    auto const first_page = mgr->find_games(motif::db::search_filter {
+        .player_name = {},
+        .player_color = motif::db::player_color::either,
+        .min_elo = {},
+        .max_elo = {},
+        .result = {},
+        .eco_prefix = {},
+        .position = motif::db::zobrist_hash {board.hash()},
+        .offset = 0,
+        .limit = 2,
+        .sort_column = motif::db::game_sort_column::white,
+        .sort_ascending = true,
+    });
+    REQUIRE(first_page.has_value());
+    CHECK(first_page->total_count == 3);
+    REQUIRE(first_page->games.size() == 2);
+    CHECK(first_page->games[0].white == "Alice");
+    CHECK(first_page->games[1].white == "Bob");
 }
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.

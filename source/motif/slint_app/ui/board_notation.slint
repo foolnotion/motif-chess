@@ -1,0 +1,455 @@
+import { Button } from "std-widgets.slint";
+
+export struct BoardSquare {
+    file: int,
+    rank: int,
+}
+
+// Mirrors motif::slint_app::square_highlight (motif/slint_app/board_presenter.hpp).
+export enum SquareHighlight { none, selected, legal-target, last-move-from, last-move-to }
+
+component ChessPiece inherits Image {
+    in property <string> code;
+
+    pure function piece-image(value: string) -> image {
+        if (value == "wK") { return @image-url("../../app/qml/pieces/wK.svg"); }
+        if (value == "wQ") { return @image-url("../../app/qml/pieces/wQ.svg"); }
+        if (value == "wR") { return @image-url("../../app/qml/pieces/wR.svg"); }
+        if (value == "wB") { return @image-url("../../app/qml/pieces/wB.svg"); }
+        if (value == "wN") { return @image-url("../../app/qml/pieces/wN.svg"); }
+        if (value == "wP") { return @image-url("../../app/qml/pieces/wP.svg"); }
+        if (value == "bK") { return @image-url("../../app/qml/pieces/bK.svg"); }
+        if (value == "bQ") { return @image-url("../../app/qml/pieces/bQ.svg"); }
+        if (value == "bR") { return @image-url("../../app/qml/pieces/bR.svg"); }
+        if (value == "bB") { return @image-url("../../app/qml/pieces/bB.svg"); }
+        if (value == "bN") { return @image-url("../../app/qml/pieces/bN.svg"); }
+        if (value == "bP") { return @image-url("../../app/qml/pieces/bP.svg"); }
+        return @image-url("");
+    }
+
+    source: root.piece-image(root.code);
+    image-fit: contain;
+}
+
+// Renders an 8x8 board from presenter-supplied square data only. Never
+// derives piece placement or legal moves from a FEN string itself.
+export component BoardPanel inherits Rectangle {
+    in property <[string]> square-pieces;
+    in property <[SquareHighlight]> square-highlights;
+    in property <bool> flipped;
+    in property <bool> board-loaded;
+    in property <bool> interaction-enabled: true;
+    callback square-activated(int, int);
+
+    pure function display-file(col: int) -> int {
+        return root.flipped ? 7 - col : col;
+    }
+    pure function display-rank(row: int) -> int {
+        return root.flipped ? row : 7 - row;
+    }
+    pure function highlight-overlay(h: SquareHighlight) -> color {
+        if (h == SquareHighlight.selected) {
+            return #4fc3f766;
+        }
+        if (h == SquareHighlight.last-move-from || h == SquareHighlight.last-move-to) {
+            return #d4bc7855;
+        }
+        return transparent;
+    }
+
+    property <length> square-size: 44px;
+    property <length> label-size: 16px;
+    width: root.label-size + root.square-size * 8;
+    height: root.label-size + root.square-size * 8;
+
+    background: #171c26;
+
+    board-scope := FocusScope {
+        focus-on-tab-navigation: root.board-loaded && root.interaction-enabled;
+        // focused-file/ranked-rank start as declarative bindings but are
+        // replaced with fixed values after the first arrow-key press; the
+        // `changed` handlers re-mirror the orientation so a flip while a
+        // square is focused moves focus to the mirrored square instead of
+        // yanking it back to a corner.
+        property <int> focused-file: root.flipped ? 7 : 0;
+        accessible-role: button;
+        accessible-label: root.string-from-char-code(97 + self.focused-file) + (self.focused-rank + 1);
+        accessible-action-default => {
+            if (root.board-loaded && root.interaction-enabled) {
+                root.square-activated(self.focused-file, self.focused-rank);
+            }
+        }
+        property <int> focused-rank: root.flipped ? 7 : 0;
+        property <bool> was-flipped: root.flipped;
+        changed was-flipped => {
+            self.focused-file = 7 - self.focused-file;
+            self.focused-rank = 7 - self.focused-rank;
+        }
+        key-pressed(event) => {
+            if (!root.board-loaded || !root.interaction-enabled) {
+                return reject;
+            }
+            if (event.text == Key.LeftArrow) {
+                self.focused-file = max(0, self.focused-file - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                self.focused-file = min(7, self.focused-file + 1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                self.focused-rank = min(7, self.focused-rank + 1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                self.focused-rank = max(0, self.focused-rank - 1);
+                return accept;
+            }
+            if (event.text == "\n" || event.text == " ") {
+                root.square-activated(self.focused-file, self.focused-rank);
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            for row in 8: HorizontalLayout {
+                height: root.square-size;
+                Text {
+                    width: root.label-size;
+                    height: root.square-size;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    font-size: 10px;
+                    color: #91a4c4;
+                    text: root.display-rank(row) + 1;
+                }
+                for col in 8: sq := Rectangle {
+                    property <int> file: root.display-file(col);
+                    property <int> rank: root.display-rank(row);
+                    property <int> idx: sq.rank * 8 + sq.file;
+                    property <SquareHighlight> highlight: root.square-highlights.length > sq.idx ? root.square-highlights[sq.idx] : SquareHighlight.none;
+                    width: root.square-size;
+                    height: root.square-size;
+                    background: Math.mod(sq.file + sq.rank, 2) == 0 ? #b58863 : #f0d9b5;
+                    Rectangle {
+                        background: root.highlight-overlay(sq.highlight);
+                    }
+                    if board-scope.has-focus && board-scope.focused-file == sq.file && board-scope.focused-rank == sq.rank: Rectangle {
+                        border-width: 3px;
+                        border-color: #ffffff;
+                        background: transparent;
+                    }
+                    if sq.highlight == SquareHighlight.legal-target: Rectangle {
+                        width: root.square-size * 0.3;
+                        height: root.square-size * 0.3;
+                        border-radius: root.square-size * 0.15;
+                        background: #4fc3f7aa;
+                    }
+                    ChessPiece {
+                        code: root.square-pieces.length > sq.idx ? root.square-pieces[sq.idx] : "";
+                        width: parent.width * 0.88;
+                        height: parent.height * 0.88;
+                    }
+                    TouchArea {
+                        enabled: root.board-loaded && root.interaction-enabled;
+                        clicked => {
+                            board-scope.focused-file = sq.file;
+                            board-scope.focused-rank = sq.rank;
+                            board-scope.focus();
+                            root.square-activated(sq.file, sq.rank);
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                height: root.label-size;
+                Rectangle { width: root.label-size; }
+                for col in 8: Text {
+                    width: root.square-size;
+                    horizontal-alignment: center;
+                    font-size: 10px;
+                    color: #91a4c4;
+                    text: string-from-char-code(97 + root.display-file(col));
+                }
+            }
+        }
+    }
+
+    pure function string-from-char-code(code: int) -> string {
+        if (code == 97) { return "a"; }
+        if (code == 98) { return "b"; }
+        if (code == 99) { return "c"; }
+        if (code == 100) { return "d"; }
+        if (code == 101) { return "e"; }
+        if (code == 102) { return "f"; }
+        if (code == 103) { return "g"; }
+        return "h";
+    }
+}
+
+// Renders headers/result/SAN moves as inline, wrapping paragraph-style
+// notation, packing a fixed count of half-moves per row (Slint has no
+// automatic reflow layout for variable-width children in this toolchain
+// version, so wrapping is grouped by count rather than measured pixel
+// width). Click or activate a token to jump directly to that ply.
+export component NotationPanel inherits Rectangle {
+    in property <string> white-name;
+    in property <string> black-name;
+    in property <string> event-name;
+    in property <string> date;
+    in property <string> result;
+    in property <[string]> san-moves;
+    in property <int> current-ply;
+    in property <bool> interaction-enabled: true;
+    callback ply-activated(int);
+
+    property <int> units-per-row: 6;
+    property <int> unit-count: root.san-moves.length;
+    // (unit-count + units-per-row - 1) / units-per-row: ceil without the
+    // truncating integer division inside Math.ceil, which floors first
+    // and would hide the final partial row of moves.
+    property <int> row-count: (root.unit-count + root.units-per-row - 1) / root.units-per-row;
+
+    background: #171c26;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        if root.white-name != "" || root.black-name != "": Text {
+            text: root.white-name + " – " + root.black-name;
+            color: #f1f4f8;
+            font-size: 15px;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        if root.event-name != "" || root.date != "": Text {
+            text: root.event-name != "" && root.date != "" ? root.event-name + " · " + root.date : root.event-name + root.date;
+            color: #91a4c4;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: rows.preferred-height;
+            rows := VerticalLayout {
+                spacing: 4px;
+                for row-index in root.row-count: HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    for col in root.units-per-row: cell := Rectangle {
+                        property <int> idx: row-index * root.units-per-row + col;
+                        visible: cell.idx < root.unit-count;
+                        width: cell.visible ? content.preferred-width : 0px;
+                        height: content.preferred-height;
+                        content := HorizontalLayout {
+                            spacing: 2px;
+                            if Math.mod(cell.idx, 2) == 0: Text {
+                                text: Math.floor(cell.idx / 2) + 1 + ".";
+                                color: #777777;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            move-scope := FocusScope {
+                                focus-on-tab-navigation: root.interaction-enabled;
+                                accessible-role: button;
+                                accessible-label: "Move " + (cell.idx + 1) + ": " + (cell.idx < root.san-moves.length ? root.san-moves[cell.idx] : "");
+                                accessible-action-default => {
+                                    if (root.interaction-enabled) {
+                                        root.ply-activated(cell.idx + 1);
+                                    }
+                                }
+                                width: move-text.preferred-width + 8px;
+                                key-pressed(event) => {
+                                    if (root.interaction-enabled && (event.text == "\n" || event.text == " ")) {
+                                        root.ply-activated(cell.idx + 1);
+                                        return accept;
+                                    }
+                                    return reject;
+                                }
+                                TouchArea {
+                                    enabled: root.interaction-enabled;
+                                    clicked => {
+                                        move-scope.focus();
+                                        root.ply-activated(cell.idx + 1);
+                                    }
+                                    move-text := Text {
+                                        text: cell.idx < root.san-moves.length ? root.san-moves[cell.idx] : "";
+                                        color: cell.idx + 1 == root.current-ply ? #4fc3f7 : #d4d4d4;
+                                        font-weight: cell.idx + 1 == root.current-ply ? 700 : 400;
+                                        font-size: 13px;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.result != "": Text {
+                    text: root.result;
+                    color: #91a4c4;
+                    font-weight: 700;
+                    font-size: 13px;
+                }
+            }
+        }
+    }
+}
+
+// Wraps board + notation with navigation, orientation, and a
+// keyboard-accessible hide/restore control for the whole region. Hiding
+// collapses the content to zero layout reservation via `if`.
+export component GameReviewPanel inherits Rectangle {
+    in property <bool> board-loaded;
+    in property <[string]> square-pieces;
+    in property <[SquareHighlight]> square-highlights;
+    in property <bool> flipped;
+    in property <string> white-name;
+    in property <string> black-name;
+    in property <string> event-name;
+    in property <string> date;
+    in property <string> result;
+    in property <[string]> san-moves;
+    in property <int> current-ply;
+    in property <bool> interaction-enabled: true;
+
+    callback square-activated(int, int);
+    callback ply-activated(int);
+    callback navigate-first();
+    callback navigate-previous();
+    callback navigate-next();
+    callback navigate-last();
+    callback orientation-toggled();
+    callback panel-visibility-toggled();
+
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: #313949;
+    background: #171c26;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            height: 26px;
+            Text {
+                horizontal-stretch: 1;
+                text: "Board & Notation";
+                color: #91a4c4;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            visibility-scope := FocusScope {
+                focus-on-tab-navigation: root.interaction-enabled;
+                width: visibility-button.preferred-width;
+                key-pressed(event) => {
+                    if (root.interaction-enabled && (event.text == "\n" || event.text == " ")) {
+                        root.panel-visibility-toggled();
+                        return accept;
+                    }
+                    return reject;
+                }
+                visibility-button := Button {
+                    enabled: root.interaction-enabled;
+                    text: "Hide";
+                    clicked => {
+                        visibility-scope.focus();
+                        root.panel-visibility-toggled();
+                    }
+                }
+            }
+        }
+
+        keyboard-scope := FocusScope {
+            vertical-stretch: 1;
+            key-pressed(event) => {
+                if (!root.interaction-enabled) {
+                    return reject;
+                }
+                if (event.text == Key.LeftArrow) {
+                    root.navigate-previous();
+                    return accept;
+                }
+                if (event.text == Key.RightArrow) {
+                    root.navigate-next();
+                    return accept;
+                }
+                if (event.text == Key.Home) {
+                    root.navigate-first();
+                    return accept;
+                }
+                if (event.text == Key.End) {
+                    root.navigate-last();
+                    return accept;
+                }
+                return reject;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                VerticalLayout {
+                    spacing: 8px;
+                    BoardPanel {
+                        square-pieces: root.square-pieces;
+                        board-loaded: root.board-loaded;
+                        square-highlights: root.square-highlights;
+                        flipped: root.flipped;
+                        interaction-enabled: root.interaction-enabled;
+                        square-activated(file, rank) => {
+                            keyboard-scope.focus();
+                            root.square-activated(file, rank);
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: "|<";
+                            enabled: root.board-loaded && root.interaction-enabled;
+                            clicked => { keyboard-scope.focus(); root.navigate-first(); }
+                        }
+                        Button {
+                            text: "<";
+                            enabled: root.board-loaded && root.interaction-enabled;
+                            clicked => { keyboard-scope.focus(); root.navigate-previous(); }
+                        }
+                        Button {
+                            text: ">";
+                            enabled: root.board-loaded && root.interaction-enabled;
+                            clicked => { keyboard-scope.focus(); root.navigate-next(); }
+                        }
+                        Button {
+                            text: ">|";
+                            enabled: root.board-loaded && root.interaction-enabled;
+                            clicked => { keyboard-scope.focus(); root.navigate-last(); }
+                        }
+                        Button {
+                            text: "Flip";
+                            enabled: root.interaction-enabled;
+                            clicked => { root.orientation-toggled(); }
+                        }
+                    }
+                }
+
+                NotationPanel {
+                    min-width: 220px;
+                    horizontal-stretch: 1;
+                    white-name: root.white-name;
+                    black-name: root.black-name;
+                    event-name: root.event-name;
+                    date: root.date;
+                    result: root.result;
+                    san-moves: root.san-moves;
+                    current-ply: root.current-ply;
+                    interaction-enabled: root.interaction-enabled;
+                    ply-activated(ply) => {
+                        keyboard-scope.focus();
+                        root.ply-activated(ply);
+                    }
+                }
+            }
+        }
+    }
+}

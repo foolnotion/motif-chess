@@ -4,12 +4,19 @@ endif()
 find_package(tl-expected REQUIRED)
 
 add_library(motif_slint_app_service STATIC
+    board_presenter.cpp
     import_service.cpp
     workspace_service.cpp
+    game_browser_presenter.cpp
+    search_presenter.cpp
 )
 target_link_libraries(motif_slint_app_service PUBLIC
+    motif_chess
     motif_db
+    motif_game_navigator
     motif_import
+    motif_search
+    fmt::fmt
     tl::expected
 )
 target_include_directories(motif_slint_app_service PUBLIC
