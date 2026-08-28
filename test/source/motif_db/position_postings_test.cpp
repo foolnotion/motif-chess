@@ -8,6 +8,7 @@
 #include <random>
 #include <span>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "motif/db/position_postings.hpp"
@@ -34,19 +35,33 @@ class temporary_file
         // constructs a temporary_file. std::filesystem::create_directory
         // is atomic (POSIX mkdir / Win32 CreateDirectory), so a collision
         // is detected and retried instead of silently overwriting another
-        // process's file.
+        // process's file. The device is constructed once and reused across
+        // retries: a fresh std::random_device per iteration is permitted by
+        // the standard to be deterministic, which could otherwise spin on
+        // the same losing directory forever.
+        std::random_device rng;
         std::filesystem::path dir;
         for (;;) {
-            dir = std::filesystem::temp_directory_path() / ("motif-position-postings-test-" + std::to_string(std::random_device {}()));
+            dir = std::filesystem::temp_directory_path() / ("motif-position-postings-test-" + std::to_string(rng()));
             if (std::filesystem::create_directory(dir)) {
                 break;
             }
         }
-        dir_ = dir;
-        path_ = dir / "postings.idx";
+        try {
+            dir_ = dir;
+            path_ = dir / "postings.idx";
+        } catch (...) {
+            std::error_code remove_error;
+            std::filesystem::remove_all(dir, remove_error);
+            throw;
+        }
     }
 
-    ~temporary_file() { std::filesystem::remove_all(dir_); }
+    ~temporary_file()
+    {
+        std::error_code remove_error;
+        std::filesystem::remove_all(dir_, remove_error);
+    }
 
     temporary_file(temporary_file const&) = delete;
     auto operator=(temporary_file const&) -> temporary_file& = delete;
