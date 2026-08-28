@@ -5,8 +5,10 @@
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "motif/db/position_postings.hpp"
@@ -26,12 +28,40 @@ class temporary_file
 {
   public:
     temporary_file()
-        : path_ {std::filesystem::temp_directory_path() / "motif-position-postings-test.idx"}
     {
-        std::filesystem::remove(path_);
+        // Reserve a directory atomically instead of merely hoping a random
+        // filename is unique: ctest runs many TEST_CASEs from this file as
+        // separate concurrent processes under -j, and every one of them
+        // constructs a temporary_file. std::filesystem::create_directory
+        // is atomic (POSIX mkdir / Win32 CreateDirectory), so a collision
+        // is detected and retried instead of silently overwriting another
+        // process's file. The device is constructed once and reused across
+        // retries: a fresh std::random_device per iteration is permitted by
+        // the standard to be deterministic, which could otherwise spin on
+        // the same losing directory forever.
+        std::random_device rng;
+        std::filesystem::path dir;
+        for (;;) {
+            dir = std::filesystem::temp_directory_path() / ("motif-position-postings-test-" + std::to_string(rng()));
+            if (std::filesystem::create_directory(dir)) {
+                break;
+            }
+        }
+        try {
+            dir_ = dir;
+            path_ = dir / "postings.idx";
+        } catch (...) {
+            std::error_code remove_error;
+            std::filesystem::remove_all(dir, remove_error);
+            throw;
+        }
     }
 
-    ~temporary_file() { std::filesystem::remove(path_); }
+    ~temporary_file()
+    {
+        std::error_code remove_error;
+        std::filesystem::remove_all(dir_, remove_error);
+    }
 
     temporary_file(temporary_file const&) = delete;
     auto operator=(temporary_file const&) -> temporary_file& = delete;
@@ -41,6 +71,7 @@ class temporary_file
     [[nodiscard]] auto path() const -> std::filesystem::path const& { return path_; }
 
   private:
+    std::filesystem::path dir_;
     std::filesystem::path path_;
 };
 
