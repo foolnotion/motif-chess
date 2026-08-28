@@ -54,7 +54,7 @@ Treating a duplicate as a fatal error is a bug.
 - **All identifiers**: `lower_snake_case` — variables, functions, struct members, Qt signals, logger names.
 - **Template parameters only**: `CamelCase` (e.g., `template <typename ResultType>`).
 - **No `k_` prefix** for constants. Use `constexpr auto max_retry_count = 3;` not `constexpr auto k_max_retry_count = 3;`.
-- **Namespaces** mirror CMake targets: `motif::db`, `motif::import`, `motif::search`, `motif::engine`, `motif::app`, `motif::slint_app`.
+- **Namespaces** mirror CMake targets: `motif::db`, `motif::import`, `motif::search`, `motif::engine`, `motif::slint_app`.
 - **No `using namespace`** in any header, ever.
 
 ---
