@@ -148,8 +148,14 @@
 
           packages.app = packages.default.overrideAttrs (old: {
             name = "motif-chess-app";
-            cmakeFlags = old.cmakeFlags ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ "-Dmotif_ENABLE_SLINT_APP=ON" ];
-            buildInputs = old.buildInputs ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.slint ];
+            cmakeFlags =
+              old.cmakeFlags
+              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [
+                "-Dmotif_ENABLE_SLINT_APP=ON"
+              ];
+            buildInputs =
+              old.buildInputs
+              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [ pkgs.slint ];
           });
 
           devShells.default = mkShell {
