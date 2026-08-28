@@ -492,7 +492,7 @@ class bundle_lock
         if (descriptor_ < 0) {
             return;
         }
-        auto lock = flock {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0, .l_pid = 0};
+        struct flock lock {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0, .l_pid = 0};
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) -- fcntl is the portable POSIX advisory-lock API.
         if (::fcntl(descriptor_, F_SETLK, &lock) != 0) {
             ::close(descriptor_);
@@ -513,7 +513,7 @@ class bundle_lock
         }
 #else
         if (descriptor_ >= 0) {
-            auto lock = flock {.l_type = F_UNLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0, .l_pid = 0};
+            struct flock lock {.l_type = F_UNLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0, .l_pid = 0};
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) -- fcntl is the portable POSIX advisory-lock API.
             static_cast<void>(::fcntl(descriptor_, F_SETLK, &lock));
             ::close(descriptor_);
