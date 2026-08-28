@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -9,6 +9,7 @@
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
+#include "motif/slint_app/config.hpp"
 #include "motif/slint_app/error.hpp"
 
 namespace motif::slint_app
@@ -24,18 +25,10 @@ enum class database_kind : std::uint8_t
     scratch,
 };
 
-struct recent_entry
-{
-    std::string name;
-    std::string path;
-};
-
-// Recent-path tracking is in-memory for this slice. The existing app config
-// is toolkit-neutral, but its CMake target currently requires Qt at configure
-// time. Persistence is deferred rather than introducing another file format.
 class workspace_service
 {
   public:
+    explicit workspace_service(std::filesystem::path config_file = std::filesystem::path {});
     auto create_database(std::string const& dir_path, std::string const& name) -> result<void>;
     auto open_database(std::string const& dir_path) -> result<void>;
     auto activate_scratch() -> result<void>;
@@ -51,7 +44,7 @@ class workspace_service
 
     [[nodiscard]] auto active_path() const noexcept -> std::string_view { return active_path_; }
 
-    [[nodiscard]] auto recent_databases() const noexcept -> std::vector<recent_entry> const& { return recent_; }
+    [[nodiscard]] auto recent_databases() const noexcept -> std::vector<recent_entry> const& { return config_.recent_databases; }
 
     [[nodiscard]] auto error_message() const noexcept -> std::string_view { return error_message_; }
 
@@ -59,13 +52,14 @@ class workspace_service
 
   private:
     std::optional<motif::db::database_manager> db_;
+    workspace_config config_;
+    std::filesystem::path config_file_;
     database_kind kind_ {database_kind::none};
     std::string display_name_;
     std::string active_path_;
-    std::vector<recent_entry> recent_;
     std::string error_message_;
 
-    void promote_recent(std::string const& name, std::string const& path);
+    auto persist_config(workspace_config const& config) -> result<void>;
 };
 
 }  // namespace motif::slint_app

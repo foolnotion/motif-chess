@@ -1,4 +1,4 @@
-import { Button } from "std-widgets.slint";
+import { Button, Palette } from "std-widgets.slint";
 
 export struct BoardSquare {
     file: int,
@@ -12,18 +12,18 @@ component ChessPiece inherits Image {
     in property <string> code;
 
     pure function piece-image(value: string) -> image {
-        if (value == "wK") { return @image-url("../../app/qml/pieces/wK.svg"); }
-        if (value == "wQ") { return @image-url("../../app/qml/pieces/wQ.svg"); }
-        if (value == "wR") { return @image-url("../../app/qml/pieces/wR.svg"); }
-        if (value == "wB") { return @image-url("../../app/qml/pieces/wB.svg"); }
-        if (value == "wN") { return @image-url("../../app/qml/pieces/wN.svg"); }
-        if (value == "wP") { return @image-url("../../app/qml/pieces/wP.svg"); }
-        if (value == "bK") { return @image-url("../../app/qml/pieces/bK.svg"); }
-        if (value == "bQ") { return @image-url("../../app/qml/pieces/bQ.svg"); }
-        if (value == "bR") { return @image-url("../../app/qml/pieces/bR.svg"); }
-        if (value == "bB") { return @image-url("../../app/qml/pieces/bB.svg"); }
-        if (value == "bN") { return @image-url("../../app/qml/pieces/bN.svg"); }
-        if (value == "bP") { return @image-url("../../app/qml/pieces/bP.svg"); }
+        if (value == "wK") { return @image-url("pieces/wK.svg"); }
+        if (value == "wQ") { return @image-url("pieces/wQ.svg"); }
+        if (value == "wR") { return @image-url("pieces/wR.svg"); }
+        if (value == "wB") { return @image-url("pieces/wB.svg"); }
+        if (value == "wN") { return @image-url("pieces/wN.svg"); }
+        if (value == "wP") { return @image-url("pieces/wP.svg"); }
+        if (value == "bK") { return @image-url("pieces/bK.svg"); }
+        if (value == "bQ") { return @image-url("pieces/bQ.svg"); }
+        if (value == "bR") { return @image-url("pieces/bR.svg"); }
+        if (value == "bB") { return @image-url("pieces/bB.svg"); }
+        if (value == "bN") { return @image-url("pieces/bN.svg"); }
+        if (value == "bP") { return @image-url("pieces/bP.svg"); }
         return @image-url("");
     }
 
@@ -62,7 +62,7 @@ export component BoardPanel inherits Rectangle {
     width: root.label-size + root.square-size * 8;
     height: root.label-size + root.square-size * 8;
 
-    background: #171c26;
+    background: Palette.background;
 
     board-scope := FocusScope {
         focus-on-tab-navigation: root.board-loaded && root.interaction-enabled;
@@ -121,7 +121,7 @@ export component BoardPanel inherits Rectangle {
                     vertical-alignment: center;
                     horizontal-alignment: center;
                     font-size: 10px;
-                    color: #91a4c4;
+                    color: Palette.alternate-foreground;
                     text: root.display-rank(row) + 1;
                 }
                 for col in 8: sq := Rectangle {
@@ -137,7 +137,7 @@ export component BoardPanel inherits Rectangle {
                     }
                     if board-scope.has-focus && board-scope.focused-file == sq.file && board-scope.focused-rank == sq.rank: Rectangle {
                         border-width: 3px;
-                        border-color: #ffffff;
+                        border-color: Palette.selection-foreground;
                         background: transparent;
                     }
                     if sq.highlight == SquareHighlight.legal-target: Rectangle {
@@ -169,7 +169,7 @@ export component BoardPanel inherits Rectangle {
                     width: root.square-size;
                     horizontal-alignment: center;
                     font-size: 10px;
-                    color: #91a4c4;
+                    color: Palette.alternate-foreground;
                     text: string-from-char-code(97 + root.display-file(col));
                 }
             }
@@ -211,7 +211,7 @@ export component NotationPanel inherits Rectangle {
     // and would hide the final partial row of moves.
     property <int> row-count: (root.unit-count + root.units-per-row - 1) / root.units-per-row;
 
-    background: #171c26;
+    background: Palette.background;
 
     VerticalLayout {
         padding: 10px;
@@ -219,14 +219,14 @@ export component NotationPanel inherits Rectangle {
 
         if root.white-name != "" || root.black-name != "": Text {
             text: root.white-name + " – " + root.black-name;
-            color: #f1f4f8;
+            color: Palette.foreground;
             font-size: 15px;
             font-weight: 700;
             wrap: word-wrap;
         }
         if root.event-name != "" || root.date != "": Text {
             text: root.event-name != "" && root.date != "" ? root.event-name + " · " + root.date : root.event-name + root.date;
-            color: #91a4c4;
+            color: Palette.alternate-foreground;
             font-size: 11px;
             wrap: word-wrap;
         }
@@ -248,7 +248,7 @@ export component NotationPanel inherits Rectangle {
                             spacing: 2px;
                             if Math.mod(cell.idx, 2) == 0: Text {
                                 text: Math.floor(cell.idx / 2) + 1 + ".";
-                                color: #777777;
+                                color: Palette.alternate-foreground;
                                 font-size: 13px;
                                 vertical-alignment: center;
                             }
@@ -262,6 +262,7 @@ export component NotationPanel inherits Rectangle {
                                     }
                                 }
                                 width: move-text.preferred-width + 8px;
+                                height: move-text.preferred-height;
                                 key-pressed(event) => {
                                     if (root.interaction-enabled && (event.text == "\n" || event.text == " ")) {
                                         root.ply-activated(cell.idx + 1);
@@ -269,26 +270,29 @@ export component NotationPanel inherits Rectangle {
                                     }
                                     return reject;
                                 }
+                                move-text := Text {
+                                    x: 4px;
+                                    height: parent.height;
+                                    text: cell.idx < root.san-moves.length ? root.san-moves[cell.idx] : "";
+                                    color: cell.idx + 1 == root.current-ply ? Palette.accent-background : Palette.foreground;
+                                    font-weight: cell.idx + 1 == root.current-ply ? 700 : 400;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                }
                                 TouchArea {
                                     enabled: root.interaction-enabled;
                                     clicked => {
                                         move-scope.focus();
                                         root.ply-activated(cell.idx + 1);
                                     }
-                                    move-text := Text {
-                                        text: cell.idx < root.san-moves.length ? root.san-moves[cell.idx] : "";
-                                        color: cell.idx + 1 == root.current-ply ? #4fc3f7 : #d4d4d4;
-                                        font-weight: cell.idx + 1 == root.current-ply ? 700 : 400;
-                                        font-size: 13px;
-                                    }
                                 }
                             }
                         }
                     }
-                }
+                    }
                 if root.result != "": Text {
                     text: root.result;
-                    color: #91a4c4;
+                    color: Palette.alternate-foreground;
                     font-weight: 700;
                     font-size: 13px;
                 }
@@ -325,8 +329,8 @@ export component GameReviewPanel inherits Rectangle {
 
     border-radius: 5px;
     border-width: 1px;
-    border-color: #313949;
-    background: #171c26;
+    border-color: Palette.border;
+    background: Palette.alternate-background;
 
     VerticalLayout {
         padding: 10px;
@@ -337,7 +341,7 @@ export component GameReviewPanel inherits Rectangle {
             Text {
                 horizontal-stretch: 1;
                 text: "Board & Notation";
-                color: #91a4c4;
+                color: Palette.alternate-foreground;
                 font-weight: 700;
                 vertical-alignment: center;
             }

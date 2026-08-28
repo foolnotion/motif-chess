@@ -1,14 +1,16 @@
 if(NOT TARGET Slint::slint-compiler)
     find_package(Slint CONFIG REQUIRED)
 endif()
+find_package(glaze REQUIRED)
 find_package(tl-expected REQUIRED)
 
 add_library(motif_slint_app_service STATIC
     board_presenter.cpp
-    import_service.cpp
-    workspace_service.cpp
+    config.cpp
     game_browser_presenter.cpp
+    import_service.cpp
     search_presenter.cpp
+    workspace_service.cpp
 )
 target_link_libraries(motif_slint_app_service PUBLIC
     motif_chess
@@ -16,6 +18,7 @@ target_link_libraries(motif_slint_app_service PUBLIC
     motif_game_navigator
     motif_import
     motif_search
+    glaze::glaze
     fmt::fmt
     tl::expected
 )
@@ -26,6 +29,8 @@ target_compile_features(motif_slint_app_service PUBLIC cxx_std_23)
 
 add_executable(motif_slint_app main.cpp)
 slint_target_sources(motif_slint_app ui/workspace.slint)
+# Embed board-piece assets so installed applications do not retain source-tree paths.
+set_property(TARGET motif_slint_app PROPERTY SLINT_EMBED_RESOURCES embed-files)
 # Slint generates framework C++ that does not follow Motif's clang-tidy rules.
 # Keep linting enabled for main.cpp and skip only the generated translation unit.
 set_source_files_properties(
@@ -51,4 +56,9 @@ target_compile_features(motif_slint_app PRIVATE cxx_std_23)
 if(NOT CMAKE_SKIP_INSTALL_RULES)
     include(GNUInstallDirs)
     install(TARGETS motif_slint_app RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        install(FILES "${PROJECT_SOURCE_DIR}/packaging/linux/motif-chess.desktop"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
+        )
+    endif()
 endif()
