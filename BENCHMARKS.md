@@ -491,3 +491,69 @@ does not alter the postings format or the measurements above. Legacy bundles
 without valid postings rebuild them from canonical SQLite and leave any old
 `positions.duckdb` file untouched. Scratch and oracle tests now exercise the
 same SQLite-plus-postings architecture as persistent bundles.
+
+---
+
+## 2026-08-28 — Post-Epic-9 Import Regression Check
+
+**Machine:** Linux, 32-core, Clang 21, `build/perf-release` (reconfigured
+ad hoc without `clang-tidy` for this run only — a pre-existing clang-tidy
+false positive on Catch2's own `ResultDisposition` flag-enum bitwise-OR in
+`opening_tree_index_perf_test.cpp` blocks a clean lint build; unrelated to
+this session's changes, not investigated further here). Corpus:
+`bench/data/twic-1m.pgn`, 1,001,090 attempted / 991,278 committed for every
+entry below. Full `test/source/motif_import/import_pipeline_test.cpp`
+`[performance]` suite (40 cases), run serially (`-j1`).
+
+### Trigger
+
+A ~5k-game import felt slow through the Slint desktop app during a manual
+compositor-check session (Story 9.5, AC-9-5-2). That observation was through
+`build/dev` (Debug, `-O0`) over a nested-Wayland/waypipe-forwarded display —
+not a valid perf signal on its own. This run re-measures the same import
+pipeline the proper way, isolated on `perf-release`, to check whether Epic 9
+(Slint migration) or anything since actually regressed import throughput.
+
+### Total Import
+
+| Benchmark | Elapsed |
+|---|---:|
+| `import_pipeline: default fast path perf` | 78,034 ms |
+| `import_pipeline: serial fast path candidate perf` | 92,083 ms |
+| `import_pipeline: wide parallel (8 workers) perf` | 77,036 ms |
+| `import_pipeline: wide parallel (16 workers) perf` | 78,967 ms |
+| `import_pipeline: wide parallel (24 workers) perf` | 78,947 ms |
+| `import_pipeline: wide parallel (32 workers) perf` | 79,610 ms |
+| `import_pipeline: ingest-only serial perf` | 35,671 ms |
+| `import_pipeline: ingest plus postings rebuild perf` | 88,973 ms |
+| `import_pipeline: serial postings build perf` | 89,634 ms |
+| `import_pipeline: postings rebuild-only perf` | 52,750 ms |
+
+### Peak RSS
+
+| Benchmark | Elapsed | Baseline RSS | Peak RSS | Delta |
+|---|---:|---:|---:|---:|
+| `import_pipeline: ingest-only peak RSS on 1M` | 23,568 ms | 8 MB | 565 MB | 556 MB |
+| `import_pipeline: rebuild path peak RSS on 1M` | 23,696 ms | 8 MB | 660 MB | 651 MB |
+| `import_pipeline: inline path peak RSS on 1M` | 75,664 ms | 8 MB | 662 MB | 654 MB |
+
+### Verdict: no regression
+
+The only same-methodology historical baseline for today's default path
+(postings-only, no DuckDB — `import_config {}`'s default since the
+"Exact postings as the import default" entry above) is that same entry's
+isolated-median **81.520 s** on this corpus. Today's **78.034 s** is
+~4.3% *faster*, within normal run-to-run variance at worst, not slower.
+
+The much larger-looking deltas against the 2026-08-20/2026-08-22 entries
+above (48.6 s / 60.1 s / 68.3 s) are not regressions — those measured a
+different code path (DuckDB rollup, or early postings before the "exact
+postings as import default" change) and are not comparable to today's
+default. Every test in the suite stayed well inside the project's
+calibrated ceiling (`import_perf_limit_ms` = 120,000 ms; worst observed was
+92,083 ms).
+
+**Conclusion:** the slow ~5k-game import observed through the Slint app was
+explained by the Debug build and nested-Wayland-forwarding overhead used for
+that manual check, not an import pipeline regression from Epic 9 or later
+work.
