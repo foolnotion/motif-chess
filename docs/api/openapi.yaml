@@ -312,9 +312,9 @@ paths:
   /api/positions/rebuild:
     post:
       operationId: rebuildPositionStore
-      summary: Rebuild the DuckDB position store from SQLite
+      summary: Rebuild the position index from SQLite
       description: >-
-        Drops and rebuilds the DuckDB position table from all games currently stored
+        Rebuilds the immutable position-postings index from all games currently stored
         in SQLite. Useful for repairing consistency after data corruption or
         manual database edits.
       responses:
@@ -468,8 +468,9 @@ paths:
             data: {"games_processed":500,"games_committed":490,"games_skipped":10,"elapsed_seconds":1.234,"phase":"ingesting"}
             ```
 
-            `phase` is one of `ingesting` (reading and inserting games into SQLite) or
-            `rebuilding` (rebuilding and sorting the DuckDB position store after ingestion).
+            `phase` is one of `ingesting` (reading and inserting games into SQLite),
+            `deduplicating` (fresh imports only: removing exact duplicates from raw ingest), or
+            `rebuilding` (rebuilding derived position indexes after ingestion).
 
             **Completion event** (final event on success, named `complete`):
             ```
@@ -1128,7 +1129,8 @@ paths:
       operationId: deleteGame
       summary: Delete a user-added game
       description: |-
-        Permanently removes a `manual` game and its position rows from DuckDB.
+        Permanently removes a `manual` game from SQLite and invalidates the
+        derived position index, which is rebuilt from canonical SQLite on next use.
 
         - Only games with `source_type: manual` may be deleted; attempting to
           delete an `imported` game returns HTTP 409.
