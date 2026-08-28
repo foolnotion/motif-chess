@@ -1,7 +1,7 @@
 # Motif Chess — Agent Instructions
 
 **Read `CONVENTIONS.md` before writing any code.** It is the authoritative source for naming, SQL style,
-DuckDB API restrictions, error handling, module boundaries, packaging workflow, and story-done criteria.
+error handling, module boundaries, packaging workflow, and story-done criteria.
 
 ## Build
 
