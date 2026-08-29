@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+message_file=$1
+prohibited_pattern='^(co-authored-by:.*(anthropic|opencode)|claude-session:)'
+
+if grep --extended-regexp --ignore-case --quiet "$prohibited_pattern" "$message_file"; then
+    echo "AI attribution trailers are prohibited in commit messages." >&2
+    exit 1
+fi
