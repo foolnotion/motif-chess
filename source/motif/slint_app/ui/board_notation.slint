@@ -1,4 +1,4 @@
-import { Button, Palette } from "std-widgets.slint";
+import { Button, Palette, StyleMetrics } from "std-widgets.slint";
 
 export struct BoardSquare {
     file: int,
@@ -57,14 +57,29 @@ export component BoardPanel inherits Rectangle {
         return transparent;
     }
 
-    property <length> square-size: 44px;
     property <length> label-size: 16px;
-    width: root.label-size + root.square-size * 8;
-    height: root.label-size + root.square-size * 8;
+    // The board takes the largest square that fits the space the parent grants
+    // it, so it grows with the window instead of sitting at a fixed size.
+    property <length> extent: Math.min(self.width, self.height);
+    property <length> square-size: (root.extent - root.label-size) / 8;
+
+    // Pinned to constants so this element's layout-info never depends on the
+    // children whose sizes are in turn derived from `extent`; deriving both
+    // directions would form a binding loop.
+    min-width: 220px;
+    min-height: 220px;
+    preferred-width: 480px;
+    preferred-height: 480px;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
 
     background: Palette.background;
 
     board-scope := FocusScope {
+        x: (root.width - root.extent) / 2;
+        y: (root.height - root.extent) / 2;
+        width: root.extent;
+        height: root.extent;
         focus-on-tab-navigation: root.board-loaded && root.interaction-enabled;
         // focused-file/ranked-rank start as declarative bindings but are
         // replaced with fixed values after the first arrow-key press; the
@@ -113,6 +128,8 @@ export component BoardPanel inherits Rectangle {
         }
 
         VerticalLayout {
+            width: root.extent;
+            height: root.extent;
             for row in 8: HorizontalLayout {
                 height: root.square-size;
                 Text {
@@ -301,6 +318,75 @@ export component NotationPanel inherits Rectangle {
     }
 }
 
+component ReplayIconButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <string> label;
+    in property <string> icon-path;
+    callback clicked();
+
+    min-width: control-button.preferred-width;
+    min-height: control-button.preferred-height;
+    preferred-width: control-button.preferred-width;
+    preferred-height: control-button.preferred-height;
+
+    control-button := Button {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.enabled;
+        accessible-label: root.label;
+        clicked => { root.clicked(); }
+    }
+
+    Path {
+        width: Math.min(parent.width, parent.height) * 0.56;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon-path;
+        fill: root.enabled ? Palette.foreground : Palette.alternate-foreground;
+    }
+}
+
+component BoardAndControls inherits Rectangle {
+    in property <bool> board-loaded;
+    in property <[string]> square-pieces;
+    in property <[SquareHighlight]> square-highlights;
+    in property <bool> flipped;
+    in property <bool> interaction-enabled: true;
+
+    callback square-activated(int, int);
+    callback navigate-first();
+    callback navigate-previous();
+    callback navigate-next();
+    callback navigate-last();
+    callback orientation-toggled();
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        vertical-stretch: 1;
+        spacing: StyleMetrics.layout-spacing;
+        BoardPanel {
+            vertical-stretch: 1;
+            square-pieces: root.square-pieces;
+            board-loaded: root.board-loaded;
+            square-highlights: root.square-highlights;
+            flipped: root.flipped;
+            interaction-enabled: root.interaction-enabled;
+            square-activated(file, rank) => { root.square-activated(file, rank); }
+        }
+        HorizontalLayout {
+            spacing: StyleMetrics.layout-spacing;
+            ReplayIconButton { label: "First move"; icon-path: "M5 5 L7 5 L7 19 L5 19 Z M19 5 L9 12 L19 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-first(); } }
+            ReplayIconButton { label: "Previous move"; icon-path: "M17 5 L7 12 L17 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-previous(); } }
+            ReplayIconButton { label: "Next move"; icon-path: "M7 5 L17 12 L7 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-next(); } }
+            ReplayIconButton { label: "Last move"; icon-path: "M17 5 L19 5 L19 19 L17 19 Z M5 5 L15 12 L5 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-last(); } }
+            ReplayIconButton { label: "Flip board"; icon-path: "M7.6 6.4 A7.9 7.9 0 0 1 19.2 10 L22 10 L18 14 L14 10 L16.9 10 A5.8 5.8 0 0 0 8.8 8.2 Z M6 10 L10 14 L7.1 14 A5.8 5.8 0 0 0 15.2 15.8 L16.4 17.6 A7.9 7.9 0 0 1 4.8 14 L2 14 Z"; enabled: root.interaction-enabled; clicked => { root.orientation-toggled(); } }
+        }
+    }
+}
+
 // Wraps board + notation with navigation, orientation, and a
 // keyboard-accessible hide/restore control for the whole region. Hiding
 // collapses the content to zero layout reservation via `if`.
@@ -317,6 +403,7 @@ export component GameReviewPanel inherits Rectangle {
     in property <[string]> san-moves;
     in property <int> current-ply;
     in property <bool> interaction-enabled: true;
+    in property <bool> notation-below: false;
 
     callback square-activated(int, int);
     callback ply-activated(int);
@@ -326,15 +413,13 @@ export component GameReviewPanel inherits Rectangle {
     callback navigate-last();
     callback orientation-toggled();
     callback panel-visibility-toggled();
+    callback notation-layout-toggled();
 
-    border-radius: 5px;
-    border-width: 1px;
-    border-color: Palette.border;
-    background: Palette.alternate-background;
+    background: Palette.background;
 
     VerticalLayout {
-        padding: 10px;
-        spacing: 8px;
+        padding: StyleMetrics.layout-padding;
+        spacing: StyleMetrics.layout-spacing;
 
         HorizontalLayout {
             height: 26px;
@@ -345,7 +430,13 @@ export component GameReviewPanel inherits Rectangle {
                 font-weight: 700;
                 vertical-alignment: center;
             }
+            Button {
+                text: root.notation-below ? "Notation Right" : "Notation Below";
+                enabled: root.interaction-enabled;
+                clicked => { root.notation-layout-toggled(); }
+            }
             visibility-scope := FocusScope {
+                height: parent.height;
                 focus-on-tab-navigation: root.interaction-enabled;
                 width: visibility-button.preferred-width;
                 key-pressed(event) => {
@@ -356,6 +447,7 @@ export component GameReviewPanel inherits Rectangle {
                     return reject;
                 }
                 visibility-button := Button {
+                    height: parent.height;
                     enabled: root.interaction-enabled;
                     text: "Hide";
                     clicked => {
@@ -368,6 +460,16 @@ export component GameReviewPanel inherits Rectangle {
 
         keyboard-scope := FocusScope {
             vertical-stretch: 1;
+            // Loading a game is the user's clearest signal of intent to
+            // navigate it; without this, arrow-key navigation silently does
+            // nothing until the user first clicks the board or a move,
+            // which is not discoverable and fails keyboard-only use.
+            property <bool> can-auto-focus: root.board-loaded && root.interaction-enabled;
+            changed can-auto-focus => {
+                if (self.can-auto-focus) {
+                    self.focus();
+                }
+            }
             key-pressed(event) => {
                 if (!root.interaction-enabled) {
                     return reject;
@@ -391,55 +493,29 @@ export component GameReviewPanel inherits Rectangle {
                 return reject;
             }
 
-            HorizontalLayout {
-                spacing: 12px;
-
-                VerticalLayout {
-                    spacing: 8px;
-                    BoardPanel {
-                        square-pieces: root.square-pieces;
-                        board-loaded: root.board-loaded;
-                        square-highlights: root.square-highlights;
-                        flipped: root.flipped;
-                        interaction-enabled: root.interaction-enabled;
-                        square-activated(file, rank) => {
-                            keyboard-scope.focus();
-                            root.square-activated(file, rank);
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 4px;
-                        Button {
-                            text: "|<";
-                            enabled: root.board-loaded && root.interaction-enabled;
-                            clicked => { keyboard-scope.focus(); root.navigate-first(); }
-                        }
-                        Button {
-                            text: "<";
-                            enabled: root.board-loaded && root.interaction-enabled;
-                            clicked => { keyboard-scope.focus(); root.navigate-previous(); }
-                        }
-                        Button {
-                            text: ">";
-                            enabled: root.board-loaded && root.interaction-enabled;
-                            clicked => { keyboard-scope.focus(); root.navigate-next(); }
-                        }
-                        Button {
-                            text: ">|";
-                            enabled: root.board-loaded && root.interaction-enabled;
-                            clicked => { keyboard-scope.focus(); root.navigate-last(); }
-                        }
-                        Button {
-                            text: "Flip";
-                            enabled: root.interaction-enabled;
-                            clicked => { root.orientation-toggled(); }
-                        }
-                    }
+            if root.notation-below: Rectangle {
+                BoardAndControls {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height / 2 - 6px;
+                    board-loaded: root.board-loaded;
+                    square-pieces: root.square-pieces;
+                    square-highlights: root.square-highlights;
+                    flipped: root.flipped;
+                    interaction-enabled: root.interaction-enabled;
+                    square-activated(file, rank) => { keyboard-scope.focus(); root.square-activated(file, rank); }
+                    navigate-first() => { keyboard-scope.focus(); root.navigate-first(); }
+                    navigate-previous() => { keyboard-scope.focus(); root.navigate-previous(); }
+                    navigate-next() => { keyboard-scope.focus(); root.navigate-next(); }
+                    navigate-last() => { keyboard-scope.focus(); root.navigate-last(); }
+                    orientation-toggled() => { root.orientation-toggled(); }
                 }
-
                 NotationPanel {
-                    min-width: 220px;
-                    horizontal-stretch: 1;
+                    x: 0px;
+                    y: parent.height / 2 + 6px;
+                    width: parent.width;
+                    height: parent.height / 2 - 6px;
                     white-name: root.white-name;
                     black-name: root.black-name;
                     event-name: root.event-name;
@@ -448,10 +524,41 @@ export component GameReviewPanel inherits Rectangle {
                     san-moves: root.san-moves;
                     current-ply: root.current-ply;
                     interaction-enabled: root.interaction-enabled;
-                    ply-activated(ply) => {
-                        keyboard-scope.focus();
-                        root.ply-activated(ply);
-                    }
+                    ply-activated(ply) => { keyboard-scope.focus(); root.ply-activated(ply); }
+                }
+            }
+            if !root.notation-below: Rectangle {
+                BoardAndControls {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width / 2 - 6px;
+                    height: parent.height;
+                    board-loaded: root.board-loaded;
+                    square-pieces: root.square-pieces;
+                    square-highlights: root.square-highlights;
+                    flipped: root.flipped;
+                    interaction-enabled: root.interaction-enabled;
+                    square-activated(file, rank) => { keyboard-scope.focus(); root.square-activated(file, rank); }
+                    navigate-first() => { keyboard-scope.focus(); root.navigate-first(); }
+                    navigate-previous() => { keyboard-scope.focus(); root.navigate-previous(); }
+                    navigate-next() => { keyboard-scope.focus(); root.navigate-next(); }
+                    navigate-last() => { keyboard-scope.focus(); root.navigate-last(); }
+                    orientation-toggled() => { root.orientation-toggled(); }
+                }
+                NotationPanel {
+                    x: parent.width / 2 + 6px;
+                    y: 0px;
+                    width: parent.width / 2 - 6px;
+                    height: parent.height;
+                    white-name: root.white-name;
+                    black-name: root.black-name;
+                    event-name: root.event-name;
+                    date: root.date;
+                    result: root.result;
+                    san-moves: root.san-moves;
+                    current-ply: root.current-ply;
+                    interaction-enabled: root.interaction-enabled;
+                    ply-activated(ply) => { keyboard-scope.focus(); root.ply-activated(ply); }
                 }
             }
         }

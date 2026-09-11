@@ -79,6 +79,7 @@ auto import_service::start(motif::db::database_manager* database, std::filesyste
             snapshot_.total = progress.total_games;
             snapshot_.elapsed = progress.elapsed;
             if (result) {
+                snapshot_.phase = motif::import::import_phase::idle;
                 snapshot_.committed = result->committed;
                 snapshot_.skipped = result->skipped;
                 snapshot_.errors = result->errors;

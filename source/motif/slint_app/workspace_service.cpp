@@ -125,6 +125,17 @@ void workspace_service::close_active() noexcept
     error_message_.clear();
 }
 
+auto workspace_service::set_notation_below(bool const below) -> result<void>
+{
+    auto next_config = config_;
+    next_config.ui_preferences.notation_layout = below ? "below" : "right";
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+    config_ = std::move(next_config);
+    return {};
+}
+
 auto workspace_service::persist_config(workspace_config const& config) -> result<void>
 {
     if (config_file_.empty()) {

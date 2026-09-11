@@ -56,7 +56,6 @@ export component PositionSearchPanel inherits Rectangle {
     callback auto-search-toggled(bool);
     callback match-activated(int);
     callback page-requested(int);
-    callback panel-visibility-toggled();
 
     // Row scopes lose has-focus whenever the ListView rebuilds (new
     // search results), but a stale focused-match-index would otherwise
@@ -82,11 +81,6 @@ export component PositionSearchPanel inherits Rectangle {
                 vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; }
-            Button {
-                text: "Hide";
-                enabled: root.interaction-enabled;
-                clicked => { root.panel-visibility-toggled(); }
-            }
             if root.searching: Text {
                 text: "Searching…";
                 color: Palette.alternate-foreground;

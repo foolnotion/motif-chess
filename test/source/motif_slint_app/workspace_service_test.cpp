@@ -227,6 +227,19 @@ TEST_CASE("workspace_config: serializes and restores preferences", "[motif-slint
     REQUIRE(restored->ui_preferences.prefetch_depth == 3);
 }
 
+TEST_CASE("workspace_config: persists notation layout preference", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"notation_layout"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto service = motif::slint_app::workspace_service {config_path};
+
+    REQUIRE_FALSE(service.notation_below());
+    REQUIRE(service.set_notation_below(true).has_value());
+
+    motif::slint_app::workspace_service const restored {config_path};
+    REQUIRE(restored.notation_below());
+}
+
 TEST_CASE("workspace_config: malformed input remains untouched", "[motif-slint-app]")
 {
     tmp_dir const tmp {"config_malformed"};
