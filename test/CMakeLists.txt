@@ -107,13 +107,38 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/workspace_service_test.cpp
         source/motif_slint_app/game_browser_presenter_test.cpp
         source/motif_slint_app/search_presenter_test.cpp
+        source/motif_slint_app/layout_snapshot_test.cpp
     )
     target_link_libraries(motif_slint_app_service_test PRIVATE
         motif_slint_app_service
+        Slint::Slint
         Catch2::Catch2WithMain
     )
     target_compile_features(motif_slint_app_service_test PRIVATE cxx_std_23)
-    target_include_directories(motif_slint_app_service_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
+    target_include_directories(motif_slint_app_service_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/source
+        "$<TARGET_PROPERTY:motif_slint_app,BINARY_DIR>"
+    )
+    target_sources(motif_slint_app_service_test PRIVATE
+        "${CMAKE_BINARY_DIR}/source/motif/slint_app/slint_generated_workspace_1.cpp"
+    )
+    set_source_files_properties(
+        "${CMAKE_BINARY_DIR}/source/motif/slint_app/slint_generated_workspace_1.cpp"
+        PROPERTIES SKIP_LINTING ON
+    )
+    # The layout test includes Slint-generated workspace.h. Exclude only build-tree
+    # headers from clang-tidy; handwritten test sources remain fully linted.
+    if(CMAKE_CXX_CLANG_TIDY)
+        set_property(TARGET motif_slint_app_service_test PROPERTY CXX_CLANG_TIDY
+            "${CMAKE_CXX_CLANG_TIDY};--exclude-header-filter=^.*/build/.*"
+        )
+    endif()
+    if(CMAKE_CXX_CPPCHECK)
+        set_property(TARGET motif_slint_app_service_test PROPERTY CXX_CPPCHECK
+            "${CMAKE_CXX_CPPCHECK};--suppress=unknownMacro:*workspace.h"
+        )
+    endif()
+    add_dependencies(motif_slint_app_service_test motif_slint_app)
     catch_discover_tests(motif_slint_app_service_test PROPERTIES RUN_SERIAL TRUE)
 endif()
 
