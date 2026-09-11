@@ -97,6 +97,7 @@ TEST_CASE("import_service: imports a real PGN and publishes terminal summary", "
     REQUIRE(snapshot.processed == 2);
     REQUIRE(snapshot.committed == 2);
     REQUIRE(snapshot.errors == 0);
+    REQUIRE(snapshot.phase == motif::import::import_phase::idle);
     auto const count = database->store().count_games();
     REQUIRE(count.has_value());
     REQUIRE(*count == 2);

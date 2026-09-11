@@ -1,4 +1,4 @@
-import { Button, ComboBox, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ListView, Palette, StyleMetrics } from "std-widgets.slint";
 
 export struct GameRow {
     white: string,
@@ -90,14 +90,18 @@ export component GameBrowser inherits Rectangle {
     property <length> table-width: white-width + black-width + result-width + event-width + date-width + eco-width;
 
 
+    // The table itself scrolls horizontally. Its intrinsic column total must
+    // not become the workspace sidebar's minimum width, or it defeats the
+    // parent layout's proportional allocation.
+    min-width: 0px;
     background: Palette.background;
 
     VerticalLayout {
-        padding: 10px;
-        spacing: 8px;
+        padding: StyleMetrics.layout-padding;
+        spacing: StyleMetrics.layout-spacing;
 
         HorizontalLayout {
-            spacing: 8px;
+            spacing: StyleMetrics.layout-spacing;
             LineEdit {
                 horizontal-stretch: 1;
                 input-type: search;
@@ -119,9 +123,7 @@ export component GameBrowser inherits Rectangle {
 
         Rectangle {
             vertical-stretch: 1;
-            border-width: 1px;
-            border-color: Palette.border;
-            background: Palette.alternate-background;
+            background: Palette.background;
 
             VerticalLayout {
                 spacing: 0px;
@@ -140,9 +142,12 @@ export component GameBrowser inherits Rectangle {
                     vertical-stretch: 1;
                     viewport-width: max(self.width, root.table-width);
                     for row[index] in root.games: row-scope := FocusScope {
+                        property <bool> selected: index == root.selected-row;
+                        property <color> row-background: self.selected ? Palette.selection-background : (Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background);
+                        property <color> row-foreground: self.selected ? Palette.selection-foreground : Palette.foreground;
                         width: root.table-width;
                         height: 34px;
-                        focus-on-tab-navigation: index == root.selected-row;
+                        focus-on-tab-navigation: self.selected;
                         key-pressed(event) => {
                             if (root.busy) {
                                 return reject;
@@ -162,17 +167,17 @@ export component GameBrowser inherits Rectangle {
                             return reject;
                         }
                         Rectangle {
-                            background: index == root.selected-row ? Palette.alternate-background : (Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background);
-                            border-width: index == root.selected-row ? 1px : 0px;
-                            border-color: Palette.accent-foreground;
+                            background: row-scope.row-background;
+                            border-width: row-scope.selected ? 1px : 0px;
+                            border-color: Palette.selection-foreground;
                             HorizontalLayout {
                                 spacing: 0px;
-                                Text { width: root.white-width; text: "  " + row.white; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.black-width; text: "  " + row.black; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.result-width; text: "  " + row.result; color: Palette.accent-foreground; vertical-alignment: center; }
-                                Text { width: root.event-width; text: "  " + row.event; color: Palette.alternate-foreground; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.date-width; text: "  " + row.date; color: Palette.alternate-foreground; vertical-alignment: center; }
-                                Text { width: root.eco-width; text: "  " + row.eco; color: Palette.alternate-foreground; vertical-alignment: center; }
+                                Text { width: root.white-width; text: "  " + row.white; color: row-scope.row-foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.black-width; text: "  " + row.black; color: row-scope.row-foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.result-width; text: "  " + row.result; color: row-scope.row-foreground; vertical-alignment: center; }
+                                Text { width: root.event-width; text: "  " + row.event; color: row-scope.row-foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.date-width; text: "  " + row.date; color: row-scope.row-foreground; vertical-alignment: center; }
+                                Text { width: root.eco-width; text: "  " + row.eco; color: row-scope.row-foreground; vertical-alignment: center; }
                             }
                             TouchArea {
                                 enabled: !root.busy;
@@ -203,8 +208,14 @@ export component GameBrowser inherits Rectangle {
                 text: root.total-count == 0 ? "No games" : "Games " + (root.page-index * 100 + 1) + "–" + min(root.total-count, (root.page-index + 1) * 100) + " of " + root.total-count;
                 color: Palette.alternate-foreground;
                 vertical-alignment: center;
+                overflow: elide;
             }
-            if root.active-game-title != "": Text { text: "Loaded: " + root.active-game-title; color: Palette.accent-foreground; font-size: 11px; }
+            if root.active-game-title != "": Text {
+                horizontal-stretch: 1;
+                text: "Loaded: " + root.active-game-title;
+                color: Palette.foreground;
+                overflow: elide;
+            }
             Button {
                 text: "Previous Page";
                 enabled: !root.busy && root.has-previous-page;
