@@ -1,5 +1,7 @@
 [workflow]
 
+persistent_facts = ["file:../motif-chess-meta/bmad-output/project-context.md"]
+
 on_complete = """
 Before closing this session, write a session file to
 ../motif-chess-meta/meta/sessions/session-YYYY-MM-DD-{short-id}.yaml
