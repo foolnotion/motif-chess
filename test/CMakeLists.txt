@@ -114,6 +114,7 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/board_presenter_test.cpp
         source/motif_slint_app/import_service_test.cpp
         source/motif_slint_app/pgn_launch_queue_test.cpp
+        source/motif_slint_app/board_host_test.cpp
         source/motif_slint_app/replace_gate_test.cpp
         source/motif_slint_app/replace_controller_test.cpp
         source/motif_slint_app/activity_gate_test.cpp
@@ -134,6 +135,7 @@ if(motif_ENABLE_SLINT_APP)
     )
     target_sources(motif_slint_app_service_test PRIVATE
         "${CMAKE_BINARY_DIR}/source/motif/slint_app/slint_generated_workspace_1.cpp"
+        "${CMAKE_SOURCE_DIR}/source/motif/slint_app/board_host.cpp"
     )
     set_source_files_properties(
         "${CMAKE_BINARY_DIR}/source/motif/slint_app/slint_generated_workspace_1.cpp"
