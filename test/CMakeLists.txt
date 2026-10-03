@@ -88,6 +88,15 @@ target_compile_features(motif_chess_test PRIVATE cxx_std_23)
 catch_discover_tests(motif_chess_test)
 
 
+if(motif_ENABLE_SLINT_SPIKE OR motif_ENABLE_SLINT_APP)
+    add_executable(motif_navigator_test
+        source/motif_navigator/game_navigator_test.cpp
+    )
+    target_link_libraries(motif_navigator_test PRIVATE motif_game_navigator Catch2::Catch2WithMain)
+    target_compile_features(motif_navigator_test PRIVATE cxx_std_23)
+    catch_discover_tests(motif_navigator_test)
+endif()
+
 if(motif_ENABLE_SLINT_SPIKE)
     add_executable(motif_slint_spike_presenter_test
         source/motif_slint_spike/game_browser_presenter_test.cpp
