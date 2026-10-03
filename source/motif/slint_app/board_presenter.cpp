@@ -85,6 +85,30 @@ auto lower_case_letter(char const letter) -> char
 
 constexpr std::string_view promotion_pieces {"qrbn"};
 
+// Characters of the longest token as it prints: parentheses, number, a space
+// after the number, then the SAN.
+auto longest_token_chars(std::vector<notation_token> const& tokens) -> std::size_t
+{
+    auto longest = std::size_t {0};
+    for (auto const& token : tokens) {
+        auto const number = token.number.empty() ? std::size_t {0} : token.number.size() + 1;
+        longest = std::max(longest, token.open.size() + number + token.san.size() + token.close.size());
+    }
+    return longest;
+}
+
+// Whether a piece code ("wP", "bK", ...) belongs to the side to move, read from
+// the FEN's active-colour field. Presentation-layer reading for selection
+// feedback, not rules: legality stays with motif::chess.
+auto belongs_to_side_to_move(std::string const& fen, std::string const& piece) -> bool
+{
+    auto const turn = fen.find(' ');
+    if (piece.empty() || turn == std::string::npos || turn + 1 >= fen.size()) {
+        return false;
+    }
+    return (fen[turn + 1] == 'w') == (piece.front() == 'w');
+}
+
 }  // namespace
 
 board_presenter::board_presenter()
@@ -178,8 +202,9 @@ auto board_presenter::select_square(int const file, int const rank) -> board_res
 
     auto const had_selection = state_.selected_square.has_value();
     select(square);
-    if (had_selection && state_.legal_targets.empty()) {
-        // Neither a legal target nor a piece that can move: not a move.
+    if (had_selection && state_.legal_targets.empty() && !belongs_to_side_to_move(state_.fen, state_.square_pieces[index_of(square)])) {
+        // Neither a legal target nor a piece of the side to move: not a move.
+        // A blocked or pinned own piece still takes the selection.
         clear_selection();
     }
     return {};
@@ -210,7 +235,8 @@ auto board_presenter::play_san(std::string_view const san) -> board_result<void>
     if (!applied) {
         clear_selection();
         state_.promotion.reset();
-        return fail({.code = error_code::invalid_argument, .message = fmt::format("\"{}\" is not a legal move here", san)});
+        return fail({.code = error_code::invalid_argument,
+                     .message = fmt::format("\"{}\" is not a legal move here, or needs more detail to be unambiguous", san)});
     }
     finish_move(applied->outcome);
     return {};
@@ -348,6 +374,7 @@ void board_presenter::rebuild_notation()
     };
 
     state_.notation.clear();
+    state_.notation_chars = 0;
     auto const first_moves = navigator_.children(game_navigator::root_node);
     if (first_moves.empty()) {
         return;
@@ -399,6 +426,9 @@ void board_presenter::rebuild_notation()
             }
         }
     }
+
+    // Closing parentheses were appended to finished tokens, so measure last.
+    state_.notation_chars = longest_token_chars(state_.notation);
 }
 
 void board_presenter::refresh_navigation(bool const tree_changed)
