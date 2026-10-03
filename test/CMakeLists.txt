@@ -114,6 +114,7 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/board_presenter_test.cpp
         source/motif_slint_app/import_service_test.cpp
         source/motif_slint_app/pgn_launch_queue_test.cpp
+        source/motif_slint_app/replace_gate_test.cpp
         source/motif_slint_app/workspace_service_test.cpp
         source/motif_slint_app/game_browser_presenter_test.cpp
         source/motif_slint_app/search_presenter_test.cpp

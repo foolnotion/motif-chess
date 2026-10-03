@@ -24,6 +24,7 @@
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/import_service.hpp"
 #include "motif/slint_app/pgn_launch_queue.hpp"
+#include "motif/slint_app/replace_gate.hpp"
 #include "motif/slint_app/search_presenter.hpp"
 #include "motif/slint_app/workspace_service.hpp"
 #include "workspace.h"
@@ -256,14 +257,17 @@ void clear_board(WorkspaceWindow& window)
     window.set_board_event_name("");
     window.set_board_date("");
     window.set_board_result("");
-    window.set_board_san_moves(std::make_shared<slint::VectorModel<slint::SharedString>>());
-    window.set_board_current_ply(0);
+    window.set_board_notation(std::make_shared<slint::VectorModel<NotationToken>>());
+    window.set_board_current_node(0);
+    window.set_board_unsaved(false);
+    window.set_board_edited(false);
+    window.set_board_promotion_pending(false);
     window.set_board_panel_visible(true);
 }
 
 void publish_board(WorkspaceWindow& window, motif::slint_app::board_state const& state)
 {
-    window.set_board_loaded(state.loaded);
+    window.set_board_loaded(state.loaded || state.unsaved);
 
     auto pieces = std::vector<slint::SharedString> {};
     pieces.reserve(state.square_pieces.size());
@@ -286,14 +290,23 @@ void publish_board(WorkspaceWindow& window, motif::slint_app::board_state const&
     window.set_board_date(shared_string(state.date));
     window.set_board_result(shared_string(state.result));
 
-    auto san_moves = std::vector<slint::SharedString> {};
-    san_moves.reserve(state.san_moves.size());
-    for (auto const& san_move : state.san_moves) {
-        san_moves.push_back(shared_string(san_move));
+    auto notation = std::vector<NotationToken> {};
+    notation.reserve(state.notation.size());
+    for (auto const& token : state.notation) {
+        notation.push_back(NotationToken {
+            .lead = shared_string(token.number.empty() ? token.open : token.open + token.number),
+            .san = shared_string(token.san),
+            .trail = shared_string(token.close),
+            .node = static_cast<std::int32_t>(token.node),
+            .depth = token.variation_depth,
+        });
     }
-    window.set_board_san_moves(std::make_shared<slint::VectorModel<slint::SharedString>>(std::move(san_moves)));
-
-    window.set_board_current_ply(to_ui_count(state.current_ply));
+    window.set_board_notation(std::make_shared<slint::VectorModel<NotationToken>>(std::move(notation)));
+    window.set_board_current_node(static_cast<std::int32_t>(state.current_node));
+    window.set_board_unsaved(state.unsaved);
+    window.set_board_edited(state.edited);
+    window.set_board_promotion_pending(state.promotion.has_value());
+    window.set_board_promotion_white(!state.promotion || state.promotion->white);
     window.set_board_panel_visible(state.panel_visible);
     window.set_board_error_text(shared_string(state.error_text));
 }
@@ -936,6 +949,37 @@ class async_board_runner
         act([file, rank](auto& presenter) -> void { (void)presenter.select_square(file, rank); });
     }
 
+    void navigate_to_node(std::uint32_t const node)
+    {
+        act([node](auto& presenter) -> void { presenter.navigate_to_node(node); });
+    }
+
+    // The SAN entry point for move lists that arrive as text (Story 13.2).
+    // It plays through the same presenter path as a board click; callers apply
+    // the same busy and import gate as the other board actions.
+    void play_san(std::string san)
+    {
+        act([san = std::move(san)](auto& presenter) -> void { (void)presenter.play_san(san); });
+    }
+
+    void choose_promotion(char const piece)
+    {
+        act([piece](auto& presenter) -> void { (void)presenter.choose_promotion(piece); });
+    }
+
+    void cancel_promotion()
+    {
+        act([](auto& presenter) -> void { presenter.cancel_promotion(); });
+    }
+
+    void new_game()
+    {
+        act([](auto& presenter) -> void { presenter.start_new_game(); });
+    }
+
+    // True when replacing the board would discard the user's input.
+    [[nodiscard]] auto edited() const -> bool { return state_->presenter && state_->presenter->state().edited; }
+
     void toggle_orientation()
     {
         act([](auto& presenter) -> void { presenter.toggle_orientation(); });
@@ -1001,7 +1045,7 @@ class async_board_runner
     std::shared_ptr<state> state_;
 
     template<typename Operation>
-    void act(Operation operation)
+    void act(Operation const& operation)
     {
         if (!state_->presenter) {
             return;
@@ -1443,6 +1487,61 @@ void publish_import_start_error(WorkspaceWindow& window, motif::slint_app::impor
     std::unreachable();
 }
 
+// The idle state every board action and every action that replaces the board
+// waits for: no import, workspace change, game load, board action or search.
+auto workspace_busy(motif::slint_app::import_service const& importer,
+                    async_workspace_runner const& runner,
+                    async_browser_runner const& browser,
+                    async_board_runner const& board,
+                    async_search_runner const& search) -> bool
+{
+    return importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy();
+}
+
+// In-window confirmation shown before an action replaces a game the user has
+// edited. The decision lives in motif::slint_app::replace_gate; this adapter
+// owns the overlay.
+class replace_confirmation
+{
+  public:
+    replace_confirmation(WorkspaceWindow& window, async_board_runner const& board)
+        : window_(&window)
+        , board_(&board)
+    {
+    }
+
+    // Runs `action` at once when nothing would be lost, otherwise shows the
+    // overlay and keeps the action for accept().
+    void request(std::string_view const action_label, std::function<void()> action)
+    {
+        if (gate_.request(board_->edited(), std::move(action)) == motif::slint_app::replace_gate::outcome::ran) {
+            return;
+        }
+        window_->set_confirm_message("This game has moves that are not saved to any database. Replacing it discards them.");
+        window_->set_confirm_action_label(shared_string(action_label));
+        window_->set_confirm_visible(true);
+    }
+
+    void accept()
+    {
+        window_->set_confirm_visible(false);
+        gate_.accept();
+    }
+
+    void cancel()
+    {
+        gate_.cancel();
+        window_->set_confirm_visible(false);
+        // Returns keyboard focus to the board region the overlay took it from.
+        window_->set_board_load_serial(window_->get_board_load_serial() + 1);
+    }
+
+  private:
+    WorkspaceWindow* window_;
+    async_board_runner const* board_;
+    motif::slint_app::replace_gate gate_;
+};
+
 void register_workspace_callbacks(WorkspaceWindow& window,
                                   motif::slint_app::workspace_service& service,
                                   motif::slint_app::import_service const& importer,
@@ -1566,7 +1665,8 @@ void register_browser_callbacks(WorkspaceWindow& window,
                                 motif::slint_app::import_service const& importer,
                                 async_workspace_runner const& runner,
                                 async_board_runner& board,
-                                async_search_runner& search)
+                                async_search_runner& search,
+                                replace_confirmation& confirmation)
 {
     window.on_game_filters_changed(
         [&](slint::SharedString const& player, slint::SharedString const& result) -> void
@@ -1606,10 +1706,16 @@ void register_browser_callbacks(WorkspaceWindow& window,
     window.on_game_activate_requested(
         [&]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
+            if (workspace_busy(importer, runner, browser, board, search)) {
                 return;
             }
-            browser.activate();
+            confirmation.request("Load game",
+                                 [&]() -> void
+                                 {
+                                     if (!workspace_busy(importer, runner, browser, board, search)) {
+                                         browser.activate();
+                                     }
+                                 });
         });
     window.on_game_sort_requested(
         [&](std::int32_t column, bool ascending) -> void
@@ -1636,70 +1742,123 @@ void register_board_callbacks(WorkspaceWindow& window,
                               async_browser_runner const& browser,
                               async_search_runner const& search)
 {
+    // Every board action waits for the same five-way idle state.
+    auto const blocked = [&]() -> bool { return workspace_busy(importer, runner, browser, board, search); };
+
     window.on_board_square_activated(
-        [&](std::int32_t file, std::int32_t rank) -> void
+        [&, blocked](std::int32_t file, std::int32_t rank) -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
+            if (blocked()) {
                 return;
             }
             board.select_square(file, rank);
         });
-    window.on_board_ply_activated(
-        [&](std::int32_t ply) -> void
+    window.on_board_node_activated(
+        [&, blocked](std::int32_t node) -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || ply < 0) {
+            if (blocked() || node < 0) {
                 return;
             }
-            board.navigate_to(static_cast<std::size_t>(ply));
+            board.navigate_to_node(static_cast<std::uint32_t>(node));
         });
     window.on_board_navigate_first(
-        [&]() -> void
+        [&, blocked]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
+            if (!blocked()) {
+                board.jump_to_start();
             }
-            board.jump_to_start();
         });
     window.on_board_navigate_previous(
-        [&]() -> void
+        [&, blocked]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
+            if (!blocked()) {
+                board.retreat();
             }
-            board.retreat();
         });
     window.on_board_navigate_next(
-        [&]() -> void
+        [&, blocked]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
+            if (!blocked()) {
+                board.advance();
             }
-            board.advance();
         });
     window.on_board_navigate_last(
-        [&]() -> void
+        [&, blocked]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
+            if (!blocked()) {
+                board.jump_to_end();
             }
-            board.jump_to_end();
         });
     window.on_board_orientation_toggled(
-        [&]() -> void
+        [&, blocked]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
+            if (!blocked()) {
+                board.toggle_orientation();
             }
-            board.toggle_orientation();
         });
     window.on_board_panel_visibility_toggled(
-        [&window, &board, &importer, &runner, &browser, &search]() -> void
+        [&, blocked]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
+            if (!blocked()) {
+                board.set_panel_visible(!window.get_board_panel_visible());
+            }
+        });
+}
+
+// Moves entered rather than navigated: promotion choice, SAN entry and New
+// Game, plus the answers to the replace confirmation they can raise. They obey
+// the same idle gate as the navigation callbacks.
+void register_play_callbacks(WorkspaceWindow& window,
+                             async_board_runner& board,
+                             motif::slint_app::import_service const& importer,
+                             async_workspace_runner const& runner,
+                             async_browser_runner const& browser,
+                             async_search_runner const& search,
+                             replace_confirmation& confirmation)
+{
+    auto const blocked = [&]() -> bool { return workspace_busy(importer, runner, browser, board, search); };
+
+    window.on_board_promotion_chosen(
+        [&, blocked](slint::SharedString const& piece) -> void
+        {
+            if (blocked() || piece.empty()) {
                 return;
             }
-            board.set_panel_visible(!window.get_board_panel_visible());
+            board.choose_promotion(std::string_view {piece.data(), piece.size()}.front());
         });
+    window.on_board_promotion_cancelled(
+        [&, blocked]() -> void
+        {
+            if (!blocked()) {
+                board.cancel_promotion();
+            }
+        });
+    window.on_board_play_san(
+        [&, blocked](slint::SharedString const& san) -> void
+        {
+            if (blocked() || san.empty()) {
+                return;
+            }
+            board.play_san(std::string {std::string_view {san.data(), san.size()}});
+        });
+    window.on_board_new_game_requested(
+        [&, blocked]() -> void
+        {
+            if (blocked()) {
+                return;
+            }
+            confirmation.request("Start new game",
+                                 [&, blocked]() -> void
+                                 {
+                                     if (blocked()) {
+                                         return;
+                                     }
+                                     board.new_game();
+                                     window.set_board_load_serial(window.get_board_load_serial() + 1);
+                                 });
+        });
+    window.on_confirm_accepted([&]() -> void { confirmation.accept(); });
+    window.on_confirm_cancelled([&]() -> void { confirmation.cancel(); });
 }
 
 void register_search_callbacks(WorkspaceWindow& window,
@@ -1707,7 +1866,8 @@ void register_search_callbacks(WorkspaceWindow& window,
                                async_browser_runner& browser,
                                motif::slint_app::import_service const& importer,
                                async_workspace_runner const& runner,
-                               async_board_runner const& board)
+                               async_board_runner const& board,
+                               replace_confirmation& confirmation)
 {
     window.on_search_requested(
         [&]() -> void
@@ -1747,7 +1907,13 @@ void register_search_callbacks(WorkspaceWindow& window,
                 return;
             }
             if (auto const match = search.match_at(static_cast<std::size_t>(row))) {
-                browser.activate_by_id(match->first, match->second);
+                confirmation.request("Load game",
+                                     [&, match = *match]() -> void
+                                     {
+                                         if (!workspace_busy(importer, runner, browser, board, search)) {
+                                             browser.activate_by_id(match.first, match.second);
+                                         }
+                                     });
             }
         });
 }
@@ -1894,15 +2060,17 @@ auto main(int const argc, char** const argv) -> int
     auto launch_queue = motif::slint_app::pgn_launch_queue::from_arguments(launch_arguments_list);
     auto import_context_value = import_context {*window, service, importer, runner, browser, board, search, launch_queue, import_timer};
     auto launch_timer = slint::Timer {};
+    auto confirmation = replace_confirmation {*window, board};
 
     clear_browser(*window);
     clear_board(*window);
     clear_search(*window);
     publish_workspace(*window, service);
     register_workspace_callbacks(*window, service, importer, runner, browser, board, search);
-    register_browser_callbacks(*window, browser, importer, runner, board, search);
+    register_browser_callbacks(*window, browser, importer, runner, board, search, confirmation);
     register_board_callbacks(*window, board, importer, runner, browser, search);
-    register_search_callbacks(*window, search, browser, importer, runner, board);
+    register_play_callbacks(*window, board, importer, runner, browser, search, confirmation);
+    register_search_callbacks(*window, search, browser, importer, runner, board, confirmation);
     register_import_callbacks(import_context_value);
 
     // Launch arguments (command line or a file manager's %F): invalid ones are
