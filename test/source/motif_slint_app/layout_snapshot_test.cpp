@@ -596,7 +596,8 @@ struct pixel_bounds
     [[nodiscard]] auto height() const -> int { return found ? bottom - top + 1 : 0; }
 };
 
-auto difference_bounds(std::span<slint::Rgb8Pixel const> lhs, std::span<slint::Rgb8Pixel const> rhs, std::uint32_t const width) -> pixel_bounds
+auto difference_bounds(std::span<slint::Rgb8Pixel const> lhs, std::span<slint::Rgb8Pixel const> rhs, std::uint32_t const width)
+    -> pixel_bounds
 {
     auto bounds = pixel_bounds {};
     for (auto index = std::size_t {0}; index < lhs.size() && index < rhs.size(); ++index) {
@@ -706,6 +707,7 @@ TEST_CASE("workspace layout: notation keeps usable room for moves in both layout
         std::uint32_t height;
         bool notation_below;
     };
+
     constexpr auto minimum_notation_width = 100;
     constexpr auto minimum_notation_height = 60;
     constexpr auto moves = 70;
@@ -713,7 +715,8 @@ TEST_CASE("workspace layout: notation keeps usable room for moves in both layout
     for (auto const& size : {window_case {.width = 960, .height = 560, .notation_below = false},
                              window_case {.width = 960, .height = 560, .notation_below = true},
                              window_case {.width = 1280, .height = 800, .notation_below = false},
-                             window_case {.width = 1280, .height = 800, .notation_below = true}}) {
+                             window_case {.width = 1280, .height = 800, .notation_below = true}})
+    {
         INFO("size " << size.width << "x" << size.height << (size.notation_below ? " notation below" : " notation beside"));
         auto const state = use_snapshot_platform(size.width, size.height);
         auto window = make_loaded_workspace({.games = typical_games, .moves = 0});
@@ -741,11 +744,13 @@ TEST_CASE("workspace layout: sidebar controls are not clipped at the right windo
     // forced the sidebar wider than its allocation. The window's right margin
     // stays plain background while every control fits.
     constexpr auto margin = 8;
+
     struct window_case
     {
         std::uint32_t width;
         std::uint32_t height;
     };
+
     for (auto const& size : {window_case {.width = 960, .height = 560}, window_case {.width = 1100, .height = 700}}) {
         for (auto const preset : {WorkspacePreset::Review, WorkspacePreset::Explorer, WorkspacePreset::Analysis}) {
             INFO("size " << size.width << "x" << size.height << " preset " << static_cast<int>(preset));
@@ -1044,6 +1049,7 @@ TEST_CASE("workspace layout: each preset renders a distinct composition at narro
         std::uint32_t width;
         std::uint32_t height;
     };
+
     for (auto const& size : {window_case {.width = 960, .height = 560}, window_case {.width = 1600, .height = 900}}) {
         auto renders = std::vector<std::vector<slint::Rgb8Pixel>> {};
         for (auto const preset : {WorkspacePreset::Review, WorkspacePreset::Explorer, WorkspacePreset::Analysis}) {

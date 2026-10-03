@@ -1824,7 +1824,8 @@ void pump_launch_queue(import_context& context, slint::Timer& launch_timer)
         return;
     }
     if (context.runner.is_busy() || context.browser.is_busy() || context.board.is_busy() || context.search.is_busy()
-        || context.importer.active() || context.poll_timer.running() || !context.service.has_active()) {
+        || context.importer.active() || context.poll_timer.running() || !context.service.has_active())
+    {
         return;
     }
     auto const next = context.launch_queue.take_next();

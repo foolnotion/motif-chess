@@ -5,11 +5,12 @@
 #include <thread>
 #include <vector>
 
-#include "motif/slint_app/import_service.hpp"
 #include "motif/slint_app/pgn_launch_queue.hpp"
-#include "motif/slint_app/workspace_service.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+
+#include "motif/slint_app/import_service.hpp"
+#include "motif/slint_app/workspace_service.hpp"
 
 namespace
 {
@@ -44,8 +45,8 @@ auto write_games(std::filesystem::path const& path, int const count, std::string
 {
     auto file = std::ofstream {path};
     for (auto index = 0; index < count; ++index) {
-        file << "[Event \"Launch\"]\n[Site \"?\"]\n[Date \"2024.01.01\"]\n[Round \"" << index + 1 << "\"]\n[White \"" << player
-             << index << "\"]\n[Black \"Opponent\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0\n\n";
+        file << "[Event \"Launch\"]\n[Site \"?\"]\n[Date \"2024.01.01\"]\n[Round \"" << index + 1 << "\"]\n[White \"" << player << index
+             << "\"]\n[Black \"Opponent\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0\n\n";
     }
     return path;
 }
