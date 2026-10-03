@@ -1555,4 +1555,22 @@ TEST_CASE("workspace layout: clicking an explorer row plays it, except while the
         CHECK(activated.size() == before);
     }
 }
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: an empty explorer has no table to focus and a searching one says so", "[motif-slint-app][layout]")
+{
+    auto const state = use_snapshot_platform();
+    auto activated = std::vector<std::string> {};
+    auto window = make_explorer_workspace(0, activated);
+    auto const idle = render_at_size(*state, snapshot_platform::width);
+
+    // No rows: the table is not a tab stop, so nothing can be chosen or played.
+    CHECK_FALSE(focus_explorer_table(*state, *window, snapshot_platform::width));
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(activated.empty());
+
+    window->set_search_searching(true);
+    CHECK(differs(idle, render_at_size(*state, snapshot_platform::width)));
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
