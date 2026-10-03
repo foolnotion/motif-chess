@@ -30,3 +30,7 @@ _bmad-output/
 specs
 specs/
 docs/handoffs/
+
+# Local build outputs
+result
+/CMakeFiles/
