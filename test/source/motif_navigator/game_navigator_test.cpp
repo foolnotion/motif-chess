@@ -339,6 +339,8 @@ TEST_CASE("game_navigator: SAN entry acts as board input and rejects bad or ambi
     auto garbage = navigator.apply_san("Zz9");
     REQUIRE_FALSE(garbage);
     CHECK(garbage.error() == game_navigator::move_error::invalid_san);
+    CHECK_FALSE(navigator.apply_san("").has_value());
+    CHECK_FALSE(navigator.apply_san("   ").has_value());
     auto illegal = navigator.apply_san("Ke4");
     REQUIRE_FALSE(illegal);
     auto ambiguous = navigator.apply_san("Nd2");  // knights on b1 and f3 both reach d2 once the d-pawn has moved
@@ -379,9 +381,10 @@ TEST_CASE("game_navigator: playing on a long line stays within the interaction b
     }
     REQUIRE(navigator.current_ply() == cycle_count * 4);
 
-    // One move on the 600-ply line costs a legal-move generation on the cached
-    // board rather than a replay from the start; the bound is generous so it
-    // holds in debug and sanitizer builds.
+    // The spec's 100 ms interaction budget for one move on a long line. The
+    // bound is generous so it holds in debug and sanitizer builds; it guards
+    // against a pathological cost per move (for instance rebuilding the whole
+    // tree), not against the cached board specifically.
     auto const started = std::chrono::steady_clock::now();
     REQUIRE(navigator.apply_san("e4"));
     auto const elapsed = std::chrono::steady_clock::now() - started;

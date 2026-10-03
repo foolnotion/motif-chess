@@ -315,13 +315,17 @@ export component NotationPanel inherits Rectangle {
     in property <string> result;
     in property <[NotationToken]> tokens;
     in property <int> current-node;
+    // Characters of the longest token, so a deep variation's parentheses and
+    // check marks are never elided. Every cell shares one width, which keeps
+    // placement arithmetic.
+    in property <int> longest-token-chars: 0;
     in property <bool> has-game: false;
     in property <bool> unsaved: false;
     in property <bool> edited: false;
     in property <bool> interaction-enabled: true;
     callback node-activated(int);
 
-    property <length> cell-width: 86px;
+    property <length> cell-width: max(86px, root.longest-token-chars * 7px + 10px);
     property <length> cell-gap: 4px;
     property <length> row-height: 20px;
     property <length> row-gap: 4px;
@@ -550,6 +554,7 @@ export component GameReviewPanel inherits Rectangle {
     in property <string> result;
     in property <[NotationToken]> tokens;
     in property <int> current-node;
+    in property <int> longest-token-chars: 0;
     in property <bool> unsaved: false;
     in property <bool> edited: false;
     in property <bool> promotion-pending: false;
@@ -676,6 +681,7 @@ export component GameReviewPanel inherits Rectangle {
             result: root.result;
             tokens: root.tokens;
             current-node: root.current-node;
+            longest-token-chars: root.longest-token-chars;
             has-game: root.board-loaded;
             unsaved: root.unsaved;
             edited: root.edited;

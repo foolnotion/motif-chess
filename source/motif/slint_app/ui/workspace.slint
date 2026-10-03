@@ -72,6 +72,8 @@ export component WorkspaceWindow inherits Window {
     in property <string> board-result;
     in property <[NotationToken]> board-notation;
     in property <int> board-current-node: 0;
+    // Characters of the longest notation token; sizes the notation cells.
+    in property <int> board-notation-chars: 0;
     // Incremented by the host each time a game finishes loading; moves
     // keyboard focus into the review region once per load.
     in property <int> board-load-serial: 0;
@@ -413,6 +415,7 @@ export component WorkspaceWindow inherits Window {
                 result: root.board-result;
                 tokens: root.board-notation;
                 current-node: root.board-current-node;
+                longest-token-chars: root.board-notation-chars;
                 unsaved: root.board-unsaved;
                 edited: root.board-edited;
                 promotion-pending: root.board-promotion-pending;

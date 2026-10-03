@@ -721,3 +721,68 @@ TEST_CASE("board_presenter: loading a stored game replaces an unsaved one", "[mo
     CHECK(presenter.state().white_name == "White Player");
     CHECK(presenter.movetext() == "1. d4 d5 1-0");
 }
+
+TEST_CASE("board_presenter: a move appended to a loaded game's last line marks it edited", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    auto presenter = loaded_presenter(*database, {"e4", "e5"});
+    presenter.jump_to_end();
+    REQUIRE_FALSE(presenter.state().edited);
+
+    REQUIRE(presenter.play_san("Nf3").has_value());
+
+    CHECK(presenter.state().edited);
+    CHECK(presenter.state().loaded);
+    CHECK(presenter.state().total_plies == 3);
+    CHECK(presenter.state().notation.size() == 3);
+    CHECK(presenter.movetext() == "1. e4 e5 2. Nf3 1-0");
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("board_presenter: a black promotion shows black pieces and a pending choice dies with any other input", "[motif-slint-app]")
+{
+    auto presenter = motif::slint_app::board_presenter {};
+    for (auto const* san : {"a3", "b5", "a4", "b4", "h3", "b3", "h4", "bxc2", "h5"}) {
+        REQUIRE(presenter.play_san(san).has_value());
+    }
+    auto const fen = presenter.state().fen;
+
+    click(presenter, "c2b1");
+    REQUIRE(presenter.state().promotion.has_value());
+    CHECK_FALSE(presenter.state().promotion.value_or(motif::slint_app::pending_promotion {}).white);
+
+    // Stepping through the game abandons it, and a late piece choice fails.
+    presenter.retreat();
+    CHECK_FALSE(presenter.state().promotion.has_value());
+    CHECK_FALSE(presenter.choose_promotion('q').has_value());
+    presenter.advance();
+    CHECK(presenter.state().fen == fen);
+
+    // So does a click elsewhere.
+    click(presenter, "c2b1");
+    REQUIRE(presenter.state().promotion.has_value());
+    REQUIRE(presenter.select_square(e2_file, e4_rank).has_value());
+    CHECK_FALSE(presenter.state().promotion.has_value());
+    CHECK(presenter.state().fen == fen);
+
+    click(presenter, "c2d1");
+    REQUIRE(presenter.choose_promotion('q').has_value());
+    CHECK(presenter.state().square_pieces[3] == "bQ");
+}
+
+TEST_CASE("board_presenter: a blocked own piece takes the selection and an opponent piece clears it", "[motif-slint-app]")
+{
+    auto presenter = motif::slint_app::board_presenter {};
+
+    REQUIRE(presenter.select_square(e2_file, e2_rank).has_value());
+    REQUIRE(presenter.select_square(0, 0).has_value());  // a1 rook: blocked, but it is white's piece
+    auto const rook = presenter.state().selected_square.value_or(motif::slint_app::board_square {.file = -1, .rank = -1});
+    CHECK(rook == motif::slint_app::board_square {.file = 0, .rank = 0});
+    CHECK(presenter.state().legal_targets.empty());
+
+    REQUIRE(presenter.select_square(e2_file, 6).has_value());  // e7 pawn: black's, not a target
+    CHECK_FALSE(presenter.state().selected_square.has_value());
+    CHECK_FALSE(presenter.state().unsaved);
+}

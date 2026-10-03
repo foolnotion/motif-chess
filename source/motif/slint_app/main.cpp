@@ -259,6 +259,7 @@ void clear_board(WorkspaceWindow& window)
     window.set_board_result("");
     window.set_board_notation(std::make_shared<slint::VectorModel<NotationToken>>());
     window.set_board_current_node(0);
+    window.set_board_notation_chars(0);
     window.set_board_unsaved(false);
     window.set_board_edited(false);
     window.set_board_promotion_pending(false);
@@ -302,6 +303,7 @@ void publish_board(WorkspaceWindow& window, motif::slint_app::board_state const&
         });
     }
     window.set_board_notation(std::make_shared<slint::VectorModel<NotationToken>>(std::move(notation)));
+    window.set_board_notation_chars(static_cast<std::int32_t>(state.notation_chars));
     window.set_board_current_node(static_cast<std::int32_t>(state.current_node));
     window.set_board_unsaved(state.unsaved);
     window.set_board_edited(state.edited);
@@ -905,8 +907,7 @@ class async_board_runner
         }
     }
 
-    // Fired after publish only when replay produced a valid position hash.
-    // A corrupt move list must not become a zero-hash position search.
+    // Fired after publish whenever the presenter reports a position hash.
     using position_changed_handler = std::function<void(motif::db::zobrist_hash)>;
 
     void set_position_changed_handler(position_changed_handler handler) { state_->position_changed = std::move(handler); }

@@ -92,9 +92,9 @@ struct board_state
     bool edited {false};
     motif::db::game_id game_id {};
     std::string fen;
-    // Zobrist hash of the current position. Empty when the loaded move list
-    // cannot be replayed; callers must not issue a search from a failed
-    // replay.
+    // Zobrist hash of the current position. The navigator's cached board always
+    // has one, so this holds a value on every presenter state; it stays an
+    // optional so callers keep checking it before issuing a search.
     std::optional<motif::db::zobrist_hash> current_hash;
     // Flattened 8x8 piece grid derived from fen, index = rank * 8 + file
     // (file 0='a'..7='h', rank 0='1'..7='8'). Empty string for an empty
@@ -105,8 +105,15 @@ struct board_state
     // Precomputed by the presenter; Slint must not derive it by searching
     // selected_square/legal_targets/last_move_from/last_move_to itself.
     std::vector<square_highlight> square_highlights;
+    // Depth of the cursor along its own line, and the length of the main line.
+    // Inside a variation longer than the main line current_ply exceeds
+    // total_plies, so do not derive "can advance" from the pair; the
+    // navigator controls follow the line the cursor is on.
     std::size_t current_ply {0};
     std::size_t total_plies {0};
+    // Characters of the longest notation token (open, number, SAN, close), so
+    // the view can size its fixed-width cells to fit it.
+    std::size_t notation_chars {0};
     // SAN of the main line only.
     std::vector<std::string> san_moves;
     // The whole tree in PGN order, including variations.
