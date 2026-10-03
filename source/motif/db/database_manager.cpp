@@ -439,22 +439,47 @@ auto postings_filtered_opening_stats(game_store const& store,
 
 // NOLINTEND(readability-function-cognitive-complexity)
 
+// Removes exactly the files create() and the derived-index builders write
+// into a bundle directory. Unrelated files are never touched.
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
-auto cleanup_failed_create(std::filesystem::path const& dir,
-                           std::filesystem::path const& db_path,
-                           std::filesystem::path const& manifest_path,
-                           bool created_dir) noexcept -> void
+auto remove_created_bundle_files(std::filesystem::path const& dir) noexcept -> void
 {
+    auto const db_path = dir / "games.db";
     std::error_code fs_err;
-    std::filesystem::remove(manifest_path, fs_err);
-    fs_err.clear();
-    std::filesystem::remove(db_path, fs_err);
-    fs_err.clear();
-    std::filesystem::remove(db_path.string() + "-wal", fs_err);
-    fs_err.clear();
-    std::filesystem::remove(db_path.string() + "-shm", fs_err);
-    if (created_dir) {
+    for (auto const& path : {dir / "manifest.json",
+                             dir / "manifest.json.tmp",
+                             db_path,
+                             std::filesystem::path {db_path.string() + "-wal"},
+                             std::filesystem::path {db_path.string() + "-shm"},
+                             std::filesystem::path {db_path.string() + "-journal"},
+                             dir / ".motif.lock"})
+    {
         fs_err.clear();
+        std::filesystem::remove(path, fs_err);
+    }
+
+    auto owned_derived_files = std::vector<std::filesystem::path> {};
+    fs_err.clear();
+    for (auto entries = std::filesystem::directory_iterator {dir, fs_err}; !fs_err && entries != std::filesystem::directory_iterator {};
+         entries.increment(fs_err))
+    {
+        auto const name = entries->path().filename().string();
+        if (name.starts_with("positions.postings.") || name.starts_with("opening_tree.idx.")) {
+            owned_derived_files.push_back(entries->path());
+        }
+    }
+    for (auto const& path : owned_derived_files) {
+        fs_err.clear();
+        std::filesystem::remove(path, fs_err);
+    }
+}
+
+// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
+auto cleanup_failed_create(std::filesystem::path const& dir, bool created_dir) noexcept -> void
+{
+    remove_created_bundle_files(dir);
+    if (created_dir) {
+        std::error_code fs_err;
         std::filesystem::remove(dir, fs_err);
     }
 }
@@ -567,6 +592,8 @@ database_manager::database_manager(database_manager&& other) noexcept
     , position_postings_ {std::move(other.position_postings_)}
     , opening_tree_index_ {std::move(other.opening_tree_index_)}
     , is_scratch_ {std::exchange(other.is_scratch_, false)}
+    , created_bundle_ {std::exchange(other.created_bundle_, false)}
+    , created_dir_ {std::exchange(other.created_dir_, false)}
     , bundle_lock_ {std::move(other.bundle_lock_)}
 {
     other.store_.reset();
@@ -587,6 +614,8 @@ auto database_manager::operator=(database_manager&& other) noexcept -> database_
         position_postings_ = std::move(other.position_postings_);
         opening_tree_index_ = std::move(other.opening_tree_index_);
         is_scratch_ = std::exchange(other.is_scratch_, false);
+        created_bundle_ = std::exchange(other.created_bundle_, false);
+        created_dir_ = std::exchange(other.created_dir_, false);
         bundle_lock_ = std::move(other.bundle_lock_);
         other.store_.reset();
         other.writer_.reset();
@@ -627,6 +656,21 @@ void database_manager::close() noexcept
         std::error_code fs_err;
         std::filesystem::remove_all(dir_, fs_err);
     }
+}
+
+void database_manager::discard_created_bundle() noexcept
+{
+    auto const dir = dir_;
+    auto const owns_bundle = created_bundle_;
+    auto const remove_dir = created_dir_;
+    close();
+    if (!owns_bundle || dir.empty()) {
+        return;
+    }
+    created_bundle_ = false;
+    created_dir_ = false;
+    dir_.clear();
+    cleanup_failed_create(dir, remove_dir);
 }
 
 // ── Factory methods
@@ -674,7 +718,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     auto init_res = schema::initialize(conn);
     if (!init_res) {
         sqlite3_close(conn);
-        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, created_dir);
         return tl::unexpected {init_res.error()};
     }
 
@@ -682,7 +726,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     auto write_res = write_manifest(manifest_path, new_manifest);
     if (!write_res) {
         sqlite3_close(conn);
-        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, created_dir);
         return tl::unexpected {write_res.error()};
     }
 
@@ -692,6 +736,8 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     mgr.writer_.emplace(conn);
     mgr.manifest_ = std::move(new_manifest);
     mgr.dir_ = dir;
+    mgr.created_bundle_ = true;
+    mgr.created_dir_ = created_dir;
     mgr.bundle_lock_ = std::move(*bundle_lock);
 
     // Publish a trivial empty (0-game) postings generation immediately so
@@ -700,7 +746,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     // generation once games exist (see rebuild_position_postings()).
     if (auto postings_res = mgr.rebuild_position_postings(); !postings_res) {
         mgr.close();
-        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, created_dir);
         return tl::unexpected {postings_res.error()};
     }
 
@@ -708,7 +754,7 @@ auto database_manager::create(std::filesystem::path const& dir, std::string cons
     mgr.manifest_.position_index_dirty = true;
     if (auto dirty_write_res = write_manifest(manifest_path, mgr.manifest_); !dirty_write_res) {
         mgr.close();
-        cleanup_failed_create(dir, db_path, manifest_path, created_dir);
+        cleanup_failed_create(dir, created_dir);
         return tl::unexpected {dirty_write_res.error()};
     }
 
@@ -848,6 +894,7 @@ auto database_manager::create_scratch() -> result<database_manager>
 
 auto database_manager::store() const noexcept -> game_store const&
 {
+    // NOLINTNEXTLINE(misc-static-assert,hicpp-static-assert,cert-dcl03-c) -- runtime invariant, not a constant
     assert(store_.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *store_;
@@ -855,6 +902,7 @@ auto database_manager::store() const noexcept -> game_store const&
 
 auto database_manager::writer() noexcept -> game_writer&
 {
+    // NOLINTNEXTLINE(misc-static-assert,hicpp-static-assert,cert-dcl03-c) -- runtime invariant, not a constant
     assert(writer_.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     return *writer_;
@@ -978,6 +1026,7 @@ auto database_manager::publish_derived_index(std::string const& filename, bool c
     if (!checksum) {
         return manifest_write_result {.state = manifest_write_state::not_published, .failure = checksum.error()};
     }
+    // NOLINTNEXTLINE(misc-static-assert,hicpp-static-assert,cert-dcl03-c) -- runtime invariant, not a constant
     assert(store_.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- asserted above
     auto game_count = store_->count_games();
