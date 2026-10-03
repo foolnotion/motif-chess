@@ -1,5 +1,5 @@
 import { GameBrowser, GameRow } from "game_browser.slint";
-import { GameReviewPanel, SquareHighlight } from "board_notation.slint";
+import { GameReviewPanel, NotationToken, SquareHighlight } from "board_notation.slint";
 import { ContinuationRow, PositionSearchPanel, SearchMatchRow } from "position_search.slint";
 import { Button, LineEdit, Palette, ScrollView, StyleMetrics } from "std-widgets.slint";
 
@@ -55,7 +55,13 @@ export component WorkspaceWindow inherits Window {
     in property <[int]> game-column-widths;
     in property <int> game-sort-column: 0;
     in property <bool> game-sort-ascending: true;
+    // A game, stored or unsaved, is on the board. The board itself is always
+    // playable: an empty one shows the starting position.
     in property <bool> board-loaded;
+    in property <bool> board-unsaved: false;
+    in property <bool> board-edited: false;
+    in property <bool> board-promotion-pending: false;
+    in property <bool> board-promotion-white: true;
     in property <[string]> board-square-pieces;
     in property <[SquareHighlight]> board-square-highlights;
     in property <bool> board-flipped;
@@ -64,8 +70,8 @@ export component WorkspaceWindow inherits Window {
     in property <string> board-event-name;
     in property <string> board-date;
     in property <string> board-result;
-    in property <[string]> board-san-moves;
-    in property <int> board-current-ply;
+    in property <[NotationToken]> board-notation;
+    in property <int> board-current-node: 0;
     // Incremented by the host each time a game finishes loading; moves
     // keyboard focus into the review region once per load.
     in property <int> board-load-serial: 0;
@@ -83,6 +89,11 @@ export component WorkspaceWindow inherits Window {
     in property <bool> search-searching: false;
     in property <bool> search-auto-search: true;
     in property <bool> search-busy: false;
+    // In-window confirmation shown before an edited or unsaved game is
+    // replaced; the host owns the pending action.
+    in property <bool> confirm-visible: false;
+    in property <string> confirm-message;
+    in property <string> confirm-action-label;
 
     // The active preset. The toolbar sets it directly so the switch is
     // immediate; the host persists it through `preset-selected` and restores it
@@ -106,7 +117,14 @@ export component WorkspaceWindow inherits Window {
     callback game-sort-requested(int, bool);
     callback game-column-resized(int, int);
     callback board-square-activated(int, int);
-    callback board-ply-activated(int);
+    callback board-node-activated(int);
+    callback board-promotion-chosen(string);
+    callback board-promotion-cancelled();
+    // Plays a move written in SAN as board input would (entry point for 13.2).
+    callback board-play-san(string);
+    callback board-new-game-requested();
+    callback confirm-accepted();
+    callback confirm-cancelled();
     callback board-navigate-first();
     callback board-navigate-previous();
     callback board-navigate-next();
@@ -125,8 +143,8 @@ export component WorkspaceWindow inherits Window {
         root.preset-selected(preset);
     }
 
-    property <bool> board-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy;
-    property <bool> search-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy;
+    property <bool> board-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy && !root.confirm-visible;
+    property <bool> search-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy && !root.confirm-visible;
     // Direct workspace/import errors retain precedence; panel-specific
     // cleared state cannot erase an error owned by another source.
     property <string> merged-error-text: root.error-text != "" ? root.error-text
@@ -316,6 +334,12 @@ export component WorkspaceWindow inherits Window {
                     vertical-alignment: center;
                 }
                 Button {
+                    text: "New Game";
+                    enabled: root.board-interaction-enabled;
+                    accessible-description: "Clears the board to the starting position and begins an unsaved game";
+                    clicked => { root.board-new-game-requested(); }
+                }
+                Button {
                     text: root.notation-below ? "Notation Right" : "Notation Below";
                     enabled: root.board-interaction-enabled;
                     clicked => { root.notation-layout-toggled(); }
@@ -387,15 +411,21 @@ export component WorkspaceWindow inherits Window {
                 event-name: root.board-event-name;
                 date: root.board-date;
                 result: root.board-result;
-                san-moves: root.board-san-moves;
-                current-ply: root.board-current-ply;
+                tokens: root.board-notation;
+                current-node: root.board-current-node;
+                unsaved: root.board-unsaved;
+                edited: root.board-edited;
+                promotion-pending: root.board-promotion-pending;
+                promotion-white: root.board-promotion-white;
                 interaction-enabled: root.board-interaction-enabled;
                 load-serial: root.board-load-serial;
                 focused-serial: root.board-focused-serial;
                 load-focused(serial) => { root.board-focused-serial = serial; }
                 square-activated(file, rank) => { root.board-square-activated(file, rank); }
                 notation-below: root.notation-below;
-                ply-activated(ply) => { root.board-ply-activated(ply); }
+                node-activated(node) => { root.board-node-activated(node); }
+                promotion-chosen(piece) => { root.board-promotion-chosen(piece); }
+                promotion-cancelled() => { root.board-promotion-cancelled(); }
                 navigate-first() => { root.board-navigate-first(); }
                 navigate-previous() => { root.board-navigate-previous(); }
                 navigate-next() => { root.board-navigate-next(); }
@@ -425,7 +455,7 @@ export component WorkspaceWindow inherits Window {
                     page-index: root.game-page-index;
                     has-previous-page: root.game-has-previous-page;
                     has-next-page: root.game-has-next-page;
-                    busy: root.browser-busy;
+                    busy: root.browser-busy || root.confirm-visible;
                     active-game-title: root.game-active-title;
                     selected-row <=> root.game-selected-row;
                     player-filter <=> root.game-player-filter;
@@ -530,6 +560,84 @@ export component WorkspaceWindow inherits Window {
                 if root.merged-error-text != "": Button {
                     text: "Dismiss";
                     clicked => { root.dismiss-error(); }
+                }
+            }
+        }
+    }
+
+    if root.confirm-visible: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: #000000aa;
+        // Swallows pointer input meant for the workspace underneath and keeps
+        // keyboard focus on the answers: a click on the backdrop would
+        // otherwise drop it.
+        TouchArea {
+            clicked => { keep-button.focus(); }
+        }
+        confirm-scope := FocusScope {
+            init => { keep-button.focus(); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.confirm-cancelled();
+                    return accept;
+                }
+                // Focus stays on the two answers while the overlay is up, so
+                // Tab can never reach (or leave Escape unheard by) the
+                // workspace underneath.
+                if (event.text == Key.Tab || event.text == Key.Backtab) {
+                    if (keep-button.has-focus) {
+                        discard-button.focus();
+                    } else {
+                        keep-button.focus();
+                    }
+                    return accept;
+                }
+                return reject;
+            }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        min-width: 320px;
+                        max-width: 460px;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        background: Palette.alternate-background;
+                        accessible-role: groupbox;
+                        accessible-label: "Confirm replacing the game";
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 12px;
+                            Text {
+                                text: "Replace the game on the board?";
+                                color: Palette.foreground;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: root.confirm-message;
+                                color: Palette.foreground;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: end;
+                                keep-button := Button {
+                                    text: "Keep editing";
+                                    clicked => { root.confirm-cancelled(); }
+                                }
+                                discard-button := Button {
+                                    text: root.confirm-action-label;
+                                    clicked => { root.confirm-accepted(); }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

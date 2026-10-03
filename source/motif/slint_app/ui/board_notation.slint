@@ -5,6 +5,17 @@ export struct BoardSquare {
     rank: int,
 }
 
+// One move of the notation in PGN order (motif::slint_app::notation_token).
+// `lead` is the opening parentheses plus the move number, `trail` the closing
+// parentheses; `depth` is 0 on the main line.
+export struct NotationToken {
+    lead: string,
+    san: string,
+    trail: string,
+    node: int,
+    depth: int,
+}
+
 // Mirrors motif::slint_app::square_highlight (motif/slint_app/board_presenter.hpp).
 export enum SquareHighlight { none, selected, legal-target, last-move-from, last-move-to }
 
@@ -37,9 +48,13 @@ export component BoardPanel inherits Rectangle {
     in property <[string]> square-pieces;
     in property <[SquareHighlight]> square-highlights;
     in property <bool> flipped;
-    in property <bool> board-loaded;
     in property <bool> interaction-enabled: true;
+    // A pawn move to the last rank waits for the piece to promote to.
+    in property <bool> promotion-pending: false;
+    in property <bool> promotion-white: true;
     callback square-activated(int, int);
+    callback promotion-chosen(string);
+    callback promotion-cancelled();
 
     pure function display-file(col: int) -> int {
         return root.flipped ? 7 - col : col;
@@ -80,7 +95,7 @@ export component BoardPanel inherits Rectangle {
         y: (root.height - root.extent) / 2;
         width: root.extent;
         height: root.extent;
-        focus-on-tab-navigation: root.board-loaded && root.interaction-enabled;
+        focus-on-tab-navigation: root.interaction-enabled;
         // focused-file/ranked-rank start as declarative bindings but are
         // replaced with fixed values after the first arrow-key press; the
         // `changed` handlers re-mirror the orientation so a flip while a
@@ -90,7 +105,7 @@ export component BoardPanel inherits Rectangle {
         accessible-role: button;
         accessible-label: root.string-from-char-code(97 + self.focused-file) + (self.focused-rank + 1);
         accessible-action-default => {
-            if (root.board-loaded && root.interaction-enabled) {
+            if (root.interaction-enabled) {
                 root.square-activated(self.focused-file, self.focused-rank);
             }
         }
@@ -101,7 +116,20 @@ export component BoardPanel inherits Rectangle {
             self.focused-rank = 7 - self.focused-rank;
         }
         key-pressed(event) => {
-            if (!root.board-loaded || !root.interaction-enabled) {
+            if (!root.interaction-enabled) {
+                return reject;
+            }
+            if (root.promotion-pending) {
+                // The picker owns Q/R/B/N and Escape; any other key (arrows,
+                // Home, End) falls through and abandons the pending move.
+                if (event.text == Key.Escape) {
+                    root.promotion-cancelled();
+                    return accept;
+                }
+                if (event.text.to-lowercase() == "q" || event.text.to-lowercase() == "r" || event.text.to-lowercase() == "b" || event.text.to-lowercase() == "n") {
+                    root.promotion-chosen(event.text.to-lowercase());
+                    return accept;
+                }
                 return reject;
             }
             if (event.text == Key.LeftArrow) {
@@ -169,7 +197,7 @@ export component BoardPanel inherits Rectangle {
                         height: parent.height * 0.88;
                     }
                     TouchArea {
-                        enabled: root.board-loaded && root.interaction-enabled;
+                        enabled: root.interaction-enabled;
                         clicked => {
                             board-scope.focused-file = sq.file;
                             board-scope.focused-rank = sq.rank;
@@ -191,6 +219,72 @@ export component BoardPanel inherits Rectangle {
                 }
             }
         }
+
+        if root.promotion-pending: Rectangle {
+            x: 0px;
+            y: 0px;
+            width: root.extent;
+            height: root.extent;
+            background: #00000066;
+            // Swallows pointer input meant for the squares underneath.
+            TouchArea {
+                clicked => { root.promotion-cancelled(); }
+            }
+            promotion-card := Rectangle {
+                width: min(root.extent - 16px, root.square-size * 4 + 76px);
+                height: root.square-size + 76px;
+                x: (root.extent - self.width) / 2;
+                y: (root.extent - self.height) / 2;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
+                accessible-role: groupbox;
+                accessible-label: "Promote pawn";
+                TouchArea { }
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 4px;
+                    Text {
+                        height: 16px;
+                        text: "Promote to (Q, R, B, N · Esc cancels)";
+                        color: Palette.foreground;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: center;
+                        for kind[idx] in ["Q", "R", "B", "N"]: Rectangle {
+                            width: root.square-size;
+                            height: root.square-size;
+                            border-radius: 4px;
+                            background: piece-touch.has-hover ? Palette.selection-background : #b58863;
+                            accessible-role: button;
+                            accessible-label: "Promote to " + (kind == "Q" ? "queen" : (kind == "R" ? "rook" : (kind == "B" ? "bishop" : "knight")));
+                            accessible-action-default => { root.promotion-chosen(kind.to-lowercase()); }
+                            ChessPiece {
+                                code: (root.promotion-white ? "w" : "b") + kind;
+                                width: parent.width * 0.88;
+                                height: parent.height * 0.88;
+                            }
+                            piece-touch := TouchArea {
+                                clicked => { root.promotion-chosen(kind.to-lowercase()); }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Cancel";
+                            accessible-label: "Cancel promotion";
+                            clicked => { root.promotion-cancelled(); }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pure function string-from-char-code(code: int) -> string {
@@ -205,46 +299,46 @@ export component BoardPanel inherits Rectangle {
     }
 }
 
-// Renders headers/result/SAN moves as inline, wrapping paragraph-style
-// notation. Every ply is one token in a single flat repeater and is placed by
-// arithmetic on fixed slot widths, so a resize only moves tokens: it never
-// rebuilds them, and the focused move keeps focus. (Slint has no reflow layout
-// for variable-width children in this toolchain version.) Click or activate a
-// token to jump directly to that ply.
+// Renders headers and the move tree as PGN movetext: moves in order, with each
+// variation inline in parentheses after the move it replaces. Every move is one
+// token in a single flat repeater. A token is a fixed-width cell (move number
+// and opening parentheses, SAN, closing parentheses) placed by arithmetic on
+// its index, so a resize only moves tokens: it never rebuilds them, and the
+// focused move keeps focus. (Slint has no reflow layout for variable-width
+// children in this toolchain version.) Click or activate a token to jump
+// directly to that node of the tree.
 export component NotationPanel inherits Rectangle {
     in property <string> white-name;
     in property <string> black-name;
     in property <string> event-name;
     in property <string> date;
     in property <string> result;
-    in property <[string]> san-moves;
-    in property <int> current-ply;
+    in property <[NotationToken]> tokens;
+    in property <int> current-node;
+    in property <bool> has-game: false;
+    in property <bool> unsaved: false;
+    in property <bool> edited: false;
     in property <bool> interaction-enabled: true;
-    callback ply-activated(int);
+    callback node-activated(int);
 
-    property <length> number-width: 30px;
-    property <length> move-width: 64px;
-    property <length> token-gap: 4px;
-    property <length> pair-gap: 8px;
+    property <length> cell-width: 86px;
+    property <length> cell-gap: 4px;
     property <length> row-height: 20px;
     property <length> row-gap: 4px;
-    property <length> pair-width: root.number-width + root.move-width + root.token-gap + root.move-width;
-    property <length> pair-stride: root.pair-width + root.pair-gap;
-    // A row always holds whole pairs so move numbers align.
-    property <int> pairs-per-row: max(1, min(4, Math.floor((root.width - 20px + root.pair-gap) / root.pair-stride)));
-    property <int> units-per-row: root.pairs-per-row * 2;
-    // Mirrors `san-moves.length` through an explicit assignment instead of a
-    // binding. The host republishes the whole move list as a new model on
+    property <length> cell-stride: root.cell-width + root.cell-gap;
+    property <int> cells-per-row: max(1, Math.floor((root.width - 20px + root.cell-gap) / root.cell-stride));
+    // Mirrors `tokens.length` through an explicit assignment instead of a
+    // binding. The host republishes the whole token list as a new model on
     // every navigation; a bound length would dirty the token repeater each
     // time, rebuilding every token and dropping keyboard focus from the move
     // the user was operating. An assignment of an unchanged length is silent.
     property <int> unit-count: 0;
-    init => { root.unit-count = root.san-moves.length; }
-    changed san-moves => { root.unit-count = root.san-moves.length; }
-    // (unit-count + units-per-row - 1) / units-per-row: ceil without the
+    init => { root.unit-count = root.tokens.length; }
+    changed tokens => { root.unit-count = root.tokens.length; }
+    // (unit-count + cells-per-row - 1) / cells-per-row: ceil without the
     // truncating integer division inside Math.ceil, which floors first
     // and would hide the final partial row of moves.
-    property <int> row-count: (root.unit-count + root.units-per-row - 1) / root.units-per-row;
+    property <int> row-count: (root.unit-count + root.cells-per-row - 1) / root.cells-per-row;
     property <length> row-stride: root.row-height + root.row-gap;
 
     background: Palette.background;
@@ -268,40 +362,46 @@ export component NotationPanel inherits Rectangle {
             font-size: 11px;
             overflow: elide;
         }
+        if root.unsaved || root.edited: Text {
+            text: root.unsaved ? "Unsaved game" : "Edited – not saved";
+            color: Palette.accent-background;
+            font-size: 11px;
+            font-weight: 700;
+            overflow: elide;
+            accessible-role: text;
+            accessible-description: root.unsaved ? "This game is not stored in any database" : "Moves added to this game are not stored in any database";
+        }
+        if !root.has-game: Text {
+            text: "Play a move to start a new game, or open a game from the list.";
+            color: Palette.alternate-foreground;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
 
         Flickable {
             vertical-stretch: 1;
             content-height: root.row-count * root.row-stride + (root.result != "" ? root.row-height : 0px);
             for idx in root.unit-count: cell := Rectangle {
-                property <int> slot: Math.mod(idx, root.units-per-row);
-                property <bool> is-white: Math.mod(idx, 2) == 0;
-                x: Math.floor(cell.slot / 2) * root.pair-stride + (cell.is-white ? 0px : root.number-width + root.move-width + root.token-gap);
-                y: Math.floor(idx / root.units-per-row) * root.row-stride;
-                width: cell.is-white ? root.number-width + root.move-width : root.move-width;
+                property <NotationToken> token: idx < root.tokens.length ? root.tokens[idx] : { lead: "", san: "", trail: "", node: -1, depth: 0 };
+                property <bool> current: cell.token.node == root.current-node;
+                x: Math.mod(idx, root.cells-per-row) * root.cell-stride;
+                y: Math.floor(idx / root.cells-per-row) * root.row-stride;
+                width: root.cell-width;
                 height: root.row-height;
-                if cell.is-white: Text {
-                    x: 0px;
-                    width: root.number-width;
-                    text: Math.floor(idx / 2) + 1 + ".";
-                    color: Palette.alternate-foreground;
-                    font-size: 13px;
-                    vertical-alignment: center;
-                }
                 move-scope := FocusScope {
-                    x: cell.is-white ? root.number-width : 0px;
-                    width: root.move-width;
+                    width: root.cell-width;
                     height: root.row-height;
                     focus-on-tab-navigation: root.interaction-enabled;
                     accessible-role: button;
-                    accessible-label: "Move " + (idx + 1) + ": " + (idx < root.san-moves.length ? root.san-moves[idx] : "");
+                    accessible-label: "Move " + (idx + 1) + ": " + cell.token.lead + " " + cell.token.san + cell.token.trail + (cell.token.depth > 0 ? ", variation" : "");
                     accessible-action-default => {
                         if (root.interaction-enabled) {
-                            root.ply-activated(idx + 1);
+                            root.node-activated(cell.token.node);
                         }
                     }
                     key-pressed(event) => {
                         if (root.interaction-enabled && (event.text == "\n" || event.text == " ")) {
-                            root.ply-activated(idx + 1);
+                            root.node-activated(cell.token.node);
                             return accept;
                         }
                         return reject;
@@ -312,21 +412,30 @@ export component NotationPanel inherits Rectangle {
                         border-color: Palette.accent-background;
                         background: transparent;
                     }
-                    Text {
-                        x: 4px;
-                        width: parent.width - 4px;
-                        text: idx < root.san-moves.length ? root.san-moves[idx] : "";
-                        color: idx + 1 == root.current-ply ? Palette.accent-background : Palette.foreground;
-                        font-weight: idx + 1 == root.current-ply ? 700 : 400;
-                        font-size: 13px;
-                        vertical-alignment: center;
-                        overflow: elide;
+                    HorizontalLayout {
+                        padding-left: 3px;
+                        spacing: 3px;
+                        alignment: start;
+                        if cell.token.lead != "": Text {
+                            text: cell.token.lead;
+                            color: Palette.alternate-foreground;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: cell.token.san + cell.token.trail;
+                            color: cell.current ? Palette.accent-background : (cell.token.depth > 0 ? Palette.alternate-foreground : Palette.foreground);
+                            font-weight: cell.current ? 700 : 400;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
                     }
                     TouchArea {
                         enabled: root.interaction-enabled;
                         clicked => {
                             move-scope.focus();
-                            root.ply-activated(idx + 1);
+                            root.node-activated(cell.token.node);
                         }
                     }
                 }
@@ -381,8 +490,12 @@ component BoardAndControls inherits Rectangle {
     in property <[SquareHighlight]> square-highlights;
     in property <bool> flipped;
     in property <bool> interaction-enabled: true;
+    in property <bool> promotion-pending: false;
+    in property <bool> promotion-white: true;
 
     callback square-activated(int, int);
+    callback promotion-chosen(string);
+    callback promotion-cancelled();
     callback navigate-first();
     callback navigate-previous();
     callback navigate-next();
@@ -396,11 +509,14 @@ component BoardAndControls inherits Rectangle {
         BoardPanel {
             vertical-stretch: 1;
             square-pieces: root.square-pieces;
-            board-loaded: root.board-loaded;
             square-highlights: root.square-highlights;
             flipped: root.flipped;
             interaction-enabled: root.interaction-enabled;
+            promotion-pending: root.promotion-pending;
+            promotion-white: root.promotion-white;
             square-activated(file, rank) => { root.square-activated(file, rank); }
+            promotion-chosen(piece) => { root.promotion-chosen(piece); }
+            promotion-cancelled() => { root.promotion-cancelled(); }
         }
         HorizontalLayout {
             height: 32px;
@@ -432,8 +548,12 @@ export component GameReviewPanel inherits Rectangle {
     in property <string> event-name;
     in property <string> date;
     in property <string> result;
-    in property <[string]> san-moves;
-    in property <int> current-ply;
+    in property <[NotationToken]> tokens;
+    in property <int> current-node;
+    in property <bool> unsaved: false;
+    in property <bool> edited: false;
+    in property <bool> promotion-pending: false;
+    in property <bool> promotion-white: true;
     in property <bool> interaction-enabled: true;
     in property <bool> notation-below: false;
     // Incremented by the host each time a game finishes loading.
@@ -456,7 +576,9 @@ export component GameReviewPanel inherits Rectangle {
     }
 
     callback square-activated(int, int);
-    callback ply-activated(int);
+    callback promotion-chosen(string);
+    callback promotion-cancelled();
+    callback node-activated(int);
     callback navigate-first();
     callback navigate-previous();
     callback navigate-next();
@@ -531,7 +653,11 @@ export component GameReviewPanel inherits Rectangle {
             square-highlights: root.square-highlights;
             flipped: root.flipped;
             interaction-enabled: root.interaction-enabled;
+            promotion-pending: root.promotion-pending;
+            promotion-white: root.promotion-white;
             square-activated(file, rank) => { root.square-activated(file, rank); }
+            promotion-chosen(piece) => { root.promotion-chosen(piece); }
+            promotion-cancelled() => { root.promotion-cancelled(); }
             navigate-first() => { root.navigate-first(); }
             navigate-previous() => { root.navigate-previous(); }
             navigate-next() => { root.navigate-next(); }
@@ -548,10 +674,13 @@ export component GameReviewPanel inherits Rectangle {
             event-name: root.event-name;
             date: root.date;
             result: root.result;
-            san-moves: root.san-moves;
-            current-ply: root.current-ply;
+            tokens: root.tokens;
+            current-node: root.current-node;
+            has-game: root.board-loaded;
+            unsaved: root.unsaved;
+            edited: root.edited;
             interaction-enabled: root.interaction-enabled;
-            ply-activated(ply) => { root.ply-activated(ply); }
+            node-activated(node) => { root.node-activated(node); }
         }
         // Shows that the review region itself owns the keyboard (the state a
         // freshly loaded game starts in) when no individual control does.
