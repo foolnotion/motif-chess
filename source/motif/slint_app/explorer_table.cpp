@@ -108,6 +108,9 @@ auto make_explorer_table(std::span<motif::search::opening_stats::continuation co
                                            split_label(row.split));
         table.rows.push_back(std::move(row));
     }
+    // The backend orders by transposition popularity; the table lists moves played
+    // from here, most played first, ties in the backend's order.
+    std::ranges::stable_sort(table.rows, [](explorer_row const& left, explorer_row const& right) -> bool { return left.count > right.count; });
     table.total.count = total_games;
     table.total.split = split_results(white_total, draw_total, black_total);
     table.total.accessible_label =
