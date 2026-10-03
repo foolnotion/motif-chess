@@ -171,6 +171,15 @@ class database_manager
     // Safe to call multiple times.
     void close() noexcept;
 
+    // Roll back a bundle produced by create(): close it, then delete only the
+    // files create() and its derived-index builds own (manifest.json,
+    // games.db and SQLite sidecars, .motif.lock, positions.postings.* and
+    // opening_tree.idx.* generations). The directory itself is removed only
+    // when create() made it and it is empty afterwards, so a pre-existing
+    // directory and any unrelated files in it survive. For a manager that did
+    // not come from create() this is equivalent to close().
+    void discard_created_bundle() noexcept;
+
   private:
     database_manager() = default;
 
@@ -185,6 +194,11 @@ class database_manager
     // private temporary directory that close() removes entirely, rather
     // than a user-facing persistent bundle location.
     bool is_scratch_ {false};
+    // True for managers returned by create(): the bundle files in dir_ were
+    // written by this process and are safe to delete on rollback.
+    bool created_bundle_ {false};
+    // True when create() also created dir_ itself (it did not exist before).
+    bool created_dir_ {false};
     std::unique_ptr<bundle_lock> bundle_lock_;
     mutable std::recursive_mutex generation_mutex_;
     auto mark_derived_indexes_stale() -> result<void>;
