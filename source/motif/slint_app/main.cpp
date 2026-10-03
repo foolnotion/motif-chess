@@ -241,7 +241,7 @@ void clear_search(WorkspaceWindow& window)
     window.set_search_page_index(0);
     window.set_search_has_previous_page(false);
     window.set_search_has_next_page(false);
-    window.set_search_continuations(std::make_shared<slint::VectorModel<ContinuationRow>>());
+    motif::slint_app::publish_explorer(window, motif::slint_app::explorer_table {});
     window.set_search_total_games(0);
     window.set_search_active_filter_summary("");
     window.set_search_searching(false);
@@ -251,15 +251,6 @@ void clear_search(WorkspaceWindow& window)
 auto elo_text(std::optional<std::int32_t> const elo) -> std::string
 {
     return elo ? fmt::format("{}", *elo) : std::string {};
-}
-
-auto elo_text(std::optional<double> const elo) -> std::string
-{
-    if (!elo) {
-        return {};
-    }
-    constexpr auto rounding_offset = 0.5;
-    return fmt::format("{}", static_cast<int>(*elo + rounding_offset));
 }
 
 // Renders the metadata filters currently applied to a search query as a
@@ -300,26 +291,10 @@ void publish_search(WorkspaceWindow& window, motif::slint_app::search_state cons
     window.set_search_matches(std::make_shared<slint::VectorModel<SearchMatchRow>>(std::move(matches)));
     window.set_search_total_matches(to_ui_count(state.total_matches));
 
-    auto continuations = std::vector<ContinuationRow> {};
-    continuations.reserve(state.continuations.size());
     window.set_search_page_index(to_ui_count(state.page_index));
     window.set_search_has_previous_page(state.has_previous_page);
     window.set_search_has_next_page(state.has_next_page);
-    for (auto const& continuation : state.continuations) {
-        continuations.push_back(ContinuationRow {
-            .san = shared_string(continuation.san),
-            .frequency = to_ui_count(static_cast<std::size_t>(continuation.frequency)),
-            .direct_frequency = to_ui_count(static_cast<std::size_t>(continuation.direct_frequency)),
-            .white_wins = to_ui_count(static_cast<std::size_t>(continuation.white_wins)),
-            .draws = to_ui_count(static_cast<std::size_t>(continuation.draws)),
-            .black_wins = to_ui_count(static_cast<std::size_t>(continuation.black_wins)),
-            .white_elo = shared_string(elo_text(continuation.average_white_elo)),
-            .black_elo = shared_string(elo_text(continuation.average_black_elo)),
-            .eco = shared_string(continuation.eco.value_or(std::string {})),
-            .opening_name = shared_string(continuation.opening_name.value_or(std::string {})),
-        });
-    }
-    window.set_search_continuations(std::make_shared<slint::VectorModel<ContinuationRow>>(std::move(continuations)));
+    motif::slint_app::publish_explorer(window, motif::slint_app::make_explorer_table(state.continuations, state.total_games));
     window.set_search_total_games(to_ui_count(state.total_games));
     window.set_search_active_filter_summary(shared_string(filter_summary(state.active_filter)));
     window.set_search_searching(state.searching);
@@ -869,6 +844,12 @@ class async_search_runner
     }
 
     [[nodiscard]] auto is_busy() const noexcept -> bool { return state_->busy.load(std::memory_order_acquire); }
+
+    // True when the rows on screen are the finished result for `hash`.
+    [[nodiscard]] auto shows_position(motif::db::zobrist_hash const hash) const -> bool
+    {
+        return state_->presenter && !state_->presenter->state().searching && state_->presenter->state().current_hash == hash;
+    }
 
     void search(motif::db::zobrist_hash const hash, motif::db::search_filter const& filter)
     {
@@ -1674,6 +1655,14 @@ auto main(int const argc, char** const argv) -> int
     motif::slint_app::register_board_callbacks(*window, board, activity);
     motif::slint_app::register_play_callbacks(*window, board, activity, confirmation);
     register_search_callbacks(*window, search, browser, importer, runner, board, confirmation);
+    motif::slint_app::register_explorer_callbacks(*window,
+                                                  board,
+                                                  activity,
+                                                  [&board, &search]() -> bool
+                                                  {
+                                                      auto const hash = board.current_hash();
+                                                      return hash && search.shows_position(*hash);
+                                                  });
     register_import_callbacks(import_context_value);
 
     // Launch arguments (command line or a file manager's %F): invalid ones are

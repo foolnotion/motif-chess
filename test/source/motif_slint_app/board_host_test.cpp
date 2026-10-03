@@ -40,6 +40,7 @@ struct host
     slint::ComponentHandle<WorkspaceWindow> window {WorkspaceWindow::create()};
     motif::slint_app::async_board_runner board {window};
     workspace_activity activity;
+    bool rows_current {true};
     motif::slint_app::replace_controller confirmation {motif::slint_app::make_replace_confirmation(window, board)};
 
     host()
@@ -48,6 +49,7 @@ struct host
         auto const probe = motif::slint_app::activity_probe {[this]() -> workspace_activity { return activity; }};
         motif::slint_app::register_board_callbacks(*window, board, probe);
         motif::slint_app::register_play_callbacks(*window, board, probe, confirmation);
+        motif::slint_app::register_explorer_callbacks(*window, board, probe, [this]() -> bool { return rows_current; });
         motif::slint_app::install_close_guard(*window, board, confirmation);
     }
 
@@ -239,5 +241,118 @@ TEST_CASE("board host: a failed game read leaves the edited board alone and a lo
     CHECK_FALSE(test.window->get_board_unsaved());
     CHECK(test.window->get_board_load_serial() == serial + 1);
 }
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("board host: activating an explorer row plays its move and the board reports the new position", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    auto positions = std::vector<motif::db::zobrist_hash> {};
+    test.board.set_position_changed_handler([&positions](motif::db::zobrist_hash const hash) -> void { positions.push_back(hash); });
+
+    test.window->invoke_search_continuation_activated("e4");
+    REQUIRE(test.tokens() == std::vector<std::string> {"e4"});
+    REQUIRE(positions.size() == 1);
+    CHECK(test.board.current_hash() == positions.back());
+    CHECK(test.window->get_board_unsaved());  // no game was loaded: a new unsaved game
+
+    test.window->invoke_search_continuation_activated("c5");
+    CHECK(test.tokens() == std::vector<std::string> {"e4", "c5"});
+    REQUIRE(positions.size() == 2);
+    CHECK(positions.front() != positions.back());
+
+    // Off the end of the line: stepping back and playing another move branches.
+    test.window->invoke_board_navigate_previous();
+    test.window->invoke_search_continuation_activated("e5");
+    CHECK(test.tokens().size() > 2);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("board host: explorer rows are ignored under each busy condition and when the table is stale", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    for (auto const& busy : busy_conditions) {
+        auto test = host {};
+        test.window->invoke_board_play_san("e4");
+        auto positions = std::size_t {0};
+        test.board.set_position_changed_handler([&positions](motif::db::zobrist_hash) -> void { ++positions; });
+        test.activity = busy;
+
+        test.window->invoke_search_continuation_activated("e5");
+
+        CHECK(test.tokens() == std::vector<std::string> {"e4"});
+        CHECK(positions == 0);
+    }
+
+    auto stale = host {};
+    stale.window->invoke_board_play_san("e4");
+    stale.rows_current = false;  // the rows on screen belong to another position
+    stale.window->invoke_search_continuation_activated("e5");
+    CHECK(stale.tokens() == std::vector<std::string> {"e4"});
+}
+
+TEST_CASE("board host: a rejected explorer move leaves the board unchanged and shows the board's message", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    test.window->invoke_board_play_san("e4");
+    auto const hash = test.board.current_hash();
+    auto const node = test.window->get_board_current_node();
+
+    test.window->invoke_search_continuation_activated("Qh5");  // not legal for Black after 1. e4
+
+    CHECK(test.tokens() == std::vector<std::string> {"e4"});
+    CHECK(test.window->get_board_current_node() == node);
+    CHECK_FALSE(test.window->get_board_error_text().empty());
+    CHECK(test.board.current_hash() == hash);
+
+    test.window->invoke_search_continuation_activated("");
+    CHECK(test.tokens() == std::vector<std::string> {"e4"});
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+// Sample figures are literal on purpose: the test asserts them on the published model.
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+TEST_CASE("board host: publishing the explorer maps rows, bar percentages and the total row", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    auto table = motif::slint_app::explorer_table {};
+    table.rows.push_back(motif::slint_app::explorer_row {.san = "e4",
+                                                         .count = 7,
+                                                         .share_percent = 70,
+                                                         .share_text = "70%",
+                                                         .split = {.white = 50, .draw = 30, .black = 20},
+                                                         .white_elo = "2400",
+                                                         .black_elo = "—",
+                                                         .eco = "B00",
+                                                         .opening_name = "King's Pawn",
+                                                         .accessible_label = "label"});
+    table.total = {.count = 10, .split = {.white = 40, .draw = 40, .black = 20}, .accessible_label = "total label"};
+
+    motif::slint_app::publish_explorer(*test.window, table);
+
+    auto const model = test.window->get_search_continuations();
+    REQUIRE(model->row_count() == 1);
+    auto const row = model->row_data(0).value_or(ContinuationRow {});
+    CHECK(std::string_view {row.san.data(), row.san.size()} == "e4");
+    CHECK(row.count == 7);
+    CHECK(std::string_view {row.share_text.data(), row.share_text.size()} == "70%");
+    CHECK(row.white_percent == 50);
+    CHECK(row.draw_percent == 30);
+    CHECK(row.black_percent == 20);
+    CHECK(std::string_view {row.black_elo.data(), row.black_elo.size()} == "—");
+    CHECK(std::string_view {row.accessible_label.data(), row.accessible_label.size()} == "label");
+    auto const total = test.window->get_search_continuation_total();
+    CHECK(total.count == 10);
+    CHECK(total.white_percent == 40);
+    CHECK(total.draw_percent == 40);
+    CHECK(total.black_percent == 20);
+}
+
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 // NOLINTEND(portability-template-virtual-member-function)

@@ -7,6 +7,7 @@ find_package(tl-expected REQUIRED)
 add_library(motif_slint_app_service STATIC
     board_presenter.cpp
     config.cpp
+    explorer_table.cpp
     game_browser_presenter.cpp
     import_service.cpp
     pgn_launch_queue.cpp

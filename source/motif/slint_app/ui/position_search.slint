@@ -12,17 +12,28 @@ export struct SearchMatchRow {
     ply: int,
 }
 
+// One move of the opening-explorer table. Every figure is derived by
+// explorer_table.cpp; this file only draws it.
 export struct ContinuationRow {
     san: string,
-    frequency: int,
-    direct-frequency: int,
-    white-wins: int,
-    draws: int,
-    black-wins: int,
+    count: int,
+    share-text: string,
+    white-percent: int,
+    draw-percent: int,
+    black-percent: int,
     white-elo: string,
     black-elo: string,
     eco: string,
     opening-name: string,
+    accessible-label: string,
+}
+
+export struct ContinuationTotal {
+    count: int,
+    white-percent: int,
+    draw-percent: int,
+    black-percent: int,
+    accessible-label: string,
 }
 
 component ColumnHeader inherits Text {
@@ -31,6 +42,58 @@ component ColumnHeader inherits Text {
     font-weight: 600;
     vertical-alignment: center;
     overflow: elide;
+}
+
+// White / draw / black split of a move's games. A segment too narrow for its
+// percentage is drawn without the text; the row's accessible label still
+// carries all three figures.
+component ResultBar inherits Rectangle {
+    in property <int> white-percent;
+    in property <int> draw-percent;
+    in property <int> black-percent;
+    min-height: 14px;
+    border-width: 1px;
+    border-color: Palette.border;
+    clip: true;
+    Rectangle {
+        x: 0px;
+        width: parent.width * root.white-percent / 100;
+        background: #f1f1f1;
+        Text {
+            visible: parent.width >= 28px;
+            text: root.white-percent + "%";
+            color: #1e1e1e;
+            font-size: 9px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle {
+        x: parent.width * root.white-percent / 100;
+        width: parent.width * root.draw-percent / 100;
+        background: #8c8c8c;
+        Text {
+            visible: parent.width >= 28px;
+            text: root.draw-percent + "%";
+            color: #101010;
+            font-size: 9px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle {
+        x: parent.width * (root.white-percent + root.draw-percent) / 100;
+        width: parent.width * root.black-percent / 100;
+        background: #2b2b2b;
+        Text {
+            visible: parent.width >= 28px;
+            text: root.black-percent + "%";
+            color: #f1f1f1;
+            font-size: 9px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
 }
 
 // Renders the current-position matching-games list and continuation
@@ -46,16 +109,26 @@ export component PositionSearchPanel inherits Rectangle {
     in property <bool> has-previous-page;
     in property <bool> has-next-page;
     in property <[ContinuationRow]> continuations;
+    in property <ContinuationTotal> continuation-total;
     in property <int> total-games;
     in property <string> active-filter-summary;
     in property <bool> searching;
     in property <bool> auto-search: true;
     in property <bool> interaction-enabled: true;
+    // Short window: the matching-games list shrinks to make room for the move table.
+    in property <bool> compact: false;
     in-out property <int> focused-match-index: -1;
     callback search-requested();
     callback auto-search-toggled(bool);
     callback match-activated(int);
     callback page-requested(int);
+    callback continuation-activated(string);
+    // Row chosen in the move table; reset whenever the rows are replaced so a
+    // stale index can never play a move from a previous position.
+    in-out property <int> selected-continuation: -1;
+    property <length> continuation-row-height: 40px;
+    property <length> table-scroll-y;
+    property <length> table-visible-height;
 
     // Row scopes lose has-focus whenever the ListView rebuilds (new
     // search results), but a stale focused-match-index would otherwise
@@ -63,6 +136,25 @@ export component PositionSearchPanel inherits Rectangle {
     // rendered, letting Enter/activation load the wrong game.
     changed matches => {
         root.focused-match-index = -1;
+    }
+    changed continuations => {
+        root.selected-continuation = -1;
+        root.table-scroll-y = 0px;
+    }
+
+    // Keeps the chosen row inside the visible part of the table.
+    function reveal-continuation(index: int) {
+        if (-index * root.continuation-row-height > root.table-scroll-y) {
+            root.table-scroll-y = -index * root.continuation-row-height;
+        } else if (-(index + 1) * root.continuation-row-height < root.table-scroll-y - root.table-visible-height) {
+            root.table-scroll-y = root.table-visible-height - (index + 1) * root.continuation-row-height;
+        }
+    }
+
+    function activate-continuation(index: int) {
+        if (root.interaction-enabled && index >= 0 && index < root.continuations.length) {
+            root.continuation-activated(root.continuations[index].san);
+        }
     }
 
     background: Palette.background;
@@ -130,7 +222,9 @@ export component PositionSearchPanel inherits Rectangle {
                     ColumnHeader { width: 62px; text: "Date"; }
                 }
                 Rectangle {
-                    height: 130px;
+                    // Two rows when the panel is short, so the move table
+                    // below keeps room for its rows.
+                    height: root.compact ? 56px : 130px;
                     border-width: 1px;
                     border-color: Palette.border;
                     ListView {
@@ -245,48 +339,139 @@ export component PositionSearchPanel inherits Rectangle {
             }
 
             Text { text: "Continuations (" + root.total-games + " games)"; color: Palette.foreground; font-weight: 600; font-size: 12px; }
-            if root.searching: Text { text: "Searching…"; color: Palette.alternate-foreground; font-size: 12px; }
-            if !root.searching && root.continuations.length == 0: Text { text: "No continuations"; color: Palette.alternate-foreground; font-size: 12px; }
-            if root.continuations.length > 0: VerticalLayout {
-                spacing: 2px;
+            table-scope := FocusScope {
                 vertical-stretch: 1;
-                HorizontalLayout {
-                    vertical-stretch: 0;
-                    spacing: 6px;
-                    padding-left: 4px;
-                    ColumnHeader { width: 44px; text: "SAN"; }
-                    ColumnHeader { width: 40px; text: "Games"; }
-                    ColumnHeader { width: 38px; text: "Direct"; }
-                    ColumnHeader { width: 64px; text: "W/D/L"; }
-                    ColumnHeader { width: 54px; text: "Elo W/B"; }
-                    ColumnHeader { horizontal-stretch: 1; text: "ECO / Opening"; }
+                focus-on-tab-navigation: root.interaction-enabled && root.continuations.length > 0;
+                accessible-role: list;
+                accessible-label: "Opening explorer moves";
+                key-pressed(event) => {
+                    if (!root.interaction-enabled || root.continuations.length == 0) {
+                        return reject;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.selected-continuation = Math.max(0, root.selected-continuation - 1);
+                        root.reveal-continuation(root.selected-continuation);
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.selected-continuation = Math.min(root.continuations.length - 1, root.selected-continuation + 1);
+                        root.reveal-continuation(root.selected-continuation);
+                        return accept;
+                    }
+                    if (event.text == "\n" && root.selected-continuation >= 0) {
+                        root.activate-continuation(root.selected-continuation);
+                        return accept;
+                    }
+                    return reject;
                 }
-                Rectangle {
-                    vertical-stretch: 1;
-                    border-width: 1px;
-                    border-color: Palette.border;
-                    ListView {
-                        for row[index] in root.continuations: Rectangle {
-                            height: 26px;
-                            background: Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background;
-                            HorizontalLayout {
-                                padding-left: 4px;
-                                padding-right: 4px;
-                                spacing: 6px;
-                                Text { width: 44px; text: "  " + row.san; color: Palette.foreground; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 40px; text: row.frequency; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 38px; text: row.direct-frequency; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 64px; text: row.white-wins + "/" + row.draws + "/" + row.black-wins; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
-                                Text { width: 54px; text: row.white-elo + "/" + row.black-elo; color: Palette.alternate-foreground; font-size: 11px; vertical-alignment: center; }
-                                Text {
-                                    horizontal-stretch: 1;
-                                    text: row.eco + " " + row.opening-name;
-                                    color: Palette.alternate-foreground;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                    overflow: elide;
+                VerticalLayout {
+                    spacing: 2px;
+                    if root.searching: Text { text: "Searching…"; color: Palette.alternate-foreground; font-size: 12px; }
+                    if !root.searching && root.continuations.length == 0: Text { text: "No continuations"; color: Palette.alternate-foreground; font-size: 12px; }
+                    if root.continuations.length > 0: VerticalLayout {
+                        spacing: 2px;
+                        vertical-stretch: 1;
+                        opacity: root.interaction-enabled ? 1.0 : 0.6;
+                        HorizontalLayout {
+                            vertical-stretch: 0;
+                            spacing: 6px;
+                            padding-left: 4px;
+                            padding-right: 4px;
+                            ColumnHeader { width: 46px; text: "Move"; }
+                            ColumnHeader { width: 34px; text: "Share"; horizontal-alignment: right; }
+                            ColumnHeader { width: 44px; text: "Games"; horizontal-alignment: right; }
+                            ColumnHeader { horizontal-stretch: 1; text: "White / draw / black"; }
+                        }
+                        Rectangle {
+                            vertical-stretch: 1;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            ListView {
+                                viewport-y <=> root.table-scroll-y;
+                                init => { root.table-visible-height = self.visible-height; }
+                                changed visible-height => { root.table-visible-height = self.visible-height; }
+                                for row[index] in root.continuations: Rectangle {
+                                    height: root.continuation-row-height;
+                                    background: root.selected-continuation == index ? Palette.selection-background : (Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background);
+                                    accessible-role: list-item;
+                                    accessible-label: row.accessible-label;
+                                    accessible-action-default => { root.activate-continuation(index); }
+                                    VerticalLayout {
+                                        padding-left: 4px;
+                                        padding-right: 12px;
+                                        padding-top: 3px;
+                                        padding-bottom: 3px;
+                                        spacing: 2px;
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text { width: 46px; text: row.san; color: root.selected-continuation == index ? Palette.selection-foreground : Palette.foreground; font-size: 12px; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                                            Text { width: 34px; text: row.share-text; color: root.selected-continuation == index ? Palette.selection-foreground : Palette.foreground; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; }
+                                            Text { width: 44px; text: row.count; color: root.selected-continuation == index ? Palette.selection-foreground : Palette.alternate-foreground; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; }
+                                            ResultBar {
+                                                horizontal-stretch: 1;
+                                                white-percent: row.white-percent;
+                                                draw-percent: row.draw-percent;
+                                                black-percent: row.black-percent;
+                                            }
+                                        }
+                                        Text {
+                                            text: "Elo " + row.white-elo + " / " + row.black-elo;
+                                            color: root.selected-continuation == index ? Palette.selection-foreground : Palette.alternate-foreground;
+                                            font-size: 10px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+                                    TouchArea {
+                                        enabled: root.interaction-enabled;
+                                        clicked => {
+                                            root.selected-continuation = index;
+                                            table-scope.focus();
+                                            root.activate-continuation(index);
+                                        }
+                                    }
                                 }
                             }
+                            // Drawn after the list so the rows cannot cover it.
+                            Rectangle {
+                                visible: table-scope.has-focus;
+                                border-width: 2px;
+                                border-color: Palette.selection-background;
+                            }
+                        }
+                        Rectangle {
+                            vertical-stretch: 0;
+                            height: 24px;
+                            background: Palette.alternate-background;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            accessible-role: list-item;
+                            accessible-label: root.continuation-total.accessible-label;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 12px;
+                                padding-top: 3px;
+                                padding-bottom: 3px;
+                                spacing: 6px;
+                                Text { width: 46px; text: "Σ"; color: Palette.foreground; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                                Text { width: 34px; text: "100%"; color: Palette.foreground; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 44px; text: root.continuation-total.count; color: Palette.alternate-foreground; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; }
+                                ResultBar {
+                                    horizontal-stretch: 1;
+                                    white-percent: root.continuation-total.white-percent;
+                                    draw-percent: root.continuation-total.draw-percent;
+                                    black-percent: root.continuation-total.black-percent;
+                                }
+                            }
+                        }
+                        Text {
+                            vertical-stretch: 0;
+                            text: root.selected-continuation >= 0 && root.selected-continuation < root.continuations.length
+                                ? (root.continuations[root.selected-continuation].eco + " " + root.continuations[root.selected-continuation].opening-name)
+                                : "Up/Down chooses a move, Enter plays it";
+                            color: Palette.alternate-foreground;
+                            font-size: 11px;
+                            overflow: elide;
                         }
                     }
                 }
