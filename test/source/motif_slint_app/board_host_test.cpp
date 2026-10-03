@@ -11,6 +11,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <slint.h>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/types.hpp"
 #include "motif/slint_app/activity_gate.hpp"
 #include "snapshot_platform.hpp"
@@ -64,6 +65,21 @@ struct host
         return result;
     }
 };
+
+// A stored game made of `sans`, as the browser would hand it to the board.
+auto make_stored_game(std::vector<std::string> const& sans) -> motif::db::game
+{
+    auto position = motif::chess::board {};
+    auto game = motif::db::game {};
+    game.white.name = "White Player";
+    game.black.name = "Black Player";
+    for (auto const& san : sans) {
+        auto const move = motif::chess::apply_san(position, san);
+        REQUIRE(move);
+        game.moves.push_back(*move);
+    }
+    return game;
+}
 
 }  // namespace
 
@@ -314,6 +330,28 @@ TEST_CASE("board host: a rejected explorer move leaves the board unchanged and s
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("board host: an explorer row follows a loaded game's main line and branches off it", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    auto handlers = motif::slint_app::make_board_activation_handlers(slint::ComponentWeakHandle<WorkspaceWindow> {test.window}, test.board);
+    auto const game = make_stored_game({"e4", "e5", "Nf3"});
+    handlers.loaded(motif::db::game_id {1}, game);
+    REQUIRE_FALSE(test.window->get_board_edited());
+    auto const loaded_tokens = test.tokens();
+
+    test.window->invoke_search_continuation_activated("e4");  // the game's own first move
+    CHECK(test.tokens() == loaded_tokens);
+    CHECK_FALSE(test.window->get_board_edited());
+    CHECK(test.window->get_board_current_node() != 0);
+
+    test.window->invoke_search_continuation_activated("c5");  // legal, but the game played e5
+    CHECK(test.tokens().size() > loaded_tokens.size());
+    CHECK(test.window->get_board_edited());
+}
+
 // Sample figures are literal on purpose: the test asserts them on the published model.
 // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 TEST_CASE("board host: publishing the explorer maps rows, bar percentages and the total row", "[motif-slint-app][host]")
