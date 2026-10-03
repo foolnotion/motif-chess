@@ -1573,4 +1573,51 @@ TEST_CASE("workspace layout: an empty explorer has no table to focus and a searc
     CHECK(differs(idle, render_at_size(*state, snapshot_platform::width)));
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: rows searched for another position are dimmed, unselectable and not playable", "[motif-slint-app][layout]")
+{
+    for (auto const& size : {explorer_size {.width = 960, .height = 560}, explorer_size {.width = 1600, .height = 900}}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto activated = std::vector<std::string> {};
+        auto window = make_explorer_workspace(3, activated);
+
+        // Learn the selection colour from a selected row while the rows are current.
+        auto unselected = std::vector<slint::Rgb8Pixel> {};
+        REQUIRE(focus_explorer_table(*state, *window, size.width, &unselected));
+        auto const selected = render_at_size(*state, size.width);
+        auto const fill = selection_fill(unselected, selected);
+        auto const fill_pixels = [fill](std::span<slint::Rgb8Pixel const> const pixels) -> std::ptrdiff_t
+        {
+            return std::ranges::count_if(pixels,
+                                         [fill](slint::Rgb8Pixel const pixel) -> bool
+                                         { return pixel.r == fill.r && pixel.g == fill.g && pixel.b == fill.b; });
+        };
+        constexpr auto highlight_pixels = 2000;
+        REQUIRE(fill_pixels(selected) > highlight_pixels);
+
+        // Going stale clears the selection and dims the rows.
+        window->set_search_rows_stale(true);
+        auto const stale = render_at_size(*state, size.width);
+        CHECK(differs(selected, stale));
+        CHECK(fill_pixels(stale) < highlight_pixels);
+
+        // Enter plays nothing, and a click neither plays nor selects.
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        CHECK(activated.empty());
+        auto const seen = click_down_sidebar(*state, *window, size, activated);
+        CHECK(seen.empty());
+        CHECK(activated.empty());
+        CHECK(fill_pixels(render_at_size(*state, size.width)) < highlight_pixels);
+
+        // A finished search for the board's position makes the rows usable again.
+        window->set_search_rows_stale(false);
+        state->window_adapter->render();
+        auto const resumed = click_down_sidebar(*state, *window, size, activated);
+        REQUIRE_FALSE(resumed.empty());
+        CHECK(resumed.front() == "e4");
+    }
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

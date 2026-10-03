@@ -25,6 +25,8 @@ auto elo_text(std::optional<double> const elo) -> std::string
     return fmt::format("{}", static_cast<int>(*elo + elo_rounding_offset));
 }
 
+// Direct counts never exceed the position's games for a well-formed index; the
+// clamp only keeps a malformed one from drawing a share above 100%.
 auto share_of(std::int64_t const count, std::int64_t const total) noexcept -> std::int32_t
 {
     if (total <= 0 || count <= 0) {
@@ -89,7 +91,7 @@ auto make_explorer_table(std::span<motif::search::opening_stats::continuation co
 
         auto row = explorer_row {};
         row.san = continuation.san;
-        row.count = continuation.frequency;
+        row.count = continuation.direct_frequency;
         row.share_percent = share_of(row.count, total_games);
         row.share_text = share_label(row.count, row.share_percent);
         row.split = split_results(continuation.white_wins, continuation.draws, continuation.black_wins);
@@ -108,8 +110,25 @@ auto make_explorer_table(std::span<motif::search::opening_stats::continuation co
     }
     table.total.count = total_games;
     table.total.split = split_results(white_total, draw_total, black_total);
-    table.total.accessible_label = fmt::format("Total, {} games, {}", total_games, split_label(table.total.split));
+    table.total.accessible_label =
+        fmt::format("Total, {} games, results of the games that continued: {}", total_games, split_label(table.total.split));
     return table;
+}
+
+auto rows_are_current(bool const searching,
+                      motif::db::zobrist_hash const shown,
+                      std::optional<motif::db::zobrist_hash> const board,
+                      bool const outdated) noexcept -> bool
+{
+    return !searching && !outdated && board && *board == shown;
+}
+
+auto rows_are_stale(bool const searching,
+                    motif::db::zobrist_hash const shown,
+                    std::optional<motif::db::zobrist_hash> const board,
+                    bool const outdated) noexcept -> bool
+{
+    return !searching && (outdated || (board && *board != shown));
 }
 
 }  // namespace motif::slint_app

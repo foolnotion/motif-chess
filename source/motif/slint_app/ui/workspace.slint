@@ -92,6 +92,8 @@ export component WorkspaceWindow inherits Window {
     in property <bool> search-searching: false;
     in property <bool> search-auto-search: true;
     in property <bool> search-busy: false;
+    // The explorer rows were searched for another position than the board's (auto-search off).
+    in property <bool> search-rows-stale: false;
     // In-window confirmation shown before an edited or unsaved game is
     // replaced; the host owns the pending action.
     in property <bool> confirm-visible: false;
@@ -493,6 +495,7 @@ export component WorkspaceWindow inherits Window {
                     auto-search: root.search-auto-search;
                     interaction-enabled: root.search-interaction-enabled;
                     compact: root.height < 640px;
+                    stale: root.search-rows-stale;
                     search-requested() => { root.search-requested(); }
                     auto-search-toggled(enabled) => { root.search-auto-search-toggled(enabled); }
                     match-activated(row) => { root.search-match-activated(row); }
