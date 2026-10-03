@@ -27,6 +27,26 @@ cmake --preset=dev
 cmake --build build/dev
 ```
 
+### Slint MCP visual debugging
+
+The `app-mcp` Nix package builds the desktop app against Slint 1.17.1 with
+the embedded MCP and system-testing features enabled. Start it with a free
+local port:
+
+```sh
+SLINT_MCP_PORT=9315 SLINT_BACKEND=headless nix run .#app-mcp
+```
+
+The server listens at `http://127.0.0.1:9315/mcp` and speaks Streamable HTTP.
+The checked-in `.mcp.json` points MCP clients at that endpoint while the app
+is running. Use `tools/list` first, then `list_windows` and
+`get_element_tree`; the element tree is authoritative after interactions,
+while screenshots can lag behind a completed layout pass.
+
+For a compositor-backed visual session, omit `SLINT_BACKEND=headless` and
+keep `SLINT_MCP_PORT` set. The MCP build is tooling-only; the normal `app`
+package remains free of the MCP feature.
+
 ### vcpkg (Windows / no Nix)
 
 ```sh
