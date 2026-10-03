@@ -117,8 +117,10 @@ export component PositionSearchPanel inherits Rectangle {
             if root.searching: Text { text: "Searching…"; color: Palette.alternate-foreground; font-size: 12px; }
             if !root.searching && root.matches.length == 0: Text { text: "No matching games"; color: Palette.alternate-foreground; font-size: 12px; }
             if root.matches.length > 0: VerticalLayout {
+                vertical-stretch: 0;
                 spacing: 2px;
                 HorizontalLayout {
+                    vertical-stretch: 0;
                     spacing: 6px;
                     padding-left: 4px;
                     ColumnHeader { width: 44px; text: "Ply"; }
@@ -220,6 +222,7 @@ export component PositionSearchPanel inherits Rectangle {
                     }
                 }
                 HorizontalLayout {
+                    vertical-stretch: 0;
                     spacing: 6px;
                     alignment: center;
                     Button {
@@ -248,6 +251,7 @@ export component PositionSearchPanel inherits Rectangle {
                 spacing: 2px;
                 vertical-stretch: 1;
                 HorizontalLayout {
+                    vertical-stretch: 0;
                     spacing: 6px;
                     padding-left: 4px;
                     ColumnHeader { width: 44px; text: "SAN"; }

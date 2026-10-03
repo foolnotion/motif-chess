@@ -206,10 +206,11 @@ export component BoardPanel inherits Rectangle {
 }
 
 // Renders headers/result/SAN moves as inline, wrapping paragraph-style
-// notation, packing a fixed count of half-moves per row (Slint has no
-// automatic reflow layout for variable-width children in this toolchain
-// version, so wrapping is grouped by count rather than measured pixel
-// width). Click or activate a token to jump directly to that ply.
+// notation. Every ply is one token in a single flat repeater and is placed by
+// arithmetic on fixed slot widths, so a resize only moves tokens: it never
+// rebuilds them, and the focused move keeps focus. (Slint has no reflow layout
+// for variable-width children in this toolchain version.) Click or activate a
+// token to jump directly to that ply.
 export component NotationPanel inherits Rectangle {
     in property <string> white-name;
     in property <string> black-name;
@@ -221,12 +222,30 @@ export component NotationPanel inherits Rectangle {
     in property <bool> interaction-enabled: true;
     callback ply-activated(int);
 
-    property <int> units-per-row: 6;
-    property <int> unit-count: root.san-moves.length;
+    property <length> number-width: 30px;
+    property <length> move-width: 64px;
+    property <length> token-gap: 4px;
+    property <length> pair-gap: 8px;
+    property <length> row-height: 20px;
+    property <length> row-gap: 4px;
+    property <length> pair-width: root.number-width + root.move-width + root.token-gap + root.move-width;
+    property <length> pair-stride: root.pair-width + root.pair-gap;
+    // A row always holds whole pairs so move numbers align.
+    property <int> pairs-per-row: max(1, min(4, Math.floor((root.width - 20px + root.pair-gap) / root.pair-stride)));
+    property <int> units-per-row: root.pairs-per-row * 2;
+    // Mirrors `san-moves.length` through an explicit assignment instead of a
+    // binding. The host republishes the whole move list as a new model on
+    // every navigation; a bound length would dirty the token repeater each
+    // time, rebuilding every token and dropping keyboard focus from the move
+    // the user was operating. An assignment of an unchanged length is silent.
+    property <int> unit-count: 0;
+    init => { root.unit-count = root.san-moves.length; }
+    changed san-moves => { root.unit-count = root.san-moves.length; }
     // (unit-count + units-per-row - 1) / units-per-row: ceil without the
     // truncating integer division inside Math.ceil, which floors first
     // and would hide the final partial row of moves.
     property <int> row-count: (root.unit-count + root.units-per-row - 1) / root.units-per-row;
+    property <length> row-stride: root.row-height + root.row-gap;
 
     background: Palette.background;
 
@@ -234,85 +253,92 @@ export component NotationPanel inherits Rectangle {
         padding: 10px;
         spacing: 6px;
 
+        // Single elided lines: a wrapping header grew until it left the
+        // move list no room at narrow widths.
         if root.white-name != "" || root.black-name != "": Text {
             text: root.white-name + " – " + root.black-name;
             color: Palette.foreground;
             font-size: 15px;
             font-weight: 700;
-            wrap: word-wrap;
+            overflow: elide;
         }
         if root.event-name != "" || root.date != "": Text {
             text: root.event-name != "" && root.date != "" ? root.event-name + " · " + root.date : root.event-name + root.date;
             color: Palette.alternate-foreground;
             font-size: 11px;
-            wrap: word-wrap;
+            overflow: elide;
         }
 
         Flickable {
             vertical-stretch: 1;
-            viewport-height: rows.preferred-height;
-            rows := VerticalLayout {
-                spacing: 4px;
-                for row-index in root.row-count: HorizontalLayout {
-                    spacing: 8px;
-                    alignment: start;
-                    for col in root.units-per-row: cell := Rectangle {
-                        property <int> idx: row-index * root.units-per-row + col;
-                        visible: cell.idx < root.unit-count;
-                        width: cell.visible ? content.preferred-width : 0px;
-                        height: content.preferred-height;
-                        content := HorizontalLayout {
-                            spacing: 2px;
-                            if Math.mod(cell.idx, 2) == 0: Text {
-                                text: Math.floor(cell.idx / 2) + 1 + ".";
-                                color: Palette.alternate-foreground;
-                                font-size: 13px;
-                                vertical-alignment: center;
-                            }
-                            move-scope := FocusScope {
-                                focus-on-tab-navigation: root.interaction-enabled;
-                                accessible-role: button;
-                                accessible-label: "Move " + (cell.idx + 1) + ": " + (cell.idx < root.san-moves.length ? root.san-moves[cell.idx] : "");
-                                accessible-action-default => {
-                                    if (root.interaction-enabled) {
-                                        root.ply-activated(cell.idx + 1);
-                                    }
-                                }
-                                width: move-text.preferred-width + 8px;
-                                height: move-text.preferred-height;
-                                key-pressed(event) => {
-                                    if (root.interaction-enabled && (event.text == "\n" || event.text == " ")) {
-                                        root.ply-activated(cell.idx + 1);
-                                        return accept;
-                                    }
-                                    return reject;
-                                }
-                                move-text := Text {
-                                    x: 4px;
-                                    height: parent.height;
-                                    text: cell.idx < root.san-moves.length ? root.san-moves[cell.idx] : "";
-                                    color: cell.idx + 1 == root.current-ply ? Palette.accent-background : Palette.foreground;
-                                    font-weight: cell.idx + 1 == root.current-ply ? 700 : 400;
-                                    font-size: 13px;
-                                    vertical-alignment: center;
-                                }
-                                TouchArea {
-                                    enabled: root.interaction-enabled;
-                                    clicked => {
-                                        move-scope.focus();
-                                        root.ply-activated(cell.idx + 1);
-                                    }
-                                }
-                            }
+            content-height: root.row-count * root.row-stride + (root.result != "" ? root.row-height : 0px);
+            for idx in root.unit-count: cell := Rectangle {
+                property <int> slot: Math.mod(idx, root.units-per-row);
+                property <bool> is-white: Math.mod(idx, 2) == 0;
+                x: Math.floor(cell.slot / 2) * root.pair-stride + (cell.is-white ? 0px : root.number-width + root.move-width + root.token-gap);
+                y: Math.floor(idx / root.units-per-row) * root.row-stride;
+                width: cell.is-white ? root.number-width + root.move-width : root.move-width;
+                height: root.row-height;
+                if cell.is-white: Text {
+                    x: 0px;
+                    width: root.number-width;
+                    text: Math.floor(idx / 2) + 1 + ".";
+                    color: Palette.alternate-foreground;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                move-scope := FocusScope {
+                    x: cell.is-white ? root.number-width : 0px;
+                    width: root.move-width;
+                    height: root.row-height;
+                    focus-on-tab-navigation: root.interaction-enabled;
+                    accessible-role: button;
+                    accessible-label: "Move " + (idx + 1) + ": " + (idx < root.san-moves.length ? root.san-moves[idx] : "");
+                    accessible-action-default => {
+                        if (root.interaction-enabled) {
+                            root.ply-activated(idx + 1);
                         }
                     }
+                    key-pressed(event) => {
+                        if (root.interaction-enabled && (event.text == "\n" || event.text == " ")) {
+                            root.ply-activated(idx + 1);
+                            return accept;
+                        }
+                        return reject;
                     }
-                if root.result != "": Text {
-                    text: root.result;
-                    color: Palette.alternate-foreground;
-                    font-weight: 700;
-                    font-size: 13px;
+                    if move-scope.has-focus: Rectangle {
+                        border-width: 2px;
+                        border-radius: 3px;
+                        border-color: Palette.accent-background;
+                        background: transparent;
+                    }
+                    Text {
+                        x: 4px;
+                        width: parent.width - 4px;
+                        text: idx < root.san-moves.length ? root.san-moves[idx] : "";
+                        color: idx + 1 == root.current-ply ? Palette.accent-background : Palette.foreground;
+                        font-weight: idx + 1 == root.current-ply ? 700 : 400;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        enabled: root.interaction-enabled;
+                        clicked => {
+                            move-scope.focus();
+                            root.ply-activated(idx + 1);
+                        }
+                    }
                 }
+            }
+            if root.result != "": Text {
+                x: 0px;
+                y: root.row-count * root.row-stride;
+                horizontal-alignment: left;
+                text: root.result;
+                color: Palette.alternate-foreground;
+                font-weight: 700;
+                font-size: 13px;
             }
         }
     }
@@ -324,10 +350,10 @@ component ReplayIconButton inherits Rectangle {
     in property <string> icon-path;
     callback clicked();
 
-    min-width: control-button.preferred-width;
-    min-height: control-button.preferred-height;
-    preferred-width: control-button.preferred-width;
-    preferred-height: control-button.preferred-height;
+    min-width: 32px;
+    min-height: 32px;
+    preferred-width: 32px;
+    preferred-height: 32px;
 
     control-button := Button {
         width: parent.width;
@@ -377,19 +403,25 @@ component BoardAndControls inherits Rectangle {
             square-activated(file, rank) => { root.square-activated(file, rank); }
         }
         HorizontalLayout {
+            height: 32px;
             spacing: StyleMetrics.layout-spacing;
+            alignment: center;
+            Rectangle { horizontal-stretch: 1; }
             ReplayIconButton { label: "First move"; icon-path: "M5 5 L7 5 L7 19 L5 19 Z M19 5 L9 12 L19 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-first(); } }
             ReplayIconButton { label: "Previous move"; icon-path: "M17 5 L7 12 L17 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-previous(); } }
             ReplayIconButton { label: "Next move"; icon-path: "M7 5 L17 12 L7 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-next(); } }
             ReplayIconButton { label: "Last move"; icon-path: "M17 5 L19 5 L19 19 L17 19 Z M5 5 L15 12 L5 19 Z"; enabled: root.board-loaded && root.interaction-enabled; clicked => { root.navigate-last(); } }
             ReplayIconButton { label: "Flip board"; icon-path: "M7.6 6.4 A7.9 7.9 0 0 1 19.2 10 L22 10 L18 14 L14 10 L16.9 10 A5.8 5.8 0 0 0 8.8 8.2 Z M6 10 L10 14 L7.1 14 A5.8 5.8 0 0 0 15.2 15.8 L16.4 17.6 A7.9 7.9 0 0 1 4.8 14 L2 14 Z"; enabled: root.interaction-enabled; clicked => { root.orientation-toggled(); } }
+            Rectangle { horizontal-stretch: 1; }
         }
     }
-}
 
-// Wraps board + notation with navigation, orientation, and a
-// keyboard-accessible hide/restore control for the whole region. Hiding
-// collapses the content to zero layout reservation via `if`.
+}
+// Wraps board + notation with navigation and orientation controls. The board
+// block is a square sized from this panel's own width/height, and notation
+// takes whatever remains but never less than its minimum. Plain stretch
+// factors let the board claim width it could not draw (it is square), which
+// starved notation at wide windows and at the minimum window size.
 export component GameReviewPanel inherits Rectangle {
     in property <bool> board-loaded;
     in property <[string]> square-pieces;
@@ -404,6 +436,24 @@ export component GameReviewPanel inherits Rectangle {
     in property <int> current-ply;
     in property <bool> interaction-enabled: true;
     in property <bool> notation-below: false;
+    // Incremented by the host each time a game finishes loading.
+    in property <int> load-serial: 0;
+    // Last load whose focus transfer happened. It lives with the host because
+    // this panel is unmounted while the board is hidden; a game loaded in the
+    // meantime still owes its transfer when the panel is mounted again.
+    in property <int> focused-serial: 0;
+    callback load-focused(int);
+    changed load-serial => { keyboard-scope.focus-pending = true; }
+    init => {
+        if (root.load-serial != root.focused-serial) {
+            if (root.board-loaded && root.interaction-enabled) {
+                keyboard-scope.focus();
+                root.load-focused(root.load-serial);
+            } else {
+                keyboard-scope.focus-pending = true;
+            }
+        }
+    }
 
     callback square-activated(int, int);
     callback ply-activated(int);
@@ -412,155 +462,107 @@ export component GameReviewPanel inherits Rectangle {
     callback navigate-next();
     callback navigate-last();
     callback orientation-toggled();
-    callback panel-visibility-toggled();
-    callback notation-layout-toggled();
+
+    property <length> gap: StyleMetrics.layout-spacing;
+    property <length> controls-height: 32px;
+    // BoardPanel's 220px minimum plus its 16px coordinate-label gutter.
+    property <length> board-min-side: 236px;
+    property <length> notation-min-width: 200px;
+    // Narrowest width at which the board and a usable notation column fit side by side.
+    out property <length> min-content-width: root.board-min-side + root.gap + root.notation-min-width;
+    property <length> notation-min-height: 150px;
+    property <length> beside-side: max(root.board-min-side, min(root.height - root.controls-height - root.gap, root.width - root.gap - root.notation-min-width));
+    property <length> below-side: max(root.board-min-side, min(root.width, root.height - root.controls-height - 2 * root.gap - root.notation-min-height));
+    property <length> board-side: root.notation-below ? root.below-side : root.beside-side;
+    property <length> board-block-height: root.board-side + root.gap + root.controls-height;
+    property <length> board-block-x: root.notation-below ? (root.width - root.board-side) / 2 : 0px;
 
     background: Palette.background;
 
-    VerticalLayout {
-        padding: StyleMetrics.layout-padding;
-        spacing: StyleMetrics.layout-spacing;
-
-        HorizontalLayout {
-            height: 26px;
-            Text {
-                horizontal-stretch: 1;
-                text: "Board & Notation";
-                color: Palette.alternate-foreground;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-            Button {
-                text: root.notation-below ? "Notation Right" : "Notation Below";
-                enabled: root.interaction-enabled;
-                clicked => { root.notation-layout-toggled(); }
-            }
-            visibility-scope := FocusScope {
-                height: parent.height;
-                focus-on-tab-navigation: root.interaction-enabled;
-                width: visibility-button.preferred-width;
-                key-pressed(event) => {
-                    if (root.interaction-enabled && (event.text == "\n" || event.text == " ")) {
-                        root.panel-visibility-toggled();
-                        return accept;
-                    }
-                    return reject;
-                }
-                visibility-button := Button {
-                    height: parent.height;
-                    enabled: root.interaction-enabled;
-                    text: "Hide";
-                    clicked => {
-                        visibility-scope.focus();
-                        root.panel-visibility-toggled();
-                    }
-                }
+    keyboard-scope := FocusScope {
+        // Moves focus into the review region once per loaded game, so
+        // arrow-key navigation works right after a game is opened without
+        // a prior click. It is keyed on the load, not on
+        // `interaction-enabled`: that flips every time an auto-search or
+        // navigation runs, which pulled focus back off whatever control the
+        // user was operating (a replay button, a notation move).
+        property <bool> focus-pending: false;
+        property <bool> can-auto-focus: self.focus-pending && root.board-loaded && root.interaction-enabled;
+        changed can-auto-focus => {
+            if (self.can-auto-focus) {
+                self.focus-pending = false;
+                self.focus();
+                root.load-focused(root.load-serial);
             }
         }
-
-        keyboard-scope := FocusScope {
-            vertical-stretch: 1;
-            // Loading a game is the user's clearest signal of intent to
-            // navigate it; without this, arrow-key navigation silently does
-            // nothing until the user first clicks the board or a move,
-            // which is not discoverable and fails keyboard-only use.
-            property <bool> can-auto-focus: root.board-loaded && root.interaction-enabled;
-            changed can-auto-focus => {
-                if (self.can-auto-focus) {
-                    self.focus();
-                }
-            }
-            key-pressed(event) => {
-                if (!root.interaction-enabled) {
-                    return reject;
-                }
-                if (event.text == Key.LeftArrow) {
-                    root.navigate-previous();
-                    return accept;
-                }
-                if (event.text == Key.RightArrow) {
-                    root.navigate-next();
-                    return accept;
-                }
-                if (event.text == Key.Home) {
-                    root.navigate-first();
-                    return accept;
-                }
-                if (event.text == Key.End) {
-                    root.navigate-last();
-                    return accept;
-                }
+        // Keys that a focused child (a replay button, a notation move) does
+        // not consume bubble up to here, so Left/Right/Home/End keep
+        // stepping the game without moving focus off that child.
+        key-pressed(event) => {
+            if (!root.interaction-enabled) {
                 return reject;
             }
+            if (event.text == Key.LeftArrow) {
+                root.navigate-previous();
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.navigate-next();
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.navigate-first();
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.navigate-last();
+                return accept;
+            }
+            return reject;
+        }
 
-            if root.notation-below: Rectangle {
-                BoardAndControls {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.width;
-                    height: parent.height / 2 - 6px;
-                    board-loaded: root.board-loaded;
-                    square-pieces: root.square-pieces;
-                    square-highlights: root.square-highlights;
-                    flipped: root.flipped;
-                    interaction-enabled: root.interaction-enabled;
-                    square-activated(file, rank) => { keyboard-scope.focus(); root.square-activated(file, rank); }
-                    navigate-first() => { keyboard-scope.focus(); root.navigate-first(); }
-                    navigate-previous() => { keyboard-scope.focus(); root.navigate-previous(); }
-                    navigate-next() => { keyboard-scope.focus(); root.navigate-next(); }
-                    navigate-last() => { keyboard-scope.focus(); root.navigate-last(); }
-                    orientation-toggled() => { root.orientation-toggled(); }
-                }
-                NotationPanel {
-                    x: 0px;
-                    y: parent.height / 2 + 6px;
-                    width: parent.width;
-                    height: parent.height / 2 - 6px;
-                    white-name: root.white-name;
-                    black-name: root.black-name;
-                    event-name: root.event-name;
-                    date: root.date;
-                    result: root.result;
-                    san-moves: root.san-moves;
-                    current-ply: root.current-ply;
-                    interaction-enabled: root.interaction-enabled;
-                    ply-activated(ply) => { keyboard-scope.focus(); root.ply-activated(ply); }
-                }
-            }
-            if !root.notation-below: Rectangle {
-                BoardAndControls {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.width / 2 - 6px;
-                    height: parent.height;
-                    board-loaded: root.board-loaded;
-                    square-pieces: root.square-pieces;
-                    square-highlights: root.square-highlights;
-                    flipped: root.flipped;
-                    interaction-enabled: root.interaction-enabled;
-                    square-activated(file, rank) => { keyboard-scope.focus(); root.square-activated(file, rank); }
-                    navigate-first() => { keyboard-scope.focus(); root.navigate-first(); }
-                    navigate-previous() => { keyboard-scope.focus(); root.navigate-previous(); }
-                    navigate-next() => { keyboard-scope.focus(); root.navigate-next(); }
-                    navigate-last() => { keyboard-scope.focus(); root.navigate-last(); }
-                    orientation-toggled() => { root.orientation-toggled(); }
-                }
-                NotationPanel {
-                    x: parent.width / 2 + 6px;
-                    y: 0px;
-                    width: parent.width / 2 - 6px;
-                    height: parent.height;
-                    white-name: root.white-name;
-                    black-name: root.black-name;
-                    event-name: root.event-name;
-                    date: root.date;
-                    result: root.result;
-                    san-moves: root.san-moves;
-                    current-ply: root.current-ply;
-                    interaction-enabled: root.interaction-enabled;
-                    ply-activated(ply) => { keyboard-scope.focus(); root.ply-activated(ply); }
-                }
-            }
+        BoardAndControls {
+            x: root.board-block-x;
+            y: 0px;
+            width: root.board-side;
+            height: root.board-block-height;
+            board-loaded: root.board-loaded;
+            square-pieces: root.square-pieces;
+            square-highlights: root.square-highlights;
+            flipped: root.flipped;
+            interaction-enabled: root.interaction-enabled;
+            square-activated(file, rank) => { root.square-activated(file, rank); }
+            navigate-first() => { root.navigate-first(); }
+            navigate-previous() => { root.navigate-previous(); }
+            navigate-next() => { root.navigate-next(); }
+            navigate-last() => { root.navigate-last(); }
+            orientation-toggled() => { root.orientation-toggled(); }
+        }
+        NotationPanel {
+            x: root.notation-below ? 0px : root.board-side + root.gap;
+            y: root.notation-below ? root.board-block-height + root.gap : 0px;
+            width: root.notation-below ? root.width : root.width - root.board-side - root.gap;
+            height: root.notation-below ? root.height - root.board-block-height - root.gap : root.height;
+            white-name: root.white-name;
+            black-name: root.black-name;
+            event-name: root.event-name;
+            date: root.date;
+            result: root.result;
+            san-moves: root.san-moves;
+            current-ply: root.current-ply;
+            interaction-enabled: root.interaction-enabled;
+            ply-activated(ply) => { root.ply-activated(ply); }
+        }
+        // Shows that the review region itself owns the keyboard (the state a
+        // freshly loaded game starts in) when no individual control does.
+        if keyboard-scope.has-focus: Rectangle {
+            x: root.board-block-x;
+            y: 0px;
+            width: root.board-side;
+            height: root.board-block-height;
+            border-width: 2px;
+            border-color: Palette.accent-background;
+            background: transparent;
         }
     }
 }

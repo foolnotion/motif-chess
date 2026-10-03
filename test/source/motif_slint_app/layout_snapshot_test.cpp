@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -6,6 +8,8 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -21,6 +25,9 @@ class snapshot_window_adapter;
 struct snapshot_state
 {
     snapshot_window_adapter* window_adapter {nullptr};
+    // Size of the next window adapter the platform creates.
+    std::uint32_t width {0};
+    std::uint32_t height {0};
 };
 
 class snapshot_window_adapter final : public slint::platform::WindowAdapter
@@ -68,8 +75,8 @@ class snapshot_platform final : public slint::platform::Platform
     [[nodiscard]] auto create_window_adapter() -> std::unique_ptr<slint::platform::WindowAdapter> override
     {
         auto adapter = std::make_unique<snapshot_window_adapter>(slint::PhysicalSize {slint::Size<std::uint32_t> {
-            .width = width,
-            .height = height,
+            .width = state_->width,
+            .height = state_->height,
         }});
         state_->window_adapter = adapter.get();
         return adapter;
@@ -81,6 +88,25 @@ class snapshot_platform final : public slint::platform::Platform
   private:
     std::shared_ptr<snapshot_state> state_;
 };
+
+// Slint allows exactly one platform per process: a second set_platform call
+// aborts. Install it once and hand every test the same state, reconfigured
+// with the window size that test needs. Running the test binary directly
+// (without ctest's one-process-per-case isolation) therefore stays safe.
+auto use_snapshot_platform(std::uint32_t const width = snapshot_platform::width, std::uint32_t const height = snapshot_platform::height)
+    -> std::shared_ptr<snapshot_state>
+{
+    static auto const state = []() -> std::shared_ptr<snapshot_state>
+    {
+        auto shared = std::make_shared<snapshot_state>();
+        slint::platform::set_platform(std::make_unique<snapshot_platform>(shared));
+        return shared;
+    }();
+    state->window_adapter = nullptr;
+    state->width = width;
+    state->height = height;
+    return state;
+}
 
 void write_ppm(std::filesystem::path const& directory, std::string const& name, std::span<slint::Rgb8Pixel const> pixels)
 {
@@ -126,8 +152,7 @@ auto render_layout(snapshot_state const& state, std::string const& name) -> std:
 
 TEST_CASE("workspace layout: renders right and below notation without a display server", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -155,29 +180,99 @@ TEST_CASE("workspace layout: renders right and below notation without a display 
 
 TEST_CASE("workspace layout: renders the setup screen without a database", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(false);
     window->set_recent_databases(std::make_shared<slint::VectorModel<RecentEntry>>(std::vector<RecentEntry> {
-        RecentEntry {.name = slint::SharedString {"Main"}, .path = slint::SharedString {"/tmp/main.motif"}},
+        RecentEntry {.name = slint::SharedString {"Main"}, .path = slint::SharedString {"/tmp/main.motif"}, .available = true},
     }));
 
     auto const pixels = render_layout(*state, "setup-screen");
     REQUIRE(std::ranges::count_if(pixels, is_visible_non_background_pixel) > 5000);
 }
 
+namespace
+{
+
+auto make_recent_entries(int const count) -> std::shared_ptr<slint::VectorModel<RecentEntry>>
+{
+    auto entries = std::vector<RecentEntry> {};
+    for (auto index = 0; index < count; ++index) {
+        entries.push_back(RecentEntry {
+            .name = slint::SharedString {("Database " + std::to_string(index)).c_str()},
+            .path = slint::SharedString {("/data/chess/database-" + std::to_string(index)).c_str()},
+            .available = index % 3 != 0,
+        });
+    }
+    return std::make_shared<slint::VectorModel<RecentEntry>>(std::move(entries));
+}
+
+auto differs(std::vector<slint::Rgb8Pixel> const& lhs, std::vector<slint::Rgb8Pixel> const& rhs) -> bool
+{
+    return std::ranges::mismatch(lhs,
+                                 rhs,
+                                 [](slint::Rgb8Pixel const left, slint::Rgb8Pixel const right) -> bool
+                                 { return left.r == right.r && left.g == right.g && left.b == right.b; })
+               .in1
+        != lhs.end();
+}
+
+}  // namespace
+
+TEST_CASE("workspace layout: unavailable recents render differently from available ones", "[motif-slint-app][layout]")
+{
+    auto const state = use_snapshot_platform();
+    auto window = WorkspaceWindow::create();
+    window->set_has_database(false);
+
+    window->set_recent_databases(std::make_shared<slint::VectorModel<RecentEntry>>(std::vector<RecentEntry> {
+        RecentEntry {.name = slint::SharedString {"Main"}, .path = slint::SharedString {"/tmp/main.motif"}, .available = true},
+    }));
+    auto const available = render_layout(*state, "recent-available");
+
+    window->set_recent_databases(std::make_shared<slint::VectorModel<RecentEntry>>(std::vector<RecentEntry> {
+        RecentEntry {.name = slint::SharedString {"Main"}, .path = slint::SharedString {"/tmp/main.motif"}, .available = false},
+    }));
+    auto const unavailable = render_layout(*state, "recent-unavailable");
+
+    REQUIRE(differs(available, unavailable));
+}
+
+TEST_CASE("workspace layout: a long recent list scrolls so later entries become reachable", "[motif-slint-app][layout]")
+{
+    constexpr auto recent_count = 20;
+    auto const state = use_snapshot_platform();
+    auto window = WorkspaceWindow::create();
+    window->set_has_database(false);
+    window->set_recent_databases(make_recent_entries(recent_count));
+
+    auto const top = render_layout(*state, "recent-list-top");
+
+    // The recents card is centered in the setup screen, so the window center is over the list.
+    auto const center = slint::LogicalPosition {slint::Point<float> {
+        .x = static_cast<float>(snapshot_platform::width) / 2.F,
+        .y = static_cast<float>(snapshot_platform::height) / 2.F + 120.F,
+    }};
+    window->window().dispatch_pointer_move_event(center);
+    window->window().dispatch_pointer_scroll_event(center, 0.F, -100000.F);
+    // Scrolling is animated; let the animation clock run to completion.
+    std::this_thread::sleep_for(std::chrono::milliseconds {500});
+    slint::platform::update_timers_and_animations();
+    auto const bottom = render_layout(*state, "recent-list-bottom");
+
+    REQUIRE(differs(top, bottom));
+}
+
 TEST_CASE("workspace layout: renders the explorer sidebar tab", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
     window->set_is_scratch(true);
     window->set_display_name("Scratch");
-    window->set_sidebar_tab(1);
+    window->set_workspace_preset(WorkspacePreset::Explorer);
     window->set_game_rows(std::make_shared<slint::VectorModel<GameRow>>());
     window->set_game_column_widths(std::make_shared<slint::VectorModel<std::int32_t>>());
     window->set_board_square_pieces(std::make_shared<slint::VectorModel<slint::SharedString>>());
@@ -249,35 +344,6 @@ auto board_bounding_box(std::span<slint::Rgb8Pixel const> pixels, std::uint32_t 
     return box;
 }
 
-// Platform with a caller-chosen fixed size, used to reproduce reports tied to a
-// specific (e.g. maximized) window size rather than the small default snapshot size.
-class sized_snapshot_platform final : public slint::platform::Platform
-{
-  public:
-    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- callers pass named width/height locals, not literals.
-    sized_snapshot_platform(std::shared_ptr<snapshot_state> state, std::uint32_t const width, std::uint32_t const height)
-        : state_ {std::move(state)}
-        , width_ {width}
-        , height_ {height}
-    {
-    }
-
-    [[nodiscard]] auto create_window_adapter() -> std::unique_ptr<slint::platform::WindowAdapter> override
-    {
-        auto adapter = std::make_unique<snapshot_window_adapter>(slint::PhysicalSize {slint::Size<std::uint32_t> {
-            .width = width_,
-            .height = height_,
-        }});
-        state_->window_adapter = adapter.get();
-        return adapter;
-    }
-
-  private:
-    std::shared_ptr<snapshot_state> state_;
-    std::uint32_t width_;
-    std::uint32_t height_;
-};
-
 auto render_at_size(snapshot_state const& state, std::uint32_t const width) -> std::vector<slint::Rgb8Pixel>
 {
     REQUIRE(state.window_adapter != nullptr);
@@ -293,8 +359,7 @@ auto render_at_size(snapshot_state const& state, std::uint32_t const width) -> s
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("workspace layout: board footprint is invariant under notation content", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -346,8 +411,7 @@ TEST_CASE("workspace layout: board footprint is invariant under notation content
     constexpr std::uint32_t maximized_width {2518};
     constexpr std::uint32_t maximized_height {1377};
 
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<sized_snapshot_platform>(state, maximized_width, maximized_height));
+    auto const state = use_snapshot_platform(maximized_width, maximized_height);
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -406,8 +470,7 @@ TEST_CASE("workspace layout: board footprint is invariant under the loaded-game 
     constexpr std::uint32_t maximized_width {2518};
     constexpr std::uint32_t maximized_height {1377};
 
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<sized_snapshot_platform>(state, maximized_width, maximized_height));
+    auto const state = use_snapshot_platform(maximized_width, maximized_height);
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -447,8 +510,7 @@ TEST_CASE("workspace layout: arrow-key game navigation works immediately after a
     // arrow-key navigation silently did nothing until the board or a move
     // was clicked at least once -- a keyboard-only-use defect matching
     // AC-9-5-2's still-open keyboard-only check.
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -476,6 +538,7 @@ TEST_CASE("workspace layout: arrow-key game navigation works immediately after a
     auto moves = std::vector<slint::SharedString> {slint::SharedString {"e4"}, slint::SharedString {"e5"}};
     window->set_board_san_moves(std::make_shared<slint::VectorModel<slint::SharedString>>(std::move(moves)));
     window->set_board_loaded(true);
+    window->set_board_load_serial(1);
     render_layout(*state, "arrow-key-after-load");
 
     window->window().dispatch_key_press_event(slint::SharedString {slint::platform::key_codes::RightArrow});
@@ -486,8 +549,7 @@ TEST_CASE("workspace layout: arrow-key game navigation works immediately after a
 
 TEST_CASE("workspace layout: arrow-key game navigation focuses after interaction re-enables", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -507,6 +569,7 @@ TEST_CASE("workspace layout: arrow-key game navigation focuses after interaction
     render_layout(*state, "arrow-key-disabled-before-load");
     window->set_import_active(true);
     window->set_board_loaded(true);
+    window->set_board_load_serial(1);
     render_layout(*state, "arrow-key-disabled-after-load");
     window->set_import_active(false);
     render_layout(*state, "arrow-key-after-enable");
@@ -515,4 +578,495 @@ TEST_CASE("workspace layout: arrow-key game navigation focuses after interaction
     window->window().dispatch_key_release_event(slint::SharedString {slint::platform::key_codes::RightArrow});
 
     REQUIRE(navigate_next_calls == 1);
+}
+
+namespace
+{
+
+struct pixel_bounds
+{
+    int left {0};
+    int top {0};
+    int right {0};
+    int bottom {0};
+    bool found {false};
+
+    [[nodiscard]] auto width() const -> int { return found ? right - left + 1 : 0; }
+
+    [[nodiscard]] auto height() const -> int { return found ? bottom - top + 1 : 0; }
+};
+
+auto difference_bounds(std::span<slint::Rgb8Pixel const> lhs, std::span<slint::Rgb8Pixel const> rhs, std::uint32_t const width) -> pixel_bounds
+{
+    auto bounds = pixel_bounds {};
+    for (auto index = std::size_t {0}; index < lhs.size() && index < rhs.size(); ++index) {
+        if (lhs[index].r == rhs[index].r && lhs[index].g == rhs[index].g && lhs[index].b == rhs[index].b) {
+            continue;
+        }
+        auto const col = static_cast<int>(index % width);
+        auto const row = static_cast<int>(index / width);
+        if (!bounds.found) {
+            bounds = pixel_bounds {.left = col, .top = row, .right = col, .bottom = row, .found = true};
+            continue;
+        }
+        bounds.left = std::min(bounds.left, col);
+        bounds.top = std::min(bounds.top, row);
+        bounds.right = std::max(bounds.right, col);
+        bounds.bottom = std::max(bounds.bottom, row);
+    }
+    return bounds;
+}
+
+constexpr auto typical_games = 30;
+constexpr auto typical_moves = 20;
+constexpr auto few_games = 5;
+
+auto make_moves(int const count) -> std::shared_ptr<slint::VectorModel<slint::SharedString>>
+{
+    constexpr auto sample = std::array<std::string_view, 3> {"Nbxd7+", "e4", "Nf6"};
+    auto moves = std::vector<slint::SharedString> {};
+    moves.reserve(static_cast<std::size_t>(count));
+    for (auto i = 0; i < count; ++i) {
+        moves.emplace_back(sample.at(static_cast<std::size_t>(i) % sample.size()));
+    }
+    return std::make_shared<slint::VectorModel<slint::SharedString>>(std::move(moves));
+}
+
+auto make_game_rows(int const count) -> std::shared_ptr<slint::VectorModel<GameRow>>
+{
+    auto rows = std::vector<GameRow> {};
+    rows.reserve(static_cast<std::size_t>(count));
+    for (auto i = 0; i < count; ++i) {
+        rows.push_back(GameRow {
+            .white = slint::SharedString {("Player" + std::to_string(i) + "LongName").c_str()},
+            .black = slint::SharedString {"Opponent"},
+            .result = slint::SharedString {"1-0"},
+            .event = slint::SharedString {"Test"},
+            .date = slint::SharedString {"2020.01.02"},
+            .eco = slint::SharedString {"C20"},
+        });
+    }
+    return std::make_shared<slint::VectorModel<GameRow>>(std::move(rows));
+}
+
+// What a populated workspace shows: game-list rows and moves in the loaded game.
+struct workspace_contents
+{
+    int games {typical_games};
+    int moves {typical_moves};
+};
+
+// A workspace with an open database, a loaded game, and a populated game list.
+auto make_loaded_workspace(workspace_contents const contents) -> slint::ComponentHandle<WorkspaceWindow>
+{
+    auto window = WorkspaceWindow::create();
+    window->set_has_database(true);
+    window->set_is_scratch(true);
+    window->set_display_name("Scratch");
+    window->set_game_rows(make_game_rows(contents.games));
+    window->set_game_total_count(contents.games);
+    window->set_game_column_widths(std::make_shared<slint::VectorModel<std::int32_t>>());
+    window->set_board_square_pieces(std::make_shared<slint::VectorModel<slint::SharedString>>());
+    window->set_board_square_highlights(std::make_shared<slint::VectorModel<SquareHighlight>>());
+    window->set_board_san_moves(make_moves(contents.moves));
+    window->set_search_matches(std::make_shared<slint::VectorModel<SearchMatchRow>>());
+    window->set_search_continuations(std::make_shared<slint::VectorModel<ContinuationRow>>());
+    window->set_board_white_name("Player02LongName");
+    window->set_board_black_name("Opponent02");
+    window->set_board_event_name("Test 2");
+    window->set_board_date("2020.01.03");
+    return window;
+}
+
+void press_key(WorkspaceWindow& window, std::u8string_view const key)
+{
+    window.window().dispatch_key_press_event(slint::SharedString {key});
+    window.window().dispatch_key_release_event(slint::SharedString {key});
+}
+
+// Conditional elements are rebuilt lazily, so render between key presses to
+// match what a running event loop does.
+void press_key_and_render(snapshot_state const& state, WorkspaceWindow& window, std::u8string_view const key)
+{
+    press_key(window, key);
+    state.window_adapter->render();
+}
+
+}  // namespace
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: notation keeps usable room for moves in both layouts", "[motif-slint-app][layout]")
+{
+    // Reproduces the 2026-10-03 compositor findings: notation was unusable at
+    // the 960x560 minimum and degenerate beside the board at 1280x800.
+    struct window_case
+    {
+        std::uint32_t width;
+        std::uint32_t height;
+        bool notation_below;
+    };
+    constexpr auto minimum_notation_width = 100;
+    constexpr auto minimum_notation_height = 60;
+    constexpr auto moves = 70;
+
+    for (auto const& size : {window_case {.width = 960, .height = 560, .notation_below = false},
+                             window_case {.width = 960, .height = 560, .notation_below = true},
+                             window_case {.width = 1280, .height = 800, .notation_below = false},
+                             window_case {.width = 1280, .height = 800, .notation_below = true}}) {
+        INFO("size " << size.width << "x" << size.height << (size.notation_below ? " notation below" : " notation beside"));
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto window = make_loaded_workspace({.games = typical_games, .moves = 0});
+        window->set_board_loaded(true);
+        window->set_notation_below(size.notation_below);
+
+        auto const without_moves = render_at_size(*state, size.width);
+        window->set_board_san_moves(make_moves(moves));
+        auto const with_moves = render_at_size(*state, size.width);
+
+        // Only the move list differs between the two renders, so its pixel
+        // extent is the room the notation actually gave the moves.
+        auto const bounds = difference_bounds(without_moves, with_moves, size.width);
+        REQUIRE(bounds.found);
+        CHECK(bounds.width() >= minimum_notation_width);
+        CHECK(bounds.height() >= minimum_notation_height);
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: sidebar controls are not clipped at the right window edge", "[motif-slint-app][layout]")
+{
+    // Open Game was clipped at 960x560 and 1100x700 because the games footer
+    // forced the sidebar wider than its allocation. The window's right margin
+    // stays plain background while every control fits.
+    constexpr auto margin = 8;
+    struct window_case
+    {
+        std::uint32_t width;
+        std::uint32_t height;
+    };
+    for (auto const& size : {window_case {.width = 960, .height = 560}, window_case {.width = 1100, .height = 700}}) {
+        for (auto const preset : {WorkspacePreset::Review, WorkspacePreset::Explorer, WorkspacePreset::Analysis}) {
+            INFO("size " << size.width << "x" << size.height << " preset " << static_cast<int>(preset));
+            auto const state = use_snapshot_platform(size.width, size.height);
+            auto window = make_loaded_workspace({});
+            window->set_game_selected_row(2);
+            window->set_game_has_next_page(true);
+            window->set_game_active_title("Averylongfirstname, Averylongsurname - Anotherlongname, X  0-1");
+            window->set_board_loaded(true);
+            window->set_workspace_preset(preset);
+
+            auto const pixels = render_at_size(*state, size.width);
+            auto const reference = pixels[size.width - 1];
+            auto clipped = 0;
+            for (auto row = 0U; row < size.height; ++row) {
+                for (auto col = size.width - margin; col < size.width; ++col) {
+                    auto const pixel = pixels[(static_cast<std::size_t>(row) * size.width) + col];
+                    clipped += (pixel.r != reference.r || pixel.g != reference.g || pixel.b != reference.b) ? 1 : 0;
+                }
+            }
+            CHECK(clipped == 0);
+        }
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: a replay button keeps keyboard focus after it is activated", "[motif-slint-app][layout]")
+{
+    // The review panel pulled focus to an invisible scope after every replay
+    // action: directly, and again whenever interaction re-enabled after the
+    // auto-search that follows each navigation. A second Return then did
+    // nothing and focus appeared lost.
+    auto const state = use_snapshot_platform();
+    auto window = make_loaded_workspace({});
+    window->set_board_loaded(true);
+    window->set_board_load_serial(1);
+
+    auto next_calls = 0;
+    window->on_board_navigate_next([&next_calls]() -> void { ++next_calls; });
+    state->window_adapter->render();
+
+    constexpr auto max_tab_stops = 80;
+    for (auto stop = 0; stop < max_tab_stops && next_calls == 0; ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    }
+    REQUIRE(next_calls == 1);
+
+    for (auto activation = 2; activation <= 3; ++activation) {
+        // Auto-search after a navigation briefly disables interaction.
+        window->set_search_busy(true);
+        state->window_adapter->render();
+        window->set_search_busy(false);
+        state->window_adapter->render();
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        CHECK(next_calls == activation);
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the board visibility button keeps keyboard focus across hide and show", "[motif-slint-app][layout]")
+{
+    // Hide Board and Show Board used to be two conditional buttons, so toggling
+    // destroyed the focused element and the next key press went nowhere.
+    auto const state = use_snapshot_platform();
+    auto window = make_loaded_workspace({});
+    window->set_board_loaded(true);
+
+    auto toggles = 0;
+    window->on_board_panel_visibility_toggled(
+        [&window, &toggles]() -> void
+        {
+            ++toggles;
+            window->set_board_panel_visible(!window->get_board_panel_visible());
+        });
+    state->window_adapter->render();
+
+    constexpr auto max_tab_stops = 80;
+    for (auto stop = 0; stop < max_tab_stops && toggles == 0; ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    }
+    REQUIRE(toggles == 1);
+    CHECK_FALSE(window->get_board_panel_visible());
+
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(toggles == 2);
+    CHECK(window->get_board_panel_visible());
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(toggles == 3);
+    CHECK_FALSE(window->get_board_panel_visible());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the game table is one tab stop that moves by row, page, and end", "[motif-slint-app][layout]")
+{
+    constexpr auto game_count = 60;
+    auto const state = use_snapshot_platform();
+    auto window = make_loaded_workspace({.games = game_count, .moves = 0});
+
+    // Mirror the presenter: requested rows are published back to the window.
+    auto selected = std::vector<int> {};
+    auto deltas = std::vector<int> {};
+    window->on_game_selected(
+        [&selected, &window](int const row) -> void
+        {
+            selected.push_back(row);
+            window->set_game_selected_row(row);
+        });
+    window->on_game_move_selection(
+        [&deltas, &window](int const delta) -> void
+        {
+            deltas.push_back(delta);
+            window->set_game_selected_row(std::clamp(window->get_game_selected_row() + delta, 0, game_count - 1));
+        });
+    state->window_adapter->render();
+
+    // With nothing selected, Down starts at the first row rather than skipping it.
+    constexpr auto max_tab_stops = 80;
+    for (auto stop = 0; stop < max_tab_stops && selected.empty(); ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);
+    }
+    REQUIRE(selected.size() == 1);
+    CHECK(selected.front() == 0);
+    auto const top = render_at_size(*state, snapshot_platform::width);
+
+    press_key_and_render(*state, *window, slint::platform::key_codes::PageDown);
+    REQUIRE(deltas.size() == 1);
+    CHECK(deltas.back() > 1);
+    press_key_and_render(*state, *window, slint::platform::key_codes::PageUp);
+    REQUIRE(deltas.size() == 2);
+    CHECK(deltas.back() < -1);
+    CHECK(window->get_game_selected_row() == 0);
+
+    // End selects the last row and scrolls it into view; Home must scroll back.
+    press_key_and_render(*state, *window, slint::platform::key_codes::End);
+    REQUIRE(selected.size() == 2);
+    CHECK(selected.back() == game_count - 1);
+    CHECK(differs(top, render_at_size(*state, snapshot_platform::width)));
+    press_key_and_render(*state, *window, slint::platform::key_codes::Home);
+    REQUIRE(selected.size() == 3);
+    CHECK(selected.back() == 0);
+    CHECK_FALSE(differs(top, render_at_size(*state, snapshot_platform::width)));
+
+    // One tab stop: the next Tab leaves the table, so Down no longer selects.
+    press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+    press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);
+    CHECK(selected.size() == 3);
+    CHECK(deltas.size() == 2);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: a focused notation move keeps focus when the host republishes the move list", "[motif-slint-app][layout]")
+{
+    // The host replaces the whole move list with a new model on every
+    // navigation. That rebuilt every notation token and silently dropped
+    // keyboard focus from the move being operated.
+    constexpr auto moves = 20;
+    auto const state = use_snapshot_platform();
+    auto window = make_loaded_workspace({.games = few_games, .moves = moves});
+    window->set_board_loaded(true);
+    window->set_board_load_serial(1);
+
+    auto plies = std::vector<int> {};
+    auto next_calls = 0;
+    window->on_board_ply_activated([&plies](int const ply) -> void { plies.push_back(ply); });
+    window->on_board_navigate_next([&next_calls]() -> void { ++next_calls; });
+    state->window_adapter->render();
+
+    // Tab until a notation token takes focus and activates.
+    constexpr auto max_tab_stops = 80;
+    for (auto stop = 0; stop < max_tab_stops && plies.empty(); ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    }
+    REQUIRE(plies.size() == 1);
+
+    for (auto activation = 2; activation <= 3; ++activation) {
+        window->set_board_san_moves(make_moves(moves));
+        window->set_board_current_ply(activation);
+        window->set_search_busy(true);
+        state->window_adapter->render();
+        window->set_search_busy(false);
+        state->window_adapter->render();
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        CHECK(plies.size() == static_cast<std::size_t>(activation));
+    }
+
+    // Keys the token does not use still reach the review region's handler.
+    auto const before_arrow = next_calls;
+    press_key_and_render(*state, *window, slint::platform::key_codes::RightArrow);
+    CHECK(next_calls == before_arrow + 1);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: a focused notation move keeps focus when the window is resized", "[motif-slint-app][layout]")
+{
+    // Resizing changes how many moves fit per row. That used to rebuild the
+    // row repeaters, destroying the focused token.
+    constexpr std::uint32_t narrow_width {960};
+    constexpr std::uint32_t narrow_height {560};
+    constexpr std::uint32_t wide_width {1600};
+    constexpr std::uint32_t wide_height {900};
+    constexpr auto late_ply = 15;
+    auto const state = use_snapshot_platform(narrow_width, narrow_height);
+    auto window = make_loaded_workspace({});
+    window->set_board_loaded(true);
+    window->set_board_load_serial(1);
+
+    auto plies = std::vector<int> {};
+    window->on_board_ply_activated([&plies](int const ply) -> void { plies.push_back(ply); });
+    state->window_adapter->render();
+
+    constexpr auto max_tab_stops = 120;
+    for (auto stop = 0; stop < max_tab_stops && (plies.empty() || plies.back() < late_ply); ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    }
+    REQUIRE(!plies.empty());
+    REQUIRE(plies.back() >= late_ply);
+    auto const focused_ply = plies.back();
+    auto const before = plies.size();
+
+    window->window().set_size(slint::PhysicalSize {slint::Size<std::uint32_t> {.width = wide_width, .height = wide_height}});
+    state->window_adapter->render();
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    REQUIRE(plies.size() == before + 1);
+    CHECK(plies.back() == focused_ply);
+}
+
+TEST_CASE("workspace layout: a game loaded while the board is hidden takes focus when the board is shown", "[motif-slint-app][layout]")
+{
+    auto const state = use_snapshot_platform();
+    auto window = make_loaded_workspace({});
+    window->set_board_loaded(true);
+    window->set_board_load_serial(1);
+    auto next_calls = 0;
+    window->on_board_navigate_next([&next_calls]() -> void { ++next_calls; });
+    state->window_adapter->render();
+
+    window->set_board_panel_visible(false);
+    state->window_adapter->render();
+    window->set_board_load_serial(2);
+    state->window_adapter->render();
+    window->set_board_panel_visible(true);
+    state->window_adapter->render();
+
+    press_key_and_render(*state, *window, slint::platform::key_codes::RightArrow);
+    CHECK(next_calls == 1);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: toolbar presets are keyboard reachable and report each selection", "[motif-slint-app][layout]")
+{
+    auto const state = use_snapshot_platform();
+    auto window = make_loaded_workspace({});
+    auto selected = std::vector<WorkspacePreset> {};
+    window->on_preset_selected([&selected](WorkspacePreset const preset) -> void { selected.push_back(preset); });
+    state->window_adapter->render();
+    REQUIRE(window->get_workspace_preset() == WorkspacePreset::Review);
+
+    // Activate each of the first tab stops (the toolbar). Only the preset buttons
+    // report a selection, so the callback log records which stops were presets,
+    // their order, and that the window follows every selection.
+    constexpr auto toolbar_stops = 8;
+    for (auto stop = 0; stop < toolbar_stops; ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        auto const before = selected.size();
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        if (selected.size() != before) {
+            REQUIRE(selected.size() == before + 1);
+            CHECK(window->get_workspace_preset() == selected.back());
+        }
+    }
+
+    // Each preset is individually reachable exactly once, in toolbar order.
+    REQUIRE(selected.size() == 3);
+    CHECK(selected[0] == WorkspacePreset::Review);
+    CHECK(selected[1] == WorkspacePreset::Explorer);
+    CHECK(selected[2] == WorkspacePreset::Analysis);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: each preset renders a distinct composition at narrow and wide sizes", "[motif-slint-app][layout]")
+{
+    struct window_case
+    {
+        std::uint32_t width;
+        std::uint32_t height;
+    };
+    for (auto const& size : {window_case {.width = 960, .height = 560}, window_case {.width = 1600, .height = 900}}) {
+        auto renders = std::vector<std::vector<slint::Rgb8Pixel>> {};
+        for (auto const preset : {WorkspacePreset::Review, WorkspacePreset::Explorer, WorkspacePreset::Analysis}) {
+            INFO("size " << size.width << "x" << size.height << " preset " << static_cast<int>(preset));
+            auto const state = use_snapshot_platform(size.width, size.height);
+            auto window = make_loaded_workspace({});
+            window->set_board_loaded(true);
+            window->set_workspace_preset(preset);
+            renders.push_back(render_at_size(*state, size.width));
+            // Board, notation and the sidebar stay inside the window in every preset.
+            auto const reference = renders.back()[size.width - 1];
+            auto clipped = 0;
+            for (auto row = 0U; row < size.height; ++row) {
+                for (auto col = size.width - 8; col < size.width; ++col) {
+                    auto const pixel = renders.back()[(static_cast<std::size_t>(row) * size.width) + col];
+                    clipped += (pixel.r != reference.r || pixel.g != reference.g || pixel.b != reference.b) ? 1 : 0;
+                }
+            }
+            CHECK(clipped == 0);
+        }
+        // The active toolbar button and the sidebar panel differ between presets.
+        CHECK(differs(renders[0], renders[1]));
+        CHECK(differs(renders[0], renders[2]));
+        CHECK(differs(renders[1], renders[2]));
+    }
 }

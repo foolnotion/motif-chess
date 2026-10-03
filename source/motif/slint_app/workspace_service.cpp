@@ -22,6 +22,16 @@ auto to_service_message(motif::db::error const& database_error) -> std::string
 
 }  // namespace
 
+auto is_bundle_available(std::filesystem::path const& dir_path) -> bool
+{
+    if (dir_path.empty()) {
+        return false;
+    }
+    std::error_code fs_error;
+    return std::filesystem::is_regular_file(dir_path / "games.db", fs_error)
+        && std::filesystem::is_regular_file(dir_path / "manifest.json", fs_error);
+}
+
 workspace_service::workspace_service(std::filesystem::path config_file)
     : config_file_ {std::move(config_file)}
 {
@@ -53,9 +63,9 @@ auto workspace_service::create_database(std::string const& dir_path, std::string
     auto next_config = config_;
     push_recent(next_config, name, dir_path);
     if (auto persisted = persist_config(next_config); !persisted) {
-        created->close();
-        std::error_code cleanup_error;
-        std::filesystem::remove_all(std::filesystem::path {dir_path}, cleanup_error);
+        // Roll back only what create() produced; a pre-existing directory and
+        // unrelated files inside it must survive a failed config write.
+        created->discard_created_bundle();
         return persisted;
     }
 
@@ -64,6 +74,33 @@ auto workspace_service::create_database(std::string const& dir_path, std::string
     kind_ = database_kind::persistent;
     display_name_ = name;
     active_path_ = dir_path;
+    error_message_.clear();
+    return {};
+}
+
+auto workspace_service::recent_database_states() const -> std::vector<recent_database_state>
+{
+    auto states = std::vector<recent_database_state> {};
+    states.reserve(config_.recent_databases.size());
+    for (auto const& entry : config_.recent_databases) {
+        states.push_back({.name = entry.name, .path = entry.path, .available = is_bundle_available(std::filesystem::path {entry.path})});
+    }
+    return states;
+}
+
+auto workspace_service::remove_recent(std::string const& dir_path) -> result<void>
+{
+    auto next_config = config_;
+    auto const removed =
+        std::erase_if(next_config.recent_databases, [&dir_path](recent_entry const& entry) -> bool { return entry.path == dir_path; });
+    if (removed == 0) {
+        error_message_ = "That database is not in the recent list.";
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+    config_ = std::move(next_config);
     error_message_.clear();
     return {};
 }
@@ -129,6 +166,17 @@ auto workspace_service::set_notation_below(bool const below) -> result<void>
 {
     auto next_config = config_;
     next_config.ui_preferences.notation_layout = below ? "below" : "right";
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+    config_ = std::move(next_config);
+    return {};
+}
+
+auto workspace_service::set_preset(workspace_preset_kind const kind) -> result<void>
+{
+    auto next_config = config_;
+    next_config.ui_preferences.workspace_preset = std::string {to_string(kind)};
     if (auto persisted = persist_config(next_config); !persisted) {
         return persisted;
     }
