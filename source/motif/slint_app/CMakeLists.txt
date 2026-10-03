@@ -10,6 +10,7 @@ add_library(motif_slint_app_service STATIC
     game_browser_presenter.cpp
     import_service.cpp
     pgn_launch_queue.cpp
+    replace_controller.cpp
     replace_gate.cpp
     search_presenter.cpp
     workspace_service.cpp
