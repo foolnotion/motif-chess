@@ -1,12 +1,20 @@
 import { GameBrowser, GameRow } from "game_browser.slint";
 import { GameReviewPanel, SquareHighlight } from "board_notation.slint";
 import { ContinuationRow, PositionSearchPanel, SearchMatchRow } from "position_search.slint";
-import { Button, LineEdit, Palette, StyleMetrics } from "std-widgets.slint";
+import { Button, LineEdit, Palette, ScrollView, StyleMetrics } from "std-widgets.slint";
 
 export struct RecentEntry {
     name: string,
     path: string,
+    // False when the bundle's files are no longer on disk.
+    available: bool,
 }
+
+// Fixed workspace compositions (Story 13.1). Mirrors
+// motif::slint_app::workspace_preset_kind. Presets choose which panel fills the
+// sidebar and how the row is divided; there is no docking, floating, or
+// draggable placement.
+export enum WorkspacePreset { review, explorer, analysis }
 
 export component WorkspaceWindow inherits Window {
     in property <bool> has-database: false;
@@ -20,6 +28,8 @@ export component WorkspaceWindow inherits Window {
     in property <string> board-error-text: "";
     in property <string> search-error-text: "";
     in property <[RecentEntry]> recent-databases;
+    // PGN files from the command line still waiting for a database to import into.
+    in property <int> queued-import-count: 0;
     in-out property <string> create-path-text;
     in-out property <string> create-name-text;
     in-out property <string> open-path-text;
@@ -56,6 +66,10 @@ export component WorkspaceWindow inherits Window {
     in property <string> board-result;
     in property <[string]> board-san-moves;
     in property <int> board-current-ply;
+    // Incremented by the host each time a game finishes loading; moves
+    // keyboard focus into the review region once per load.
+    in property <int> board-load-serial: 0;
+    property <int> board-focused-serial: 0;
     in property <bool> board-panel-visible: true;
     in property <bool> notation-below: false;
     in property <[SearchMatchRow]> search-matches;
@@ -70,9 +84,10 @@ export component WorkspaceWindow inherits Window {
     in property <bool> search-auto-search: true;
     in property <bool> search-busy: false;
 
-    // 0 = games browser, 1 = position explorer. Owned by the UI: the tabs
-    // swap which sidebar panel is mounted, so no C++ round-trip is involved.
-    in-out property <int> sidebar-tab: 0;
+    // The active preset. The toolbar sets it directly so the switch is
+    // immediate; the host persists it through `preset-selected` and restores it
+    // from the per-user configuration when the workspace is published.
+    in-out property <WorkspacePreset> workspace-preset: WorkspacePreset.review;
 
     callback create-requested(string, string);
     callback open-requested(string);
@@ -80,6 +95,7 @@ export component WorkspaceWindow inherits Window {
     callback close-requested();
     callback dismiss-error();
     callback recent-activated(string);
+    callback recent-removed(string);
     callback import-requested(string);
     callback cancel-import-requested();
     callback game-filters-changed(string, string);
@@ -98,10 +114,16 @@ export component WorkspaceWindow inherits Window {
     callback board-orientation-toggled();
     callback board-panel-visibility-toggled();
     callback notation-layout-toggled();
+    callback preset-selected(WorkspacePreset);
     callback search-requested();
     callback search-auto-search-toggled(bool);
     callback search-match-activated(int);
     callback search-page-requested(int);
+
+    function select-preset(preset: WorkspacePreset) {
+        root.workspace-preset = preset;
+        root.preset-selected(preset);
+    }
 
     property <bool> board-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy;
     property <bool> search-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy;
@@ -112,14 +134,13 @@ export component WorkspaceWindow inherits Window {
         : (root.board-error-text != "" ? root.board-error-text
         : root.browser-error-text));
     property <bool> workspace-idle: !root.busy && !root.browser-busy && !root.search-busy && !root.import-active;
-    // The review pane needs two usable columns, while the browser remains
-    // useful at a narrower width because its table scrolls horizontally.
-    // These are desktop usability floors and startup dimensions, not a
-    // replacement for the stretch-based layout below.
-    min-width: 1180px;
-    preferred-width: 1440px;
-    min-height: 640px;
-    preferred-height: 860px;
+    // The platform supplies the initial logical size and scale factor. Keep
+    // this component's constraints in logical units and let the compositor
+    // choose the native physical size.
+    min-width: 960px;
+    preferred-width: 1200px;
+    min-height: 560px;
+    preferred-height: 720px;
 
 
     // The review and browser panes declare compatible baseline widths below;
@@ -145,6 +166,13 @@ export component WorkspaceWindow inherits Window {
                         font-size: 22px;
                         font-weight: 700;
                         color: Palette.foreground;
+                    }
+                    if root.queued-import-count > 0: Text {
+                        text: root.queued-import-count == 1
+                            ? "1 PGN file from the command line will be imported once a database is open."
+                            : root.queued-import-count + " PGN files from the command line will be imported once a database is open.";
+                        color: Palette.alternate-foreground;
+                        wrap: word-wrap;
                     }
                     Rectangle {
                         border-radius: 5px;
@@ -208,28 +236,64 @@ export component WorkspaceWindow inherits Window {
                             padding: 16px;
                             spacing: 6px;
                             Text { text: "Recent databases"; color: Palette.alternate-foreground; font-weight: 700; }
-                            for entry[index] in root.recent-databases: entry-scope := FocusScope {
-                                height: 44px;
-                                key-pressed(event) => {
-                                    if (!root.busy && (event.text == "\n" || event.text == " ")) {
-                                        root.recent-activated(entry.path);
-                                        return accept;
-                                    }
-                                    return reject;
-                                }
-                                Rectangle {
-                                    border-radius: 3px;
-                                    background: entry-scope.has-focus ? Palette.selection-background : transparent;
-                                    TouchArea {
-                                        enabled: !root.busy;
-                                        clicked => {
-                                            entry-scope.focus();
-                                            root.recent-activated(entry.path);
+                            // Capped to about four rows; the rest scroll, so up to the
+                            // stored maximum of recent entries stays reachable.
+                            ScrollView {
+                                height: min(root.recent-databases.length * 52px, 208px);
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    // Leaves room so the overlay scrollbar never covers Remove.
+                                    padding-right: 14px;
+                                    for entry[index] in root.recent-databases: HorizontalLayout {
+                                        height: 48px;
+                                        spacing: 6px;
+                                        entry-scope := FocusScope {
+                                            horizontal-stretch: 1;
+                                            key-pressed(event) => {
+                                                if (!root.busy && entry.available && (event.text == "\n" || event.text == " ")) {
+                                                    root.recent-activated(entry.path);
+                                                    return accept;
+                                                }
+                                                if (!root.busy && event.text == Key.Delete) {
+                                                    root.recent-removed(entry.path);
+                                                    return accept;
+                                                }
+                                                return reject;
+                                            }
+                                            Rectangle {
+                                                border-radius: 3px;
+                                                background: entry-scope.has-focus ? Palette.selection-background : transparent;
+                                                TouchArea {
+                                                    enabled: !root.busy && entry.available;
+                                                    clicked => {
+                                                        entry-scope.focus();
+                                                        root.recent-activated(entry.path);
+                                                    }
+                                                    VerticalLayout {
+                                                        padding: 6px;
+                                                        Text {
+                                                            text: entry.available ? entry.name : entry.name + " (unavailable)";
+                                                            color: entry.available ? Palette.foreground : Palette.alternate-foreground;
+                                                            font-weight: 600;
+                                                            overflow: elide;
+                                                        }
+                                                        Text {
+                                                            text: entry.available ? entry.path : "Database files not found at " + entry.path;
+                                                            color: Palette.alternate-foreground;
+                                                            font-size: 11px;
+                                                            overflow: elide;
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                         VerticalLayout {
-                                            padding: 6px;
-                                            Text { text: entry.name; color: Palette.foreground; font-weight: 600; }
-                                            Text { text: entry.path; color: Palette.alternate-foreground; font-size: 11px; overflow: elide; }
+                                            alignment: center;
+                                            Button {
+                                                text: "Remove";
+                                                enabled: !root.busy;
+                                                clicked => { root.recent-removed(entry.path); }
+                                            }
                                         }
                                     }
                                 }
@@ -241,14 +305,78 @@ export component WorkspaceWindow inherits Window {
         }
 
         if root.has-database: Rectangle {
+            vertical-stretch: 0;
+            HorizontalLayout {
+                spacing: StyleMetrics.layout-spacing;
+                Text {
+                    horizontal-stretch: 1;
+                    text: "Board & Notation";
+                    color: Palette.alternate-foreground;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: root.notation-below ? "Notation Right" : "Notation Below";
+                    enabled: root.board-interaction-enabled;
+                    clicked => { root.notation-layout-toggled(); }
+                }
+                // One button whose label changes. Two `if` buttons destroyed
+                // the focused element on toggle and dropped keyboard focus.
+                Button {
+                    text: root.board-panel-visible ? "Hide Board" : "Show Board";
+                    enabled: root.board-interaction-enabled;
+                    clicked => { root.board-panel-visibility-toggled(); }
+                }
+                Button {
+                    text: "Review";
+                    checked: root.workspace-preset == WorkspacePreset.review;
+                    accessible-description: "Board, notation and game browser";
+                    clicked => { root.select-preset(WorkspacePreset.review); }
+                }
+                Button {
+                    text: "Explorer";
+                    checked: root.workspace-preset == WorkspacePreset.explorer;
+                    accessible-description: "Board, notation and opening explorer";
+                    clicked => { root.select-preset(WorkspacePreset.explorer); }
+                }
+                Button {
+                    text: "Analysis";
+                    checked: root.workspace-preset == WorkspacePreset.analysis;
+                    accessible-description: "Large board with the game browser; engine analysis arrives in a later story";
+                    clicked => { root.select-preset(WorkspacePreset.analysis); }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.is-scratch ? "Scratch (temporary)" : root.display-name;
+                    color: Palette.alternate-foreground;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    overflow: elide;
+                }
+                Button {
+                    text: "Close";
+                    enabled: root.workspace-idle;
+                    clicked => { root.close-requested(); }
+                }
+            }
+        }
+
+        if root.has-database: Rectangle {
             vertical-stretch: 1;
             HorizontalLayout {
                 spacing: 8px;
 
             if root.board-panel-visible: GameReviewPanel {
-                min-width: 620px;
-                preferred-width: 620px;
-                horizontal-stretch: 2;
+                // Stretch factors only divide the space left after each pane's
+                // minimum, so the review pane's minimum (board plus a usable
+                // notation column) is what keeps it from being starved.
+                min-width: self.min-content-width;
+                preferred-width: 0px;
+                // Review 2:1, Explorer 1:1 (the sidebar hosts the explorer),
+                // Analysis 3:1 (board-led). The ratios divide only the space
+                // above each pane's minimum, so at the minimum window width
+                // every preset has the same, fully visible composition.
+                horizontal-stretch: root.workspace-preset == WorkspacePreset.explorer ? 1 : (root.workspace-preset == WorkspacePreset.analysis ? 3 : 2);
                 vertical-stretch: 1;
                 board-loaded: root.board-loaded;
                 square-pieces: root.board-square-pieces;
@@ -262,6 +390,9 @@ export component WorkspaceWindow inherits Window {
                 san-moves: root.board-san-moves;
                 current-ply: root.board-current-ply;
                 interaction-enabled: root.board-interaction-enabled;
+                load-serial: root.board-load-serial;
+                focused-serial: root.board-focused-serial;
+                load-focused(serial) => { root.board-focused-serial = serial; }
                 square-activated(file, rank) => { root.board-square-activated(file, rank); }
                 notation-below: root.notation-below;
                 ply-activated(ply) => { root.board-ply-activated(ply); }
@@ -270,51 +401,24 @@ export component WorkspaceWindow inherits Window {
                 navigate-next() => { root.board-navigate-next(); }
                 navigate-last() => { root.board-navigate-last(); }
                 orientation-toggled() => { root.board-orientation-toggled(); }
-                panel-visibility-toggled() => { root.board-panel-visibility-toggled(); }
-                notation-layout-toggled() => { root.notation-layout-toggled(); }
             }
 
             VerticalLayout {
-                min-width: 360px;
-                preferred-width: 360px;
+                // Wide enough that the games footer (page and open buttons)
+                // is never clipped at the minimum window width.
+                min-width: 320px;
+                preferred-width: 0px;
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
                 spacing: StyleMetrics.layout-spacing;
 
-                HorizontalLayout {
-                    spacing: StyleMetrics.layout-spacing;
-                    Button {
-                        text: "Games";
-                        checked: root.sidebar-tab == 0;
-                        clicked => { root.sidebar-tab = 0; }
-                    }
-                    Button {
-                        text: "Explorer";
-                        checked: root.sidebar-tab == 1;
-                        clicked => { root.sidebar-tab = 1; }
-                    }
-                    if !root.board-panel-visible: Button {
-                        text: "Show Board";
-                        clicked => { root.board-panel-visibility-toggled(); }
-                    }
-                    // Which database is open stays visible here rather than in a
-                    // dedicated header block, so the sidebar keeps its height.
-                    Text {
-                        horizontal-stretch: 1;
-                        text: root.is-scratch ? "Scratch (temporary)" : root.display-name;
-                        color: Palette.alternate-foreground;
-                        vertical-alignment: center;
-                        horizontal-alignment: right;
-                        overflow: elide;
-                    }
-                    Button {
-                        text: "Close";
-                        enabled: root.workspace-idle;
-                        clicked => { root.close-requested(); }
-                    }
-                }
+                // EXTENSION SEAM (Stories 13.2 and 13.3): the analysis region
+                // belongs at the top of this column. Explorer will mount the
+                // lazy opening tree there and Analysis the engine panel; each
+                // is gated on `root.workspace-preset` like the panels below.
+                // Neither is rendered yet, so the region occupies no space.
 
-                if root.sidebar-tab == 0: GameBrowser {
+                if root.workspace-preset != WorkspacePreset.explorer: GameBrowser {
                     vertical-stretch: 1;
                     games: root.game-rows;
                     total-count: root.game-total-count;
@@ -338,7 +442,7 @@ export component WorkspaceWindow inherits Window {
                     column-resized(column, width) => { root.game-column-resized(column, width); }
                 }
 
-                if root.sidebar-tab == 1: PositionSearchPanel {
+                if root.workspace-preset == WorkspacePreset.explorer: PositionSearchPanel {
                     vertical-stretch: 1;
                     has-database: root.has-database;
                     matches: root.search-matches;
@@ -387,7 +491,8 @@ export component WorkspaceWindow inherits Window {
                                     + (root.import-active && root.import-phase-text != "" ? " · " + root.import-phase-text : "")
                                     + " · " + root.import-processed + " / " + root.import-total + " processed · "
                                     + root.import-committed + " committed · " + root.import-skipped + " skipped · "
-                                    + root.import-errors + " errors";
+                                    + root.import-errors + " errors"
+                                    + (root.queued-import-count > 0 ? " · " + root.queued-import-count + " queued" : "");
                                 color: Palette.alternate-foreground;
                                 vertical-alignment: center;
                                 overflow: elide;

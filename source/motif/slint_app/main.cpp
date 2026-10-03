@@ -3,12 +3,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -21,6 +23,7 @@
 #include "motif/slint_app/board_presenter.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/import_service.hpp"
+#include "motif/slint_app/pgn_launch_queue.hpp"
 #include "motif/slint_app/search_presenter.hpp"
 #include "motif/slint_app/workspace_service.hpp"
 #include "workspace.h"
@@ -66,8 +69,37 @@ auto to_ui_count(std::int64_t count) -> int
     return static_cast<int>(std::min(count, maximum));
 }
 
+auto to_ui_preset(motif::slint_app::workspace_preset_kind const kind) -> WorkspacePreset
+{
+    switch (kind) {
+        case motif::slint_app::workspace_preset_kind::explorer:
+            return WorkspacePreset::Explorer;
+        case motif::slint_app::workspace_preset_kind::analysis:
+            return WorkspacePreset::Analysis;
+        case motif::slint_app::workspace_preset_kind::review:
+            break;
+    }
+    return WorkspacePreset::Review;
+}
+
+auto from_ui_preset(WorkspacePreset const preset) -> motif::slint_app::workspace_preset_kind
+{
+    switch (preset) {
+        case WorkspacePreset::Explorer:
+            return motif::slint_app::workspace_preset_kind::explorer;
+        case WorkspacePreset::Analysis:
+            return motif::slint_app::workspace_preset_kind::analysis;
+        case WorkspacePreset::Review:
+            break;
+    }
+    return motif::slint_app::workspace_preset_kind::review;
+}
+
 void publish_workspace(WorkspaceWindow& window, motif::slint_app::workspace_service const& service)
 {
+    // Restored before the workspace becomes visible, so the first rendered
+    // frame already shows the saved preset.
+    window.set_workspace_preset(to_ui_preset(service.preset()));
     window.set_has_database(service.has_active());
     window.set_is_scratch(service.is_temporary());
     window.set_display_name(shared_string(service.display_name()));
@@ -76,10 +108,15 @@ void publish_workspace(WorkspaceWindow& window, motif::slint_app::workspace_serv
 
     auto rows = std::vector<RecentEntry> {};
     rows.reserve(service.recent_databases().size());
-    for (auto const& entry : service.recent_databases()) {
-        rows.push_back(RecentEntry {.name = shared_string(entry.name), .path = shared_string(entry.path)});
+    for (auto const& entry : service.recent_database_states()) {
+        rows.push_back(RecentEntry {.name = shared_string(entry.name), .path = shared_string(entry.path), .available = entry.available});
     }
     window.set_recent_databases(std::make_shared<slint::VectorModel<RecentEntry>>(std::move(rows)));
+}
+
+void publish_launch_queue(WorkspaceWindow& window, motif::slint_app::pgn_launch_queue const& queue)
+{
+    window.set_queued_import_count(to_ui_count(queue.pending()));
 }
 
 auto import_state_text(motif::slint_app::import_state state) -> std::string_view
@@ -1455,6 +1492,20 @@ void register_workspace_callbacks(WorkspaceWindow& window,
                 window.set_busy(true);
             }
         });
+    window.on_recent_removed(
+        [&](slint::SharedString const& path) -> void
+        {
+            // The worker thread mutates the same config; wait until it is done.
+            if (runner.is_busy()) {
+                return;
+            }
+            if (auto removed = service.remove_recent(std::string {std::string_view {path.data(), path.size()}}); !removed) {
+                window.set_error_text(shared_string(service.error_message()));
+                return;
+            }
+            window.set_error_text("");
+            publish_workspace(window, service);
+        });
     window.on_scratch_requested(
         [&]() -> void
         {
@@ -1486,6 +1537,17 @@ void register_workspace_callbacks(WorkspaceWindow& window,
             board.dismiss_error();
             search.dismiss_error();
             window.set_error_text("");
+        });
+    window.on_preset_selected(
+        [&window, &service](WorkspacePreset const preset) -> void
+        {
+            // The toolbar already switched the layout. If the choice cannot be
+            // saved, roll back to the stored preset so the window never shows a
+            // state that a later publish_workspace would silently revert.
+            if (auto saved = service.set_preset(from_ui_preset(preset)); !saved) {
+                window.set_workspace_preset(to_ui_preset(service.preset()));
+                window.set_error_text("Could not save workspace preset preference.");
+            }
         });
     window.on_notation_layout_toggled(
         [&window, &service]() -> void
@@ -1690,57 +1752,119 @@ void register_search_callbacks(WorkspaceWindow& window,
         });
 }
 
-void register_import_callbacks(WorkspaceWindow& window,
-                               motif::slint_app::workspace_service& service,
-                               motif::slint_app::import_service& importer,
-                               async_workspace_runner const& runner,
-                               async_browser_runner& browser,
-                               async_board_runner const& board,
-                               async_search_runner& search,
-                               slint::Timer& timer)
+struct import_context
 {
-    constexpr auto poll_interval = std::chrono::milliseconds {200};
+    WorkspaceWindow& window;
+    motif::slint_app::workspace_service& service;
+    motif::slint_app::import_service& importer;
+    async_workspace_runner const& runner;
+    async_browser_runner& browser;
+    async_board_runner const& board;
+    async_search_runner& search;
+    motif::slint_app::pgn_launch_queue& launch_queue;
+    slint::Timer& poll_timer;
+};
+
+constexpr auto import_poll_interval = std::chrono::milliseconds {200};
+
+// A failed import abandons the rest of the launch queue so one bad file does
+// not hide behind (or silently trigger) imports of the files after it;
+// a canceled import is the user's own decision to stop.
+void abandon_launch_queue_after_unsuccessful_import(import_context& context)
+{
+    auto const state = context.importer.snapshot().state;
+    if (state != motif::slint_app::import_state::failed && state != motif::slint_app::import_state::canceled) {
+        return;
+    }
+    auto const dropped = context.launch_queue.clear();
+    publish_launch_queue(context.window, context.launch_queue);
+    if (state == motif::slint_app::import_state::failed && dropped > 0) {
+        auto const error = context.window.get_error_text();
+        context.window.set_error_text(shared_string(fmt::format("{} Skipped {} remaining queued PGN file{}.",
+                                                                std::string_view {error.data(), error.size()},
+                                                                dropped,
+                                                                dropped == 1 ? "" : "s")));
+    }
+}
+
+// Starts one import through the existing import service and polls it to
+// completion. Shared by the Import PGN button and the launch-argument queue.
+auto begin_import(import_context& context, std::string_view const path) -> bool
+{
+    context.window.set_import_path_text(shared_string(path));
+    auto started = context.importer.start(context.service.active_database(), std::filesystem::path {path});
+    if (!started) {
+        publish_import_start_error(context.window, started.error());
+        return false;
+    }
+    publish_import_state(context.window, context.importer);
+    context.poll_timer.start(slint::TimerMode::Repeated,
+                             import_poll_interval,
+                             [&context]() -> void
+                             {
+                                 if (publish_import_state(context.window, context.importer)) {
+                                     return;
+                                 }
+                                 context.poll_timer.stop();
+                                 context.browser.load_initial();
+                                 context.search.invalidate_position_cache();
+                                 context.search.refresh_if_auto(context.board.current_hash(), context.browser.active_filter());
+                                 abandon_launch_queue_after_unsuccessful_import(context);
+                             });
+    return true;
+}
+
+// Runs on a repeating timer while launch paths are pending: waits until a
+// database is open and every background task is idle, then starts the next
+// import. This is the same state the Import PGN button requires.
+void pump_launch_queue(import_context& context, slint::Timer& launch_timer)
+{
+    if (context.launch_queue.empty()) {
+        launch_timer.stop();
+        return;
+    }
+    if (context.runner.is_busy() || context.browser.is_busy() || context.board.is_busy() || context.search.is_busy()
+        || context.importer.active() || context.poll_timer.running() || !context.service.has_active()) {
+        return;
+    }
+    auto const next = context.launch_queue.take_next();
+    publish_launch_queue(context.window, context.launch_queue);
+    if (next) {
+        begin_import(context, next->string());
+    }
+}
+
+void register_import_callbacks(import_context& context)
+{
+    auto& window = context.window;
     window.on_import_requested(
-        [&](slint::SharedString const& path) -> void
+        [&context](slint::SharedString const& path) -> void
         {
-            if (runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
+            if (context.runner.is_busy() || context.browser.is_busy() || context.board.is_busy() || context.search.is_busy()) {
                 return;
             }
-            window.set_error_text("");
-            auto const trimmed_path = trim_whitespace(std::string_view {path.data(), path.size()});
-            window.set_import_path_text(shared_string(trimmed_path));
-            auto started = importer.start(service.active_database(), std::filesystem::path {trimmed_path});
-            if (!started) {
-                publish_import_start_error(window, started.error());
-                return;
-            }
-            publish_import_state(window, importer);
-            timer.start(slint::TimerMode::Repeated,
-                        poll_interval,
-                        [&]() -> void
-                        {
-                            if (publish_import_state(window, importer)) {
-                                return;
-                            }
-                            timer.stop();
-                            browser.load_initial();
-                            search.invalidate_position_cache();
-                            search.refresh_if_auto(board.current_hash(), browser.active_filter());
-                        });
+            context.window.set_error_text("");
+            begin_import(context, trim_whitespace(std::string_view {path.data(), path.size()}));
         });
-    window.on_cancel_import_requested([&]() -> void { importer.request_cancel(); });
+    window.on_cancel_import_requested([&context]() -> void { context.importer.request_cancel(); });
+}
+
+auto launch_arguments(std::span<char* const> const raw) -> std::vector<std::string>
+{
+    auto arguments = std::vector<std::string> {};
+    if (raw.size() > 1) {
+        arguments.assign(raw.begin() + 1, raw.end());
+    }
+    return arguments;
 }
 
 }  // namespace
 
-auto main() -> int
+auto main(int const argc, char** const argv) -> int
 {
     auto service = motif::slint_app::workspace_service {motif::slint_app::config_path()};
     auto importer = motif::slint_app::import_service {};
     auto window = WorkspaceWindow::create();
-    constexpr auto default_window_width = 1440.F;
-    constexpr auto default_window_height = 860.F;
-    window->window().set_size(slint::LogicalSize {slint::Size<float> {.width = default_window_width, .height = default_window_height}});
     auto browser = async_browser_runner {window};
     auto board = async_board_runner {window};
     auto search = async_search_runner {window};
@@ -1748,6 +1872,7 @@ auto main() -> int
         [&board, &window](motif::db::game_id const game_key, motif::db::game const& game) -> void
         {
             board.apply_loaded_game(game_key, game);
+            window->set_board_load_serial(window->get_board_load_serial() + 1);
             window->set_error_text("");
         },
         [&board]() -> void { board.clear(/*publish_position_change=*/false); });
@@ -1755,6 +1880,7 @@ auto main() -> int
         [&board, &window](motif::db::game_id const game_key, motif::db::game const& game, std::size_t const ply) -> void
         {
             board.apply_loaded_game_at(game_key, game, ply);
+            window->set_board_load_serial(window->get_board_load_serial() + 1);
             window->set_error_text("");
         },
         [&board]() -> void { board.clear(/*publish_position_change=*/false); });
@@ -1763,6 +1889,10 @@ auto main() -> int
     auto runner = async_workspace_runner {service, window, browser, board, search};
     search.set_retry_on_database_failure([&importer]() -> bool { return importer.active(); });
     auto import_timer = slint::Timer {};
+    auto launch_arguments_list = launch_arguments(std::span<char* const> {argv, static_cast<std::size_t>(argc)});
+    auto launch_queue = motif::slint_app::pgn_launch_queue::from_arguments(launch_arguments_list);
+    auto import_context_value = import_context {*window, service, importer, runner, browser, board, search, launch_queue, import_timer};
+    auto launch_timer = slint::Timer {};
 
     clear_browser(*window);
     clear_board(*window);
@@ -1772,7 +1902,21 @@ auto main() -> int
     register_browser_callbacks(*window, browser, importer, runner, board, search);
     register_board_callbacks(*window, board, importer, runner, browser, search);
     register_search_callbacks(*window, search, browser, importer, runner, board);
-    register_import_callbacks(*window, service, importer, runner, browser, board, search, import_timer);
+    register_import_callbacks(import_context_value);
+
+    // Launch arguments (command line or a file manager's %F): invalid ones are
+    // reported in the error bar and on stderr; valid ones wait for a database
+    // and then follow the normal import flow.
+    publish_launch_queue(*window, launch_queue);
+    if (auto const rejection = launch_queue.rejection_message(); !rejection.empty()) {
+        fmt::print(stderr, "warning: {}\n", rejection);
+        window->set_error_text(shared_string(rejection));
+    }
+    if (!launch_queue.empty()) {
+        launch_timer.start(slint::TimerMode::Repeated,
+                           import_poll_interval,
+                           [&import_context_value, &launch_timer]() -> void { pump_launch_queue(import_context_value, launch_timer); });
+    }
 
     window->run();
     return 0;

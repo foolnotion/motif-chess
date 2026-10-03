@@ -240,6 +240,62 @@ TEST_CASE("workspace_config: persists notation layout preference", "[motif-slint
     REQUIRE(restored.notation_below());
 }
 
+TEST_CASE("workspace_config: persists the workspace preset and defaults to review", "[motif-slint-app]")
+{
+    using motif::slint_app::workspace_preset_kind;
+    tmp_dir const tmp {"workspace_preset"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto service = motif::slint_app::workspace_service {config_path};
+
+    REQUIRE(service.preset() == workspace_preset_kind::review);
+    for (auto const kind : {workspace_preset_kind::explorer, workspace_preset_kind::analysis, workspace_preset_kind::review}) {
+        REQUIRE(service.set_preset(kind).has_value());
+        REQUIRE(service.preset() == kind);
+        motif::slint_app::workspace_service const restored {config_path};
+        REQUIRE(restored.preset() == kind);
+    }
+}
+
+TEST_CASE("workspace_config: a config without a preset, or with an unknown one, restores review", "[motif-slint-app]")
+{
+    using motif::slint_app::workspace_preset_kind;
+    tmp_dir const tmp {"workspace_preset_unknown"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    std::filesystem::create_directories(config_path.parent_path());
+    {
+        // Written before presets existed: no workspace_preset key.
+        auto file = std::ofstream {config_path};
+        file << R"({"database_directory":"","recent_databases":[],"engine_paths":[],"ui_preferences":{"notation_layout":"below"}})";
+    }
+    auto const legacy = motif::slint_app::workspace_service {config_path};
+    REQUIRE(legacy.preset() == workspace_preset_kind::review);
+    REQUIRE(legacy.notation_below());
+
+    {
+        auto file = std::ofstream {config_path};
+        file << R"({"ui_preferences":{"workspace_preset":"dock-everything"}})";
+    }
+    motif::slint_app::workspace_service const unknown {config_path};
+    REQUIRE(unknown.preset() == workspace_preset_kind::review);
+}
+
+TEST_CASE("workspace_service: a preset that cannot be saved is not adopted", "[motif-slint-app]")
+{
+    using motif::slint_app::workspace_preset_kind;
+    tmp_dir const tmp {"workspace_preset_save_failure"};
+    std::filesystem::create_directories(tmp.path);
+    {
+        auto file = std::ofstream {tmp.path / "not-a-directory"};
+        file << "blocking file";
+    }
+    motif::slint_app::workspace_service service {tmp.path / "not-a-directory" / "config.json"};
+
+    REQUIRE(service.preset() == workspace_preset_kind::review);
+    auto const result = service.set_preset(workspace_preset_kind::analysis);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(service.preset() == workspace_preset_kind::review);
+}
+
 TEST_CASE("workspace_config: malformed input remains untouched", "[motif-slint-app]")
 {
     tmp_dir const tmp {"config_malformed"};
@@ -274,6 +330,142 @@ TEST_CASE("workspace_service: failed persistence preserves active workspace and 
     REQUIRE(result.error() == motif::slint_app::error_code::database_failure);
     REQUIRE_FALSE(service.has_active());
     REQUIRE(service.recent_databases().empty());
+}
+
+TEST_CASE("workspace_service: failed persistence keeps a pre-existing directory and its files", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"persistence_failure_existing"};
+    auto const database_path = tmp.path / "user-folder";
+    std::filesystem::create_directories(database_path / "documents");
+    auto const sentinel = database_path / "important.txt";
+    auto const nested_sentinel = database_path / "documents" / "notes.txt";
+    {
+        auto file = std::ofstream {sentinel};
+        file << "irreplaceable";
+    }
+    {
+        auto file = std::ofstream {nested_sentinel};
+        file << "notes";
+    }
+    // A regular file where the config's parent directory must be forces the config write to fail.
+    auto const config_path = tmp.path / "not-a-directory" / "config.json";
+    {
+        auto file = std::ofstream {tmp.path / "not-a-directory"};
+        file << "blocking file";
+    }
+    motif::slint_app::workspace_service service {config_path};
+
+    auto const result = service.create_database(database_path.string(), "PersistentDB");
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error() == motif::slint_app::error_code::database_failure);
+    REQUIRE_FALSE(service.has_active());
+    REQUIRE(service.recent_databases().empty());
+    REQUIRE(std::filesystem::exists(database_path));
+    REQUIRE(read_file(sentinel) == "irreplaceable");
+    REQUIRE(read_file(nested_sentinel) == "notes");
+    REQUIRE_FALSE(std::filesystem::exists(database_path / "games.db"));
+    REQUIRE_FALSE(std::filesystem::exists(database_path / "manifest.json"));
+    REQUIRE_FALSE(std::filesystem::exists(database_path / ".motif.lock"));
+}
+
+TEST_CASE("workspace_service: failed persistence removes a directory that create made", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"persistence_failure_fresh"};
+    std::filesystem::create_directories(tmp.path);
+    auto const config_path = tmp.path / "not-a-directory" / "config.json";
+    {
+        auto file = std::ofstream {tmp.path / "not-a-directory"};
+        file << "blocking file";
+    }
+    motif::slint_app::workspace_service service {config_path};
+    auto const database_path = tmp.path / "fresh-database";
+
+    REQUIRE_FALSE(service.create_database(database_path.string(), "PersistentDB").has_value());
+
+    REQUIRE_FALSE(std::filesystem::exists(database_path));
+    REQUIRE(std::filesystem::exists(tmp.path / "not-a-directory"));
+}
+
+TEST_CASE("workspace_service: recent states flag bundles that are no longer on disk", "[motif-slint-app]")
+{
+    tmp_dir const present {"recent_present"};
+    tmp_dir const missing {"recent_missing"};
+    auto const config_path = tmp_config {present.path}.path;
+    {
+        motif::slint_app::workspace_service creator {config_path};
+        REQUIRE(creator.create_database(missing.path.string(), "Missing").has_value());
+        creator.close_active();
+        REQUIRE(creator.create_database(present.path.string(), "Present").has_value());
+    }
+    std::filesystem::remove_all(missing.path);
+    // A directory without the bundle files is also unavailable.
+    tmp_dir const empty_dir {"recent_empty_dir"};
+    std::filesystem::create_directories(empty_dir.path);
+
+    motif::slint_app::workspace_service service {config_path};
+    auto config = motif::slint_app::workspace_config {};
+    config.recent_databases = service.recent_databases();
+    motif::slint_app::push_recent(config, "EmptyDir", empty_dir.path.string());
+    REQUIRE(motif::slint_app::save_config(config, config_path).has_value());
+    motif::slint_app::workspace_service const reloaded {config_path};
+
+    auto const states = reloaded.recent_database_states();
+    REQUIRE(states.size() == 3);
+    REQUIRE(states[0].name == "EmptyDir");
+    REQUIRE_FALSE(states[0].available);
+    REQUIRE(states[1].name == "Present");
+    REQUIRE(states[1].available);
+    REQUIRE(states[2].name == "Missing");
+    REQUIRE_FALSE(states[2].available);
+}
+
+TEST_CASE("workspace_service: remove_recent forgets an entry and persists it", "[motif-slint-app]")
+{
+    tmp_dir const tmp_a {"remove_a"};
+    tmp_dir const tmp_b {"remove_b"};
+    auto const config_path = tmp_config {tmp_a.path}.path;
+    {
+        motif::slint_app::workspace_service service {config_path};
+        REQUIRE(service.create_database(tmp_a.path.string(), "A").has_value());
+        service.close_active();
+        REQUIRE(service.create_database(tmp_b.path.string(), "B").has_value());
+        service.close_active();
+        REQUIRE(service.remove_recent(tmp_a.path.string()).has_value());
+        REQUIRE(service.recent_databases().size() == 1);
+        REQUIRE(service.recent_databases().front().path == tmp_b.path.string());
+    }
+
+    motif::slint_app::workspace_service const restored {config_path};
+    REQUIRE(restored.recent_databases().size() == 1);
+    REQUIRE(restored.recent_databases().front().name == "B");
+    // Forgetting a recent entry never deletes the bundle itself.
+    REQUIRE(std::filesystem::exists(tmp_a.path / "games.db"));
+}
+
+TEST_CASE("workspace_service: remove_recent rejects unknown paths and keeps the list on persistence failure", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"remove_failure"};
+    std::filesystem::create_directories(tmp.path);
+    auto const config_path = tmp.path / "config" / "config.json";
+    motif::slint_app::workspace_service service {config_path};
+    REQUIRE(service.create_database((tmp.path / "bundle").string(), "Bundle").has_value());
+
+    auto const unknown = service.remove_recent("/not/in/the/list");
+    REQUIRE_FALSE(unknown.has_value());
+    REQUIRE(unknown.error() == motif::slint_app::error_code::invalid_argument);
+    REQUIRE(service.recent_databases().size() == 1);
+
+    // Replace the config directory with a regular file so the next write fails.
+    std::filesystem::remove_all(tmp.path / "config");
+    {
+        auto file = std::ofstream {tmp.path / "config"};
+        file << "blocking file";
+    }
+    auto const failed = service.remove_recent((tmp.path / "bundle").string());
+    REQUIRE_FALSE(failed.has_value());
+    REQUIRE(failed.error() == motif::slint_app::error_code::database_failure);
+    REQUIRE(service.recent_databases().size() == 1);
 }
 
 TEST_CASE("workspace_config: write leaves no temporary file", "[motif-slint-app]")

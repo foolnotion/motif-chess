@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <tl/expected.hpp>
@@ -35,12 +36,26 @@ struct recent_entry
 
 constexpr int default_prefetch_depth {5};
 
+// Fixed workspace compositions selectable from the toolbar (Story 13.1). Stored
+// by name so that a newer or hand-edited file with an unknown value degrades to
+// the default instead of failing to load.
+enum class workspace_preset_kind : std::uint8_t
+{
+    review,
+    explorer,
+    analysis,
+};
+
+[[nodiscard]] auto to_string(workspace_preset_kind kind) noexcept -> std::string_view;
+[[nodiscard]] auto workspace_preset_from_string(std::string_view name) noexcept -> workspace_preset_kind;
+
 struct ui_preferences
 {
     std::string board_theme {"classic"};
     std::string piece_set {"standard"};
     int prefetch_depth {default_prefetch_depth};
     std::string notation_layout {"right"};
+    std::string workspace_preset {"review"};
 };
 
 struct workspace_config

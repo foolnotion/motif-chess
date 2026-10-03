@@ -88,7 +88,34 @@ export component GameBrowser inherits Rectangle {
     property <length> date-width: root.column-widths.length == 6 ? root.column-widths[4] * 1px : 105px;
     property <length> eco-width: root.column-widths.length == 6 ? root.column-widths[5] * 1px : 70px;
     property <length> table-width: white-width + black-width + result-width + event-width + date-width + eco-width;
+    property <length> row-height: 34px;
+    // Keeps one row of overlap between consecutive PageUp/PageDown views.
+    property <int> rows-per-page: max(1, Math.floor(list.visible-height / root.row-height) - 1);
 
+    // Keyboard movement with no selection starts at the nearest end instead
+    // of skipping a row.
+    function step-selection(delta: int) {
+        if (root.selected-row < 0) {
+            root.select-row(delta > 0 ? 0 : root.games.length - 1);
+        } else {
+            root.move-selection(delta);
+        }
+    }
+
+    // Scroll the table so a row stays inside the viewport.
+    function reveal-row(row: int) {
+        if (row >= 0) {
+            if (row * root.row-height < -list.content-y) {
+                list.content-y = -(row * root.row-height);
+            } else if ((row + 1) * root.row-height > -list.content-y + list.visible-height) {
+                list.content-y = list.visible-height - (row + 1) * root.row-height;
+            }
+        }
+    }
+
+    // `changed` does not fire when a key requests the row that is already
+    // selected, so Home/End also call reveal-row directly.
+    changed selected-row => { root.reveal-row(root.selected-row); }
 
     // The table itself scrolls horizontally. Its intrinsic column total must
     // not become the workspace sidebar's minimum width, or it defeats the
@@ -127,63 +154,104 @@ export component GameBrowser inherits Rectangle {
 
             VerticalLayout {
                 spacing: 0px;
-                HorizontalLayout {
+                // Keep the column headers on the same horizontal offset as
+                // the ListView content; otherwise the body scrolls while its
+                // headers remain at the origin.
+                Rectangle {
                     height: 36px;
-                    spacing: 0px;
-                    TableHeader { title: "White"; column: 0; column-width: root.white-width; active: root.sort-column == 0; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Black"; column: 1; column-width: root.black-width; active: root.sort-column == 1; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Result"; column: 2; column-width: root.result-width; active: root.sort-column == 2; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Event"; column: 3; column-width: root.event-width; active: root.sort-column == 3; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "Date"; column: 4; column-width: root.date-width; active: root.sort-column == 4; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
-                    TableHeader { title: "ECO"; column: 5; column-width: root.eco-width; active: root.sort-column == 5; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    clip: true;
+                    header := HorizontalLayout {
+                        x: list.content-x;
+                        width: root.table-width;
+                        height: parent.height;
+                        spacing: 0px;
+                        TableHeader { title: "White"; column: 0; column-width: root.white-width; active: root.sort-column == 0; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                        TableHeader { title: "Black"; column: 1; column-width: root.black-width; active: root.sort-column == 1; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                        TableHeader { title: "Result"; column: 2; column-width: root.result-width; active: root.sort-column == 2; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                        TableHeader { title: "Event"; column: 3; column-width: root.event-width; active: root.sort-column == 3; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                        TableHeader { title: "Date"; column: 4; column-width: root.date-width; active: root.sort-column == 4; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                        TableHeader { title: "ECO"; column: 5; column-width: root.eco-width; active: root.sort-column == 5; ascending: root.sort-ascending; busy: root.busy; sort(c, a) => { root.sort-requested(c, a); } resize(c, w) => { root.column-resized(c, w); } }
+                    }
                 }
-                list := ListView {
+                list-scope := FocusScope {
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
-                    viewport-width: max(self.width, root.table-width);
-                    for row[index] in root.games: row-scope := FocusScope {
-                        property <bool> selected: index == root.selected-row;
-                        property <color> row-background: self.selected ? Palette.selection-background : (Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background);
-                        property <color> row-foreground: self.selected ? Palette.selection-foreground : Palette.foreground;
-                        width: root.table-width;
-                        height: 34px;
-                        focus-on-tab-navigation: self.selected;
-                        key-pressed(event) => {
-                            if (root.busy) {
-                                return reject;
-                            }
-                            if (event.text == Key.DownArrow) {
-                                root.move-selection(1);
-                                return accept;
-                            }
-                            if (event.text == Key.UpArrow) {
-                                root.move-selection(-1);
-                                return accept;
-                            }
-                            if (event.text == Key.Return) {
-                                root.activate-selected();
-                                return accept;
-                            }
+                    // One tab stop for the whole table; Up/Down/Page/Home/End
+                    // move the selection from there.
+                    focus-on-tab-navigation: root.games.length > 0 && !root.busy;
+                    accessible-role: AccessibleRole.list;
+                    accessible-label: "Games";
+                    // The focus stays on this scope while the selection moves,
+                    // so the current game is exposed here as the value.
+                    accessible-value: root.selected-row >= 0 && root.selected-row < root.games.length
+                        ? root.games[root.selected-row].white + " versus " + root.games[root.selected-row].black + ", " + root.games[root.selected-row].result
+                        : "No game selected";
+                    accessible-item-count: root.games.length;
+                    key-pressed(event) => {
+                        if (root.busy || root.games.length == 0) {
                             return reject;
                         }
-                        Rectangle {
-                            background: row-scope.row-background;
-                            border-width: row-scope.selected ? 1px : 0px;
-                            border-color: Palette.selection-foreground;
+                        if (event.text == Key.DownArrow) {
+                            root.step-selection(1);
+                            return accept;
+                        }
+                        if (event.text == Key.UpArrow) {
+                            root.step-selection(-1);
+                            return accept;
+                        }
+                        if (event.text == Key.PageDown) {
+                            root.step-selection(root.rows-per-page);
+                            return accept;
+                        }
+                        if (event.text == Key.PageUp) {
+                            root.step-selection(-root.rows-per-page);
+                            return accept;
+                        }
+                        if (event.text == Key.Home) {
+                            root.select-row(0);
+                            root.reveal-row(0);
+                            return accept;
+                        }
+                        if (event.text == Key.End) {
+                            root.select-row(root.games.length - 1);
+                            root.reveal-row(root.games.length - 1);
+                            return accept;
+                        }
+                        if (event.text == Key.Return || event.text == " ") {
+                            root.activate-selected();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    list := ListView {
+                        content-width: max(self.width, root.table-width);
+                        for row[index] in root.games: row-box := Rectangle {
+                            property <bool> selected: index == root.selected-row;
+                            property <color> row-foreground: row-box.selected ? Palette.selection-foreground : Palette.foreground;
+                            width: root.table-width;
+                            height: root.row-height;
+                            accessible-role: AccessibleRole.list-item;
+                            accessible-label: row.white + " versus " + row.black + ", " + row.result + ", " + row.event + ", " + row.date;
+                            accessible-item-selected: row-box.selected;
+                            accessible-item-index: index;
+                            accessible-item-count: root.games.length;
+                            background: row-box.selected ? Palette.selection-background : (Math.mod(index, 2) == 0 ? Palette.alternate-background : Palette.background);
+                            border-width: row-box.selected ? (list-scope.has-focus ? 2px : 1px) : 0px;
+                            border-color: list-scope.has-focus ? Palette.foreground : Palette.selection-foreground;
                             HorizontalLayout {
                                 spacing: 0px;
-                                Text { width: root.white-width; text: "  " + row.white; color: row-scope.row-foreground; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.black-width; text: "  " + row.black; color: row-scope.row-foreground; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.result-width; text: "  " + row.result; color: row-scope.row-foreground; vertical-alignment: center; }
-                                Text { width: root.event-width; text: "  " + row.event; color: row-scope.row-foreground; vertical-alignment: center; overflow: elide; }
-                                Text { width: root.date-width; text: "  " + row.date; color: row-scope.row-foreground; vertical-alignment: center; }
-                                Text { width: root.eco-width; text: "  " + row.eco; color: row-scope.row-foreground; vertical-alignment: center; }
+                                Text { width: root.white-width; text: "  " + row.white; color: row-box.row-foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.black-width; text: "  " + row.black; color: row-box.row-foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.result-width; text: "  " + row.result; color: row-box.row-foreground; vertical-alignment: center; }
+                                Text { width: root.event-width; text: "  " + row.event; color: row-box.row-foreground; vertical-alignment: center; overflow: elide; }
+                                Text { width: root.date-width; text: "  " + row.date; color: row-box.row-foreground; vertical-alignment: center; }
+                                Text { width: root.eco-width; text: "  " + row.eco; color: row-box.row-foreground; vertical-alignment: center; }
                             }
                             TouchArea {
                                 enabled: !root.busy;
                                 clicked => {
                                     root.select-row(index);
-                                    row-scope.focus();
+                                    list-scope.focus();
                                 }
                                 double-clicked => {
                                     root.select-row(index);
@@ -197,39 +265,57 @@ export component GameBrowser inherits Rectangle {
                             }
                         }
                     }
+                    // Whole-table focus ring: visible even before a row is selected.
+                    if list-scope.has-focus: Rectangle {
+                        border-width: 2px;
+                        border-color: Palette.accent-background;
+                        background: transparent;
+                    }
                 }
             }
         }
 
-        HorizontalLayout {
-            spacing: 8px;
-            Text {
-                horizontal-stretch: 1;
-                text: root.total-count == 0 ? "No games" : "Games " + (root.page-index * 100 + 1) + "–" + min(root.total-count, (root.page-index + 1) * 100) + " of " + root.total-count;
-                color: Palette.alternate-foreground;
-                vertical-alignment: center;
-                overflow: elide;
+        // Two rows: the counters/title may elide, while the page and open
+        // buttons keep their natural width. A single row forced the sidebar
+        // wider than its allocation and clipped Open Game at small windows.
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.total-count == 0 ? "No games" : "Games " + (root.page-index * 100 + 1) + "–" + min(root.total-count, (root.page-index + 1) * 100) + " of " + root.total-count;
+                    color: Palette.alternate-foreground;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.active-game-title != "": Text {
+                    horizontal-stretch: 1;
+                    text: "Loaded: " + root.active-game-title;
+                    color: Palette.foreground;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
-            if root.active-game-title != "": Text {
-                horizontal-stretch: 1;
-                text: "Loaded: " + root.active-game-title;
-                color: Palette.foreground;
-                overflow: elide;
-            }
-            Button {
-                text: "Previous Page";
-                enabled: !root.busy && root.has-previous-page;
-                clicked => { root.page-requested(root.page-index - 1); }
-            }
-            Button {
-                text: "Next Page";
-                enabled: !root.busy && root.has-next-page;
-                clicked => { root.page-requested(root.page-index + 1); }
-            }
-            Button {
-                text: "Open Game";
-                enabled: !root.busy && root.selected-row >= 0;
-                clicked => { root.activate-selected(); }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Previous";
+                    accessible-label: "Previous page";
+                    enabled: !root.busy && root.has-previous-page;
+                    clicked => { root.page-requested(root.page-index - 1); }
+                }
+                Button {
+                    text: "Next";
+                    accessible-label: "Next page";
+                    enabled: !root.busy && root.has-next-page;
+                    clicked => { root.page-requested(root.page-index + 1); }
+                }
+                Button {
+                    text: "Open Game";
+                    enabled: !root.busy && root.selected-row >= 0;
+                    clicked => { root.activate-selected(); }
+                }
             }
         }
     }

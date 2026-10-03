@@ -120,6 +120,30 @@ auto save_config(workspace_config const& config) -> config_result<void>
     return save_config(config, config_path());
 }
 
+auto to_string(workspace_preset_kind const kind) noexcept -> std::string_view
+{
+    switch (kind) {
+        case workspace_preset_kind::review:
+            return "review";
+        case workspace_preset_kind::explorer:
+            return "explorer";
+        case workspace_preset_kind::analysis:
+            return "analysis";
+    }
+    return "review";
+}
+
+auto workspace_preset_from_string(std::string_view const name) noexcept -> workspace_preset_kind
+{
+    if (name == "explorer") {
+        return workspace_preset_kind::explorer;
+    }
+    if (name == "analysis") {
+        return workspace_preset_kind::analysis;
+    }
+    return workspace_preset_kind::review;
+}
+
 void push_recent(workspace_config& config, std::string const& name, std::string const& path)
 {
     auto& recent = config.recent_databases;
