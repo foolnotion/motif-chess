@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -42,6 +44,11 @@ auto to_ui_highlight(square_highlight const value) -> SquareHighlight
             return SquareHighlight::LastMoveTo;
     }
     std::unreachable();
+}
+
+auto to_ui_int(std::int64_t const value) -> int
+{
+    return static_cast<int>(std::clamp<std::int64_t>(value, 0, std::numeric_limits<int>::max()));
 }
 
 }  // namespace
@@ -210,6 +217,56 @@ void register_play_callbacks(WorkspaceWindow& window,
         });
     window.on_confirm_accepted([&confirmation]() -> void { confirmation.accept(); });
     window.on_confirm_cancelled([&confirmation]() -> void { confirmation.cancel(); });
+}
+
+void publish_explorer(WorkspaceWindow& window, explorer_table const& table)
+{
+    auto rows = std::vector<ContinuationRow> {};
+    rows.reserve(table.rows.size());
+    for (auto const& row : table.rows) {
+        rows.push_back(ContinuationRow {
+            .san = shared_string(row.san),
+            .count = to_ui_int(row.count),
+            .share_text = shared_string(row.share_text),
+            .white_percent = row.split.white,
+            .draw_percent = row.split.draw,
+            .black_percent = row.split.black,
+            .white_elo = shared_string(row.white_elo),
+            .black_elo = shared_string(row.black_elo),
+            .eco = shared_string(row.eco),
+            .opening_name = shared_string(row.opening_name),
+            .accessible_label = shared_string(row.accessible_label),
+        });
+    }
+    window.set_search_continuations(std::make_shared<slint::VectorModel<ContinuationRow>>(std::move(rows)));
+    window.set_search_continuation_total(ContinuationTotal {
+        .count = to_ui_int(table.total.count),
+        .white_percent = table.total.split.white,
+        .draw_percent = table.total.split.draw,
+        .black_percent = table.total.split.black,
+        .accessible_label = shared_string(table.total.accessible_label),
+    });
+}
+
+void register_explorer_callbacks(WorkspaceWindow& window,
+                                 async_board_runner& board,
+                                 activity_probe const& activity,
+                                 std::function<bool()> rows_current)
+{
+    window.on_search_continuation_activated(
+        [&board, activity, rows_current = std::move(rows_current)](slint::SharedString const& san) -> void
+        {
+            if (san.empty()) {
+                return;
+            }
+            (void)run_when_idle(activity(),
+                                [&]() -> void
+                                {
+                                    if (rows_current()) {
+                                        board.play_san(std::string {std::string_view {san.data(), san.size()}});
+                                    }
+                                });
+        });
 }
 
 void install_close_guard(WorkspaceWindow& window, async_board_runner const& board, replace_controller& confirmation)

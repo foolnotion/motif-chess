@@ -120,6 +120,7 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/activity_gate_test.cpp
         source/motif_slint_app/workspace_service_test.cpp
         source/motif_slint_app/game_browser_presenter_test.cpp
+        source/motif_slint_app/explorer_table_test.cpp
         source/motif_slint_app/search_presenter_test.cpp
         source/motif_slint_app/layout_snapshot_test.cpp
     )

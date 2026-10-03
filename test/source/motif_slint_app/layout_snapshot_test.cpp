@@ -5,11 +5,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1266,3 +1268,291 @@ TEST_CASE("workspace layout: the replace confirmation overlay blocks the board a
     CHECK(cancelled == 1);
     CHECK(accepted == 0);
 }
+
+// The explorer fixtures are literal sample data; named constants would hide the figures a test asserts.
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+namespace
+{
+
+auto explorer_row(std::string_view const san, int const count, int const white, int const draw, int const black)
+    -> ContinuationRow
+{
+    return ContinuationRow {
+        .san = slint::SharedString {san},
+        .count = count,
+        .share_text = slint::SharedString {"33%"},
+        .white_percent = white,
+        .draw_percent = draw,
+        .black_percent = black,
+        .white_elo = slint::SharedString {"2412"},
+        .black_elo = slint::SharedString {"2388"},
+        .eco = slint::SharedString {"B20"},
+        .opening_name = slint::SharedString {"Sicilian Defence"},
+        .accessible_label = slint::SharedString {std::string {san} + " row"},
+    };
+}
+
+auto make_explorer_rows(std::size_t const count) -> std::shared_ptr<slint::VectorModel<ContinuationRow>>
+{
+    constexpr auto names = std::array<std::string_view, 12> {"e4", "d4", "Nf3", "c4", "g3", "b3", "f4", "Nc3", "a3", "h3", "b4", "e3"};
+    auto rows = std::vector<ContinuationRow> {};
+    for (auto index = std::size_t {0}; index < count; ++index) {
+        rows.push_back(explorer_row(names.at(index % names.size()), 900 - (static_cast<int>(index) * 10), 50, 30, 20));
+    }
+    return std::make_shared<slint::VectorModel<ContinuationRow>>(std::move(rows));
+}
+
+// An Explorer-preset window with `rows` moves, recording every activated SAN.
+auto make_explorer_workspace(std::size_t const rows, std::vector<std::string>& activated) -> slint::ComponentHandle<WorkspaceWindow>
+{
+    auto window = make_loaded_workspace({.games = 0, .moves = 0});
+    window->set_board_loaded(true);
+    window->set_workspace_preset(WorkspacePreset::Explorer);
+    window->set_search_continuations(make_explorer_rows(rows));
+    window->set_search_continuation_total(ContinuationTotal {.count = 1200,
+                                                             .white_percent = 50,
+                                                             .draw_percent = 30,
+                                                             .black_percent = 20,
+                                                             .accessible_label = slint::SharedString {"Total"}});
+    window->set_search_total_games(1200);
+    window->on_search_continuation_activated([&activated](slint::SharedString const& san) -> void
+                                             { activated.emplace_back(std::string_view {san.data(), san.size()}); });
+    return window;
+}
+
+// Tabs to the explorer table: the first tab stop where Down changes what is drawn.
+// Leaves the first row selected and, when `unselected` is given, stores the
+// render taken just before that first selection.
+auto focus_explorer_table(snapshot_state const& state,
+                          WorkspaceWindow& window,
+                          std::uint32_t const width,
+                          std::vector<slint::Rgb8Pixel>* const unselected = nullptr) -> bool
+{
+    constexpr auto max_tab_stops = 80;
+    for (auto stop = 0; stop < max_tab_stops; ++stop) {
+        press_key_and_render(state, window, slint::platform::key_codes::Tab);
+        auto const before = render_at_size(state, width);
+        press_key_and_render(state, window, slint::platform::key_codes::DownArrow);
+        if (differs(before, render_at_size(state, width))) {
+            press_key_and_render(state, window, slint::platform::key_codes::UpArrow);  // stays on the first row
+            if (unselected != nullptr) {
+                *unselected = before;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// The colour a selected row is filled with: the most common colour among the
+// pixels that changed between the two renders.
+auto selection_fill(std::span<slint::Rgb8Pixel const> const lhs, std::span<slint::Rgb8Pixel const> const rhs) -> slint::Rgb8Pixel
+{
+    auto counts = std::map<std::array<std::uint8_t, 3>, int> {};
+    for (auto index = std::size_t {0}; index < lhs.size(); ++index) {
+        if (lhs[index].r != rhs[index].r || lhs[index].g != rhs[index].g || lhs[index].b != rhs[index].b) {
+            ++counts[{rhs[index].r, rhs[index].g, rhs[index].b}];
+        }
+    }
+    auto const best = std::ranges::max_element(counts, [](auto const& left, auto const& right) -> bool { return left.second < right.second; });
+    if (best == counts.end()) {
+        return slint::Rgb8Pixel {};
+    }
+    return slint::Rgb8Pixel {.r = best->first[0], .g = best->first[1], .b = best->first[2]};
+}
+
+struct explorer_size
+{
+    std::uint32_t width;
+    std::uint32_t height;
+};
+
+}  // namespace
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the explorer table is one tab stop; Up, Down and Enter choose and play a move at narrow and wide sizes",
+          "[motif-slint-app][layout]")
+{
+    for (auto const& size : {explorer_size {.width = 960, .height = 560}, explorer_size {.width = 1600, .height = 900}}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto activated = std::vector<std::string> {};
+        auto window = make_explorer_workspace(3, activated);
+        state->window_adapter->render();
+
+        REQUIRE(focus_explorer_table(*state, *window, size.width));
+        // Down then Up selected and unselected row 0 or stayed on it; Enter plays the selected row.
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        REQUIRE(activated.size() == 1);
+        CHECK(activated.back() == "e4");
+
+        press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);
+        press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);
+        press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);  // clamped at the last row
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        REQUIRE(activated.size() == 2);
+        CHECK(activated.back() == "Nf3");
+
+        press_key_and_render(*state, *window, slint::platform::key_codes::UpArrow);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        REQUIRE(activated.size() == 3);
+        CHECK(activated.back() == "d4");
+
+        // Replacing the rows (a new position) clears the selection: Enter plays nothing.
+        window->set_search_continuations(make_explorer_rows(3));
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        CHECK(activated.size() == 3);
+
+        // One tab stop: the next Tab leaves the table.
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        CHECK(activated.size() == 3);
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the explorer table ignores keys while the workspace is busy or a confirmation is shown",
+          "[motif-slint-app][layout]")
+{
+    auto const state = use_snapshot_platform();
+    auto activated = std::vector<std::string> {};
+    auto window = make_explorer_workspace(3, activated);
+    state->window_adapter->render();
+    REQUIRE(focus_explorer_table(*state, *window, snapshot_platform::width));
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    REQUIRE(activated.size() == 1);
+
+    window->set_search_busy(true);
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(activated.size() == 1);
+    window->set_search_busy(false);
+
+    window->set_browser_busy(true);
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(activated.size() == 1);
+    window->set_browser_busy(false);
+
+    window->set_import_active(true);
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(activated.size() == 1);
+    window->set_import_active(false);
+
+    window->set_busy(true);
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(activated.size() == 1);
+    window->set_busy(false);
+
+    window->set_confirm_visible(true);
+    press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    CHECK(activated.size() == 1);
+    window->set_confirm_visible(false);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the explorer table keeps the sidebar inside the window and scrolls a long move list",
+          "[motif-slint-app][layout]")
+{
+    for (auto const& size : {explorer_size {.width = 960, .height = 560}, explorer_size {.width = 1600, .height = 900}}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto activated = std::vector<std::string> {};
+        auto window = make_explorer_workspace(12, activated);
+        auto const top = render_at_size(*state, size.width);
+
+        auto const reference = top[size.width - 1];
+        auto clipped = 0;
+        for (auto row = 0U; row < size.height; ++row) {
+            for (auto col = size.width - 8; col < size.width; ++col) {
+                auto const pixel = top[(static_cast<std::size_t>(row) * size.width) + col];
+                clipped += (pixel.r != reference.r || pixel.g != reference.g || pixel.b != reference.b) ? 1 : 0;
+            }
+        }
+        CHECK(clipped == 0);
+
+        auto unselected = std::vector<slint::Rgb8Pixel> {};
+        REQUIRE(focus_explorer_table(*state, *window, size.width, &unselected));
+        auto const first_selected = render_at_size(*state, size.width);
+        auto const fill = selection_fill(unselected, first_selected);
+        for (auto step = 0; step < 12; ++step) {
+            press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);
+        }
+        // The last row is selected and scrolled into view: its highlight is drawn.
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        REQUIRE(activated.size() == 1);
+        CHECK(activated.back() == "e3");
+        auto const bottom = render_at_size(*state, size.width);
+        constexpr auto min_highlight_pixels = 2000;
+        CHECK(std::ranges::count_if(bottom,
+                                    [fill](slint::Rgb8Pixel const pixel) -> bool
+                                    { return pixel.r == fill.r && pixel.g == fill.g && pixel.b == fill.b; })
+              > min_highlight_pixels);
+        CHECK(differs(top, bottom));
+
+        // A new position replaces the rows: selection and scroll start over, so the
+        // table looks exactly as it did when focus first reached it.
+        window->set_search_continuations(make_explorer_rows(12));
+        state->window_adapter->render();  // change handlers run while the frame is prepared
+        // Only the sidebar half is compared: one pixel column in the left pane differs
+        // between these frames and is not part of the table.
+        auto const bounds = difference_bounds(unselected, render_at_size(*state, size.width), size.width);
+        CHECK((!bounds.found || std::cmp_less(bounds.right, size.width / 2)));
+    }
+}
+
+namespace
+{
+
+// Clicks down the sidebar column and returns the SANs activated, top to bottom.
+auto click_down_sidebar(snapshot_state const& state, WorkspaceWindow& window, explorer_size const size, std::vector<std::string> const& activated)
+    -> std::vector<std::string>
+{
+    constexpr auto step = 6;
+    auto seen = std::vector<std::string> {};
+    auto const column = static_cast<float>(size.width) - 70.0F;
+    for (auto row = 0; std::cmp_less(row, size.height); row += step) {
+        auto const position = slint::LogicalPosition {slint::Point<float> {.x = column, .y = static_cast<float>(row)}};
+        window.window().dispatch_pointer_move_event(position);
+        window.window().dispatch_pointer_press_event(position, slint::PointerEventButton::Left);
+        window.window().dispatch_pointer_release_event(position, slint::PointerEventButton::Left);
+        state.window_adapter->render();
+        if (activated.size() > seen.size()) {
+            seen.push_back(activated.back());
+        }
+    }
+    return seen;
+}
+
+}  // namespace
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: clicking an explorer row plays it, except while the workspace is busy", "[motif-slint-app][layout]")
+{
+    for (auto const& size : {explorer_size {.width = 960, .height = 560}, explorer_size {.width = 1600, .height = 900}}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto activated = std::vector<std::string> {};
+        auto window = make_explorer_workspace(3, activated);
+        state->window_adapter->render();
+
+        auto const seen = click_down_sidebar(*state, *window, size, activated);
+        REQUIRE_FALSE(seen.empty());
+        CHECK(seen.front() == "e4");  // the first row is the first thing clickable in the column
+
+        auto const before = activated.size();
+        window->set_search_busy(true);
+        state->window_adapter->render();
+        (void)click_down_sidebar(*state, *window, size, activated);
+        CHECK(activated.size() == before);
+        window->set_search_busy(false);
+        window->set_confirm_visible(true);
+        state->window_adapter->render();
+        (void)click_down_sidebar(*state, *window, size, activated);
+        CHECK(activated.size() == before);
+    }
+}
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

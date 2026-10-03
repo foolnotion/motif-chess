@@ -1,6 +1,6 @@
 import { GameBrowser, GameRow } from "game_browser.slint";
 import { GameReviewPanel, NotationToken, SquareHighlight } from "board_notation.slint";
-import { ContinuationRow, PositionSearchPanel, SearchMatchRow } from "position_search.slint";
+import { ContinuationRow, ContinuationTotal, PositionSearchPanel, SearchMatchRow } from "position_search.slint";
 import { Button, LineEdit, Palette, ScrollView, StyleMetrics } from "std-widgets.slint";
 
 export struct RecentEntry {
@@ -86,6 +86,7 @@ export component WorkspaceWindow inherits Window {
     in property <bool> search-has-previous-page;
     in property <bool> search-has-next-page;
     in property <[ContinuationRow]> search-continuations;
+    in property <ContinuationTotal> search-continuation-total;
     in property <int> search-total-games;
     in property <string> search-active-filter-summary;
     in property <bool> search-searching: false;
@@ -139,6 +140,7 @@ export component WorkspaceWindow inherits Window {
     callback search-auto-search-toggled(bool);
     callback search-match-activated(int);
     callback search-page-requested(int);
+    callback search-continuation-activated(string);
 
     function select-preset(preset: WorkspacePreset) {
         root.workspace-preset = preset;
@@ -484,15 +486,18 @@ export component WorkspaceWindow inherits Window {
                     has-previous-page: root.search-has-previous-page;
                     has-next-page: root.search-has-next-page;
                     continuations: root.search-continuations;
+                    continuation-total: root.search-continuation-total;
                     total-games: root.search-total-games;
                     active-filter-summary: root.search-active-filter-summary;
                     searching: root.search-searching;
                     auto-search: root.search-auto-search;
                     interaction-enabled: root.search-interaction-enabled;
+                    compact: root.height < 640px;
                     search-requested() => { root.search-requested(); }
                     auto-search-toggled(enabled) => { root.search-auto-search-toggled(enabled); }
                     match-activated(row) => { root.search-match-activated(row); }
                     page-requested(page) => { root.search-page-requested(page); }
+                    continuation-activated(san) => { root.search-continuation-activated(san); }
                 }
 
                 Rectangle {

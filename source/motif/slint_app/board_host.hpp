@@ -14,12 +14,13 @@
 #include "motif/db/types.hpp"
 #include "motif/slint_app/activity_gate.hpp"
 #include "motif/slint_app/board_presenter.hpp"
+#include "motif/slint_app/explorer_table.hpp"
 #include "motif/slint_app/replace_controller.hpp"
 #include "workspace.h"
 
 // Slint-facing adapters for the board: publishing presenter state to the
 // window, the UI-thread runner around the presenter, and the registrars for
-// every board, play, New Game and close callback. They live here, not in
+// every board, play, explorer-row, New Game and close callback. They live here, not in
 // main.cpp, so the headless tests execute the same registered callbacks the
 // application does.
 namespace motif::slint_app
@@ -241,6 +242,18 @@ void register_play_callbacks(WorkspaceWindow& window,
                              async_board_runner& board,
                              activity_probe const& activity,
                              replace_controller& confirmation);
+
+// Publishes the opening-explorer rows and the total row for the table in
+// PositionSearchPanel. All figures come from make_explorer_table.
+void publish_explorer(WorkspaceWindow& window, explorer_table const& table);
+
+// Activating an explorer row plays its move through the same gated SAN path as
+// typed input. `rows_current` reports whether the rows on screen belong to the
+// position now on the board; a row from an older position is never played.
+void register_explorer_callbacks(WorkspaceWindow& window,
+                                 async_board_runner& board,
+                                 activity_probe const& activity,
+                                 std::function<bool()> rows_current);
 
 // Closing the window with an edited or unsaved game asks first. Cancelling
 // keeps the window and the game; confirming hides the window.
