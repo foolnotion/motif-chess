@@ -242,6 +242,7 @@ void clear_search(WorkspaceWindow& window)
     window.set_search_has_previous_page(false);
     window.set_search_has_next_page(false);
     motif::slint_app::publish_explorer(window, motif::slint_app::explorer_table {});
+    window.set_search_rows_stale(false);
     window.set_search_total_games(0);
     window.set_search_active_filter_summary("");
     window.set_search_searching(false);
@@ -271,7 +272,7 @@ auto filter_summary(motif::db::search_filter const& filter) -> std::string
     return {};
 }
 
-void publish_search(WorkspaceWindow& window, motif::slint_app::search_state const& state)
+void publish_search(WorkspaceWindow& window, motif::slint_app::search_state const& state, bool const rows_stale)
 {
     auto matches = std::vector<SearchMatchRow> {};
     matches.reserve(state.matches.size());
@@ -295,6 +296,7 @@ void publish_search(WorkspaceWindow& window, motif::slint_app::search_state cons
     window.set_search_has_previous_page(state.has_previous_page);
     window.set_search_has_next_page(state.has_next_page);
     motif::slint_app::publish_explorer(window, motif::slint_app::make_explorer_table(state.continuations, state.total_games));
+    window.set_search_rows_stale(rows_stale);
     window.set_search_total_games(to_ui_count(state.total_games));
     window.set_search_active_filter_summary(shared_string(filter_summary(state.active_filter)));
     window.set_search_searching(state.searching);
@@ -848,7 +850,22 @@ class async_search_runner
     // True when the rows on screen are the finished result for `hash`.
     [[nodiscard]] auto shows_position(motif::db::zobrist_hash const hash) const -> bool
     {
-        return state_->presenter && !state_->presenter->state().searching && state_->presenter->state().current_hash == hash;
+        return state_->presenter
+            && motif::slint_app::rows_are_current(state_->presenter->state().searching,
+                                                  state_->presenter->state().current_hash,
+                                                  hash,
+                                                  state_->rows_outdated);
+    }
+
+    // Records the board's position and tells the table whether its rows still
+    // belong to it. Must precede search_if_hash_changed so a started search
+    // (which clears the flag) wins.
+    void note_board_position(motif::db::zobrist_hash const hash)
+    {
+        state_->board_hash = hash;
+        if (auto locked = state_->window.lock()) {
+            (*locked)->set_search_rows_stale(rows_stale(*state_));
+        }
     }
 
     void search(motif::db::zobrist_hash const hash, motif::db::search_filter const& filter)
@@ -857,6 +874,7 @@ class async_search_runner
             return;
         }
         state_->last_hash = hash;
+        state_->rows_outdated = false;
         auto query = state_->presenter->search(hash, filter);
         publish();
         if (!query) {
@@ -887,7 +905,7 @@ class async_search_runner
         if (!state_->presenter || !state_->presenter->state().auto_search) {
             return;
         }
-        if (state_->last_hash && *state_->last_hash == hash) {
+        if (state_->last_hash && *state_->last_hash == hash && !state_->rows_outdated) {
             return;
         }
         search(hash, filter);
@@ -912,8 +930,18 @@ class async_search_runner
 
     void refresh_if_auto(std::optional<motif::db::zobrist_hash> const& hash, motif::db::search_filter const& filter)
     {
-        if (state_->presenter && state_->presenter->state().auto_search && hash) {
+        if (!state_->presenter || !hash) {
+            return;
+        }
+        if (state_->presenter->state().auto_search) {
             search(*hash, filter);
+            return;
+        }
+        // Only a manual Search re-queries, so the rows on screen no longer match
+        // the filter (or the imported data): mark them until it does.
+        state_->rows_outdated = true;
+        if (auto locked = state_->window.lock()) {
+            (*locked)->set_search_rows_stale(rows_stale(*state_));
         }
     }
 
@@ -960,6 +988,10 @@ class async_search_runner
         std::atomic<bool> busy {false};
         std::optional<search_query_result> pending_query;
         std::optional<motif::db::zobrist_hash> last_hash;
+        // Position on the board as last reported; the rows are stale when they were searched for another.
+        std::optional<motif::db::zobrist_hash> board_hash;
+        // The browser filter or the data changed while auto-search was off: the rows predate it.
+        bool rows_outdated {false};
         std::uint64_t epoch {};
         std::shared_ptr<std::atomic<std::uint64_t>> lifetime {std::make_shared<std::atomic<std::uint64_t>>(0)};
         std::function<bool()> retry_on_database_failure;
@@ -967,11 +999,20 @@ class async_search_runner
 
     std::shared_ptr<state> state_;
 
+    [[nodiscard]] static auto rows_stale(state const& shared) -> bool
+    {
+        return shared.presenter
+            && motif::slint_app::rows_are_stale(shared.presenter->state().searching,
+                                                shared.presenter->state().current_hash,
+                                                shared.board_hash,
+                                                shared.rows_outdated);
+    }
+
     void publish()
     {
         if (state_->presenter) {
             if (auto locked = state_->window.lock()) {
-                publish_search(**locked, state_->presenter->state());
+                publish_search(**locked, state_->presenter->state(), rows_stale(*state_));
             }
         }
     }
@@ -1000,7 +1041,7 @@ class async_search_runner
                 (void)shared->presenter->apply_query_error(key.generation, result.error());
             }
             if (auto locked = shared->window.lock()) {
-                publish_search(**locked, shared->presenter->state());
+                publish_search(**locked, shared->presenter->state(), rows_stale(*shared));
             }
         }
         shared->busy.store(false, std::memory_order_release);
@@ -1015,7 +1056,7 @@ class async_search_runner
         if (!query) {
             if (shared->presenter) {
                 if (auto locked = shared->window.lock()) {
-                    publish_search(**locked, shared->presenter->state());
+                    publish_search(**locked, shared->presenter->state(), rows_stale(*shared));
                 }
             }
             return;
@@ -1632,7 +1673,10 @@ auto main(int const argc, char** const argv) -> int
     browser.set_activation_handlers(activation.loaded, activation.failed);
     browser.set_external_activation_handlers(activation.loaded_at, activation.failed_at);
     board.set_position_changed_handler([&search, &browser](motif::db::zobrist_hash const hash) -> void
-                                       { search.search_if_hash_changed(hash, browser.active_filter()); });
+                                       {
+                                           search.note_board_position(hash);
+                                           search.search_if_hash_changed(hash, browser.active_filter());
+                                       });
     auto runner = async_workspace_runner {service, window, browser, board, search};
     search.set_retry_on_database_failure([&importer]() -> bool { return importer.active(); });
     auto import_timer = slint::Timer {};

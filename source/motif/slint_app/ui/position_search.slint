@@ -117,6 +117,10 @@ export component PositionSearchPanel inherits Rectangle {
     in property <bool> interaction-enabled: true;
     // Short window: the matching-games list shrinks to make room for the move table.
     in property <bool> compact: false;
+    // The rows were searched for another position than the board's: shown dimmed,
+    // not selectable and not playable until a new search finishes.
+    in property <bool> stale: false;
+    property <bool> table-enabled: root.interaction-enabled && !root.stale;
     in-out property <int> focused-match-index: -1;
     callback search-requested();
     callback auto-search-toggled(bool);
@@ -141,6 +145,9 @@ export component PositionSearchPanel inherits Rectangle {
         root.selected-continuation = -1;
         root.table-scroll-y = 0px;
     }
+    changed stale => {
+        root.selected-continuation = -1;
+    }
 
     // Keeps the chosen row inside the visible part of the table.
     function reveal-continuation(index: int) {
@@ -152,7 +159,7 @@ export component PositionSearchPanel inherits Rectangle {
     }
 
     function activate-continuation(index: int) {
-        if (root.interaction-enabled && index >= 0 && index < root.continuations.length) {
+        if (root.table-enabled && index >= 0 && index < root.continuations.length) {
             root.continuation-activated(root.continuations[index].san);
         }
     }
@@ -341,11 +348,11 @@ export component PositionSearchPanel inherits Rectangle {
             Text { text: "Continuations (" + root.total-games + " games)"; color: Palette.foreground; font-weight: 600; font-size: 12px; }
             table-scope := FocusScope {
                 vertical-stretch: 1;
-                focus-on-tab-navigation: root.interaction-enabled && root.continuations.length > 0;
+                focus-on-tab-navigation: root.table-enabled && root.continuations.length > 0;
                 accessible-role: list;
-                accessible-label: "Opening explorer moves";
+                accessible-label: root.stale ? "Opening explorer moves, out of date for the board position, press Search" : "Opening explorer moves";
                 key-pressed(event) => {
-                    if (!root.interaction-enabled || root.continuations.length == 0) {
+                    if (!root.table-enabled || root.continuations.length == 0) {
                         return reject;
                     }
                     if (event.text == Key.UpArrow) {
@@ -371,7 +378,7 @@ export component PositionSearchPanel inherits Rectangle {
                     if root.continuations.length > 0: VerticalLayout {
                         spacing: 2px;
                         vertical-stretch: 1;
-                        opacity: root.interaction-enabled ? 1.0 : 0.6;
+                        opacity: root.table-enabled ? 1.0 : 0.6;
                         HorizontalLayout {
                             vertical-stretch: 0;
                             spacing: 6px;
@@ -423,7 +430,7 @@ export component PositionSearchPanel inherits Rectangle {
                                         }
                                     }
                                     TouchArea {
-                                        enabled: root.interaction-enabled;
+                                        enabled: root.table-enabled;
                                         clicked => {
                                             root.selected-continuation = index;
                                             table-scope.focus();
@@ -466,7 +473,8 @@ export component PositionSearchPanel inherits Rectangle {
                         }
                         Text {
                             vertical-stretch: 0;
-                            text: root.selected-continuation >= 0 && root.selected-continuation < root.continuations.length
+                            text: root.stale ? "Rows are for an earlier position - press Search"
+                                : root.selected-continuation >= 0 && root.selected-continuation < root.continuations.length
                                 ? (root.continuations[root.selected-continuation].eco + " " + root.continuations[root.selected-continuation].opening-name)
                                 : "Up/Down chooses a move, Enter plays it";
                             color: Palette.alternate-foreground;

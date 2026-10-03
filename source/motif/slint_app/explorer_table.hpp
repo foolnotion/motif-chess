@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
+#include "motif/db/types.hpp"
 #include "motif/search/opening_stats.hpp"
 
 namespace motif::slint_app
@@ -24,9 +26,12 @@ struct result_split
 struct explorer_row
 {
     std::string san;
+    // Games that played this move from the position (the direct edge count, the
+    // same population as the result split), not games that reached the child
+    // position by another move order.
     std::int64_t count {0};
-    // Share of the position's games, clamped to 0..100. `share_text` shows
-    // "<1%" for a move played in fewer than half a percent of the games.
+    // Share of the position's games that chose this move, 0..100. `share_text`
+    // shows "<1%" for a move played in fewer than half a percent of the games.
     std::int32_t share_percent {0};
     std::string share_text;
     result_split split;
@@ -61,5 +66,20 @@ struct explorer_table
 // is the denominator of every share. Row order is kept as received.
 [[nodiscard]] auto make_explorer_table(std::span<motif::search::opening_stats::continuation const> continuations, std::int64_t total_games)
     -> explorer_table;
+
+// The rows on screen are only actionable for the position and filter they were
+// searched for. `shown` is the searched position, `board` the one on the board
+// (none: no board); `outdated` means the browser filter or the database changed
+// since the search and nothing re-queried (auto-search off). `current` is false
+// while a search runs (its rows are replaced anyway); `stale` is true when a
+// finished result no longer matches, until the next search finishes.
+[[nodiscard]] auto rows_are_current(bool searching,
+                                    motif::db::zobrist_hash shown,
+                                    std::optional<motif::db::zobrist_hash> board,
+                                    bool outdated) noexcept -> bool;
+[[nodiscard]] auto rows_are_stale(bool searching,
+                                  motif::db::zobrist_hash shown,
+                                  std::optional<motif::db::zobrist_hash> board,
+                                  bool outdated) noexcept -> bool;
 
 }  // namespace motif::slint_app

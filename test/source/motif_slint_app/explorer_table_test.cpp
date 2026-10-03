@@ -26,6 +26,7 @@ auto move(std::string san, std::uint32_t const frequency, std::uint32_t const wh
     auto result = continuation {};
     result.san = std::move(san);
     result.frequency = frequency;
+    result.direct_frequency = frequency;
     result.white_wins = white;
     result.draws = draws;
     result.black_wins = black;
@@ -80,11 +81,52 @@ TEST_CASE("explorer table: shares come from the move count over the position's g
     CHECK(whole.rows[0].share_text == "67%");  // 66.67 rounds up
 }
 
-TEST_CASE("explorer table: a share never exceeds 100% even when transpositions inflate a count", "[motif-slint-app][explorer]")
+TEST_CASE("explorer table: a malformed direct count cannot draw a share above 100%", "[motif-slint-app][explorer]")
 {
     auto const table = make_explorer_table(std::vector<continuation> {move("e4", 12, 12, 0, 0)}, 10);
     CHECK(table.rows[0].share_percent == 100);
     CHECK(table.rows[0].share_text == "100%");
+}
+
+TEST_CASE("explorer table: a transposed child counts only the games that played the move from here", "[motif-slint-app][explorer]")
+{
+    // Mirrors opening_stats_test: one game at the position, its child also reached by a
+    // second game through another move order (frequency 2), but played from here once.
+    auto transposed = move("Nf6", 1, 1, 0, 0);
+    transposed.frequency = 2;
+    transposed.direct_frequency = 1;
+    auto const table = make_explorer_table(std::vector<continuation> {transposed}, 1);
+    REQUIRE(table.rows.size() == 1);
+    CHECK(table.rows[0].count == 1);
+    CHECK(table.rows[0].share_text == "100%");
+    CHECK(table.rows[0].accessible_label.starts_with("Nf6, 1 games, 100% of games"));
+}
+
+TEST_CASE("explorer table: rows are current only for a finished search on the board's position and filter", "[motif-slint-app][explorer]")
+{
+    auto const here = motif::db::zobrist_hash {1};
+    auto const elsewhere = motif::db::zobrist_hash {2};
+    using motif::slint_app::rows_are_current;
+    using motif::slint_app::rows_are_stale;
+
+    CHECK(rows_are_current(false, here, here, false));
+    CHECK_FALSE(rows_are_stale(false, here, here, false));
+
+    // Auto-search off: the board moved on and the finished rows did not.
+    CHECK_FALSE(rows_are_current(false, here, elsewhere, false));
+    CHECK(rows_are_stale(false, here, elsewhere, false));
+
+    // Auto-search off: the browser filter changed and nothing re-queried.
+    CHECK_FALSE(rows_are_current(false, here, here, true));
+    CHECK(rows_are_stale(false, here, here, true));
+
+    // A running search replaces the rows, so they are neither current nor flagged stale.
+    CHECK_FALSE(rows_are_current(true, here, here, false));
+    CHECK_FALSE(rows_are_stale(true, here, elsewhere, true));
+
+    // No board: nothing to be stale against and nothing to play on.
+    CHECK_FALSE(rows_are_current(false, here, std::nullopt, false));
+    CHECK_FALSE(rows_are_stale(false, here, std::nullopt, false));
 }
 
 TEST_CASE("explorer table: zero games gives no division and an empty total", "[motif-slint-app][explorer]")
@@ -134,7 +176,7 @@ TEST_CASE("explorer table: every row's accessible label carries move, games, sha
     row.average_black_elo = 2480.0;
     auto const table = make_explorer_table(std::vector<continuation> {row}, 40);
     CHECK(table.rows[0].accessible_label == "Nf3, 20 games, 50% of games, average Elo white 2500 black 2480, white 50%, draws 25%, black 25%");
-    CHECK(table.total.accessible_label == "Total, 40 games, white 50%, draws 25%, black 25%");
+    CHECK(table.total.accessible_label == "Total, 40 games, results of the games that continued: white 50%, draws 25%, black 25%");
 }
 
 TEST_CASE("explorer table: ECO and opening name pass through, absent values are empty", "[motif-slint-app][explorer]")
