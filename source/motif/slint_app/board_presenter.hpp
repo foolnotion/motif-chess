@@ -71,6 +71,10 @@ struct notation_token
     std::uint32_t node {};
     // 0 on the main line, otherwise the variation nesting depth.
     int variation_depth {};
+
+    // The text a view draws before the SAN: opening parentheses then the move
+    // number, without a trailing space.
+    [[nodiscard]] auto lead() const -> std::string { return number.empty() ? open : open + number; }
 };
 
 // Toolkit-neutral board/notation state, mirroring the Qt board_model property

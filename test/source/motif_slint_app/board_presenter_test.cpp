@@ -786,3 +786,18 @@ TEST_CASE("board_presenter: a blocked own piece takes the selection and an oppon
     CHECK_FALSE(presenter.state().selected_square.has_value());
     CHECK_FALSE(presenter.state().unsaved);
 }
+
+TEST_CASE("board_presenter: a notation token's lead is its parentheses and move number", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    auto presenter = loaded_presenter(*database, {"e4", "e5", "Nf3"});
+    presenter.navigate_to(1);
+    REQUIRE(presenter.play_san("c5").has_value());
+
+    auto leads = std::vector<std::string> {};
+    for (auto const& token : presenter.state().notation) {
+        leads.push_back(token.lead());
+    }
+    CHECK(leads == std::vector<std::string> {"1.", "", "(1...", "2."});
+}
