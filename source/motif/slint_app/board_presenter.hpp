@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <tl/expected.hpp>
@@ -46,14 +47,49 @@ enum class square_highlight : std::uint8_t
     last_move_to,
 };
 
+// A move chosen to reach the last rank, waiting for the piece to promote to.
+struct pending_promotion
+{
+    board_square from;
+    board_square to;
+    // Colour of the promoting pawn, so the picker can show matching pieces.
+    bool white {true};
+};
+
+// One move of the notation in PGN order. The lead, SAN and trail text always
+// concatenate (with a space between number and SAN) to the PGN movetext form:
+// `open` holds the "(" that start variations before this move, `number` the
+// move number ("12." or "12...") when PGN requires one, `close` the ")" that
+// end variations after it.
+struct notation_token
+{
+    std::string open;
+    std::string number;
+    std::string san;
+    std::string close;
+    // Navigator node the token activates.
+    std::uint32_t node {};
+    // 0 on the main line, otherwise the variation nesting depth.
+    int variation_depth {};
+};
+
 // Toolkit-neutral board/notation state, mirroring the Qt board_model property
-// set without any Qt or Slint types. Current data model has no persisted
-// comments, NAGs, or variations (motif::db::game exposes only a flat move
-// list), so this state has no fields for them; annotation rendering is
-// expected to be empty until a future story adds that storage.
+// set without any Qt or Slint types. Stored games load as a single line. Moves
+// played on the board add to a tree (main line plus nested variations) held by
+// the navigator; `notation` is that tree in PGN order. Comments and NAGs are
+// not modelled. Nothing here is persisted: an unsaved game or a variation
+// exists only in memory.
 struct board_state
 {
+    // A stored game is on the board.
     bool loaded {false};
+    // A game started by playing on the board (or New Game) is on the board.
+    // Exclusive with `loaded`.
+    bool unsaved {false};
+    // Replacing the board would discard the user's input: an unsaved game with
+    // at least one move, or a loaded game in which a move was added. Pure
+    // navigation never sets it.
+    bool edited {false};
     motif::db::game_id game_id {};
     std::string fen;
     // Zobrist hash of the current position. Empty when the loaded move list
@@ -71,7 +107,13 @@ struct board_state
     std::vector<square_highlight> square_highlights;
     std::size_t current_ply {0};
     std::size_t total_plies {0};
+    // SAN of the main line only.
     std::vector<std::string> san_moves;
+    // The whole tree in PGN order, including variations.
+    std::vector<notation_token> notation;
+    // Navigator node at the cursor; the token carrying it is the current move.
+    std::uint32_t current_node {0};
+    std::optional<pending_promotion> promotion;
     std::string current_san;
     std::string white_name;
     std::string black_name;
@@ -89,12 +131,14 @@ struct board_state
 };
 
 // Toolkit-neutral board/notation presenter. Wraps motif::navigator::game_navigator
-// for move storage, FEN, SAN, and ply state; delegates all legality queries
-// to motif::chess. Never reimplements replay, SAN, or legal-move logic.
+// for the move tree, FEN, SAN, and cursor state; delegates all legality queries
+// to motif::chess. Never reimplements replay, SAN, or legal-move logic. The
+// board is always playable: with nothing loaded it shows the starting position
+// and the first legal move starts an unsaved game.
 class board_presenter
 {
   public:
-    board_presenter() noexcept;
+    board_presenter();
 
     // Applies a game already loaded by another adapter pipeline. This avoids
     // a second database read when browser activation supplies the game.
@@ -104,28 +148,59 @@ class board_presenter
     // Resets every board/notation field except the panel visibility
     // preference, which is a workspace layout choice rather than
     // game-specific state.
-    void clear() noexcept;
+    void clear();
 
     void advance();
     void retreat();
     void jump_to_start();
     void jump_to_end();
+    // Main-line ply, clamped to the main line.
     void navigate_to(std::size_t ply);
+    // Any node of the move tree; an unknown id changes nothing.
+    void navigate_to_node(std::uint32_t node);
 
+    // Selects a square, or plays the move when a piece is selected and the
+    // square is one of its legal targets. A pawn reaching the last rank leaves
+    // the move pending in state().promotion until choose_promotion() or
+    // cancel_promotion().
     auto select_square(int file, int rank) -> board_result<void>;
+    // Resolves a pending promotion with the piece letter (q, r, b, n; either
+    // case). An unknown letter or no pending promotion is an error that
+    // changes nothing.
+    auto choose_promotion(char piece) -> board_result<void>;
+    void cancel_promotion() noexcept;
+    // Plays a move written in SAN from the cursor, exactly as board input
+    // would. This is the entry point for move lists that arrive as text.
+    auto play_san(std::string_view san) -> board_result<void>;
+    // Discards the board and starts an empty unsaved game at the starting
+    // position. Callers confirm first when state().edited.
+    void start_new_game();
     void clear_selection() noexcept;
     void toggle_orientation() noexcept;
     void set_panel_visible(bool visible) noexcept;
 
     [[nodiscard]] auto state() const noexcept -> board_state const&;
+    // PGN movetext of the whole tree: main line with variations in
+    // parentheses, ending with the result (or "*"). Empty when no game is on
+    // the board.
+    [[nodiscard]] auto movetext() const -> std::string;
 
   private:
     motif::navigator::game_navigator navigator_;
     board_state state_;
-    void reset_game_state(std::uint64_t generation, bool panel_visible) noexcept;
+    // A move was added to the loaded game, so replacing it loses input.
+    bool moves_added_ {false};
+    void reset_game_state(std::uint64_t generation, bool panel_visible);
     void load_game_state(motif::db::game_id game_key, motif::db::game const& game);
+    void begin_unsaved_game();
+    auto play_move(board_square from, board_square target, std::optional<char> promotion) -> board_result<void>;
+    void finish_move(motif::navigator::game_navigator::move_outcome outcome);
+    void rebuild_notation();
+    void update_edit_state();
+    void select(board_square square);
 
-    void refresh_navigation(bool refresh_move_list = false);
+    // `tree_changed` rebuilds the main-line SAN list and the notation tokens.
+    void refresh_navigation(bool tree_changed = false);
     void refresh_highlights();
     auto fail(board_error error_value) -> board_result<void>;
 };
