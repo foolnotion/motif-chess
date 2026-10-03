@@ -115,6 +115,75 @@ TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db]
     CHECK(second.error() == motif::db::error_code::io_failure);
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("database_manager::discard_created_bundle keeps a pre-existing directory and unrelated files", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"discard_existing"};
+    std::filesystem::create_directories(tdir.path / "keep_subdir");
+    auto const sentinel = tdir.path / "sentinel.txt";
+    {
+        auto out = std::ofstream {sentinel};
+        out << "user data";
+    }
+    auto const nested_sentinel = tdir.path / "keep_subdir" / "nested.txt";
+    {
+        auto out = std::ofstream {nested_sentinel};
+        out << "nested user data";
+    }
+
+    auto created = motif::db::database_manager::create(tdir.path, "discard-existing");
+    REQUIRE(created.has_value());
+    REQUIRE(std::filesystem::exists(tdir.path / "games.db"));
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    created->discard_created_bundle();
+
+    CHECK(std::filesystem::exists(tdir.path));
+    CHECK(std::filesystem::exists(sentinel));
+    CHECK(std::filesystem::exists(nested_sentinel));
+    CHECK_FALSE(std::filesystem::exists(tdir.path / "games.db"));
+    CHECK_FALSE(std::filesystem::exists(tdir.path / "manifest.json"));
+    CHECK_FALSE(std::filesystem::exists(tdir.path / ".motif.lock"));
+    auto leftovers = std::vector<std::string> {};
+    for (auto const& entry : std::filesystem::directory_iterator {tdir.path}) {
+        leftovers.push_back(entry.path().filename().string());
+    }
+    std::ranges::sort(leftovers);
+    CHECK(leftovers == std::vector<std::string> {"keep_subdir", "sentinel.txt"});
+}
+
+TEST_CASE("database_manager::discard_created_bundle removes a directory that create() made", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"discard_fresh"};
+
+    auto created = motif::db::database_manager::create(tdir.path, "discard-fresh");
+    REQUIRE(created.has_value());
+    REQUIRE(std::filesystem::exists(tdir.path));
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    created->discard_created_bundle();
+
+    CHECK_FALSE(std::filesystem::exists(tdir.path));
+}
+
+TEST_CASE("database_manager::discard_created_bundle leaves an opened bundle on disk", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"discard_opened"};
+    {
+        auto created = motif::db::database_manager::create(tdir.path, "discard-opened");
+        REQUIRE(created.has_value());
+    }
+
+    auto opened = motif::db::database_manager::open(tdir.path);
+    REQUIRE(opened.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    opened->discard_created_bundle();
+
+    CHECK(std::filesystem::exists(tdir.path / "games.db"));
+    CHECK(std::filesystem::exists(tdir.path / "manifest.json"));
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- fork/waitpid branching for the concurrent-writer check.
 TEST_CASE("database_manager::open rejects a concurrent writer process for the same bundle", "[motif-db][database_manager]")
 {
