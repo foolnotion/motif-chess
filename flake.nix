@@ -4,7 +4,7 @@
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
     nixpkgs.url = "github:nixos/nixpkgs/master";
-    foolnotion.url = "github:foolnotion/nur-pkg/master";
+    foolnotion.url = "path:/home/bogdb/src/nur-pkg";
     foolnotion.inputs.nixpkgs.follows = "nixpkgs";
     chesslib.url = "github:foolnotion/chesslib";
     chesslib.inputs.nixpkgs.follows = "nixpkgs";
@@ -50,6 +50,13 @@
               "-DSLINT_FEATURE_SYSTEM_TESTING=ON"
             ];
           });
+          ucilib-fixed = ucilib.packages.${system}.default.overrideAttrs (old: {
+            postPatch = (old.postPatch or "") + ''
+              substituteInPlace source/engine.cpp \
+                --replace-fail '#include <fmt/core.h>' '#include <fmt/format.h>'
+            '';
+          });
+
           glaze-simd-no-ssl = pkgs.glaze.overrideAttrs (old: {
             cmakeFlags = (old.cmakeFlags or [ ]) ++ [
               "-DGLZ_DISABLE_SIMD=OFF"
@@ -138,9 +145,9 @@
               sqlite
               httplib
               reproc
+              ucilib-fixed
               chesslib.packages.${system}.default
               pgnlib.packages.${system}.default
-              ucilib.packages.${system}.default
 
               # additional project deps
               cxxopts

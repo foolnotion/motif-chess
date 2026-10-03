@@ -47,11 +47,11 @@
         "nixpkgs-lib": "nixpkgs-lib_2"
       },
       "locked": {
-        "lastModified": 1775087534,
-        "narHash": "sha256-91qqW8lhL7TLwgQWijoGBbiD4t7/q75KTi8NxjVmSmA=",
+        "lastModified": 1790898470,
+        "narHash": "sha256-zTwuwezD0w3hpga6a6P8emidzAZFyWqlNeRBlpWOOl8=",
         "owner": "hercules-ci",
         "repo": "flake-parts",
-        "rev": "3107b77cd68437b9a76194f0f7f9c55f2329ca5b",
+        "rev": "024633cd702b10285db5cb19b40ad48d2399ba60",
         "type": "github"
       },
       "original": {
@@ -103,27 +103,23 @@
         ]
       },
       "locked": {
-        "lastModified": 1787905527,
-        "narHash": "sha256-PLZwFlEaSwKKRxCEsKzUuSdVS5iTjtbNmtUymhTk1C4=",
-        "owner": "foolnotion",
-        "repo": "nur-pkg",
-        "rev": "61c807696893954972b52eb8499631f50bbe2943",
-        "type": "github"
+        "lastModified": 1790931922,
+        "narHash": "sha256-S3XHSFN0PcNztCNVnQ8zzXExw9u62q/wh+EV5hyCJL8=",
+        "path": "/home/bogdb/src/nur-pkg",
+        "type": "path"
       },
       "original": {
-        "owner": "foolnotion",
-        "ref": "master",
-        "repo": "nur-pkg",
-        "type": "github"
+        "path": "/home/bogdb/src/nur-pkg",
+        "type": "path"
       }
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1778911717,
-        "narHash": "sha256-fDAyhw+3DHRxNASK1Aa8upC5ADltksDdB1O6K2B67qw=",
+        "lastModified": 1790925448,
+        "narHash": "sha256-x465vU2nBaBAd2iReIwnqgvgD0270v9B4thE6mEyfIw=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "72e22d761722b8be589393f0a1ff6e1d1d63b804",
+        "rev": "4e943fbcb4b3ebdf717d552458794b9d52c40700",
         "type": "github"
       },
       "original": {
@@ -150,11 +146,11 @@
     },
     "nixpkgs-lib_2": {
       "locked": {
-        "lastModified": 1774748309,
-        "narHash": "sha256-+U7gF3qxzwD5TZuANzZPeJTZRHS29OFQgkQ2kiTJBIQ=",
+        "lastModified": 1790477367,
+        "narHash": "sha256-oujbxmVKDhci2E4EM3KyAbRUgp5/IsCoiA/LfEF7OOk=",
         "owner": "nix-community",
         "repo": "nixpkgs.lib",
-        "rev": "333c4e0545a6da976206c74db8773a1645b5870a",
+        "rev": "f7cd230690d9fc982d06129f9189b101fddcfa3b",
         "type": "github"
       },
       "original": {
