@@ -142,7 +142,26 @@ TEST_CASE("explorer table: zero games gives no division and an empty total", "[m
     CHECK(empty.total.split.white + empty.total.split.draw + empty.total.split.black == 0);
 }
 
-TEST_CASE("explorer table: rows keep the received order and the total sums the listed moves", "[motif-slint-app][explorer]")
+TEST_CASE("explorer table: rows are ordered by moves played from here, ties keep the received order", "[motif-slint-app][explorer]")
+{
+    // The backend sorts by transposition popularity, so a move reached mostly by other
+    // move orders (frequency 9, played from here once) arrives ahead of a move played
+    // three times from here.
+    auto popular_by_transposition = move("Nc3", 1, 1, 0, 0);
+    popular_by_transposition.frequency = 9;
+    auto played_here = move("e4", 3, 3, 0, 0);
+    played_here.frequency = 4;
+    auto tied_first = move("d4", 1, 0, 1, 0);
+    auto tied_second = move("c4", 1, 0, 0, 1);
+    auto const table = make_explorer_table(std::vector<continuation> {popular_by_transposition, tied_first, played_here, tied_second}, 10);
+    REQUIRE(table.rows.size() == 4);
+    CHECK(table.rows[0].san == "e4");
+    CHECK(table.rows[1].san == "Nc3");
+    CHECK(table.rows[2].san == "d4");
+    CHECK(table.rows[3].san == "c4");
+}
+
+TEST_CASE("explorer table: the total sums the results of the listed moves", "[motif-slint-app][explorer]")
 {
     auto const moves = std::vector<continuation> {move("e4", 60, 30, 20, 10), move("d4", 40, 0, 20, 20)};
     auto const table = make_explorer_table(moves, 100);

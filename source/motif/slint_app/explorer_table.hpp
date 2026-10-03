@@ -63,7 +63,8 @@ struct explorer_table
 [[nodiscard]] auto split_results(std::uint64_t white, std::uint64_t draw, std::uint64_t black) noexcept -> result_split;
 
 // Builds the table from the existing position-search continuations. `total_games`
-// is the denominator of every share. Row order is kept as received.
+// is the denominator of every share. Rows are ordered by direct count, most played
+// first; equal counts keep the order received.
 [[nodiscard]] auto make_explorer_table(std::span<motif::search::opening_stats::continuation const> continuations, std::int64_t total_games)
     -> explorer_table;
 
