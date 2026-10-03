@@ -571,12 +571,8 @@ export component WorkspaceWindow inherits Window {
         width: root.width;
         height: root.height;
         background: #000000aa;
-        // Swallows pointer input meant for the workspace underneath and keeps
-        // keyboard focus on the answers: a click on the backdrop would
-        // otherwise drop it.
-        TouchArea {
-            clicked => { keep-button.focus(); }
-        }
+        // Swallows pointer input meant for the workspace underneath.
+        TouchArea { }
         confirm-scope := FocusScope {
             init => { keep-button.focus(); }
             key-pressed(event) => {
@@ -586,7 +582,8 @@ export component WorkspaceWindow inherits Window {
                 }
                 // Focus stays on the two answers while the overlay is up, so
                 // Tab can never reach (or leave Escape unheard by) the
-                // workspace underneath.
+                // workspace underneath. With neither answer focused (after a
+                // click on the backdrop) Tab lands on the safe one.
                 if (event.text == Key.Tab || event.text == Key.Backtab) {
                     if (keep-button.has-focus) {
                         discard-button.focus();
