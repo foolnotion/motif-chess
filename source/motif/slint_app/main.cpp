@@ -20,10 +20,12 @@
 #include <fmt/format.h>
 #include <slint.h>
 
+#include "motif/slint_app/activity_gate.hpp"
 #include "motif/slint_app/board_presenter.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/import_service.hpp"
 #include "motif/slint_app/pgn_launch_queue.hpp"
+#include "motif/slint_app/replace_controller.hpp"
 #include "motif/slint_app/replace_gate.hpp"
 #include "motif/slint_app/search_presenter.hpp"
 #include "motif/slint_app/workspace_service.hpp"
@@ -295,7 +297,7 @@ void publish_board(WorkspaceWindow& window, motif::slint_app::board_state const&
     notation.reserve(state.notation.size());
     for (auto const& token : state.notation) {
         notation.push_back(NotationToken {
-            .lead = shared_string(token.number.empty() ? token.open : token.open + token.number),
+            .lead = shared_string(token.lead()),
             .san = shared_string(token.san),
             .trail = shared_string(token.close),
             .node = static_cast<std::int32_t>(token.node),
@@ -1496,60 +1498,56 @@ auto workspace_busy(motif::slint_app::import_service const& importer,
                     async_board_runner const& board,
                     async_search_runner const& search) -> bool
 {
-    return importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy();
+    return !motif::slint_app::workspace_activity {.import_active = importer.active(),
+                                                  .workspace_busy = runner.is_busy(),
+                                                  .browser_busy = browser.is_busy(),
+                                                  .board_busy = board.is_busy(),
+                                                  .search_busy = search.is_busy()}
+                .idle();
 }
 
-// In-window confirmation shown before an action replaces a game the user has
-// edited. The decision lives in motif::slint_app::replace_gate; this adapter
-// owns the overlay.
-class replace_confirmation
+using replace_confirmation = motif::slint_app::replace_controller;
+
+// The overlay behind replace_controller: shows the message, hides it, and on
+// cancel bumps the load serial so the review region takes keyboard focus back.
+auto make_replace_confirmation(slint::ComponentHandle<WorkspaceWindow> const& window, async_board_runner const& board)
+    -> replace_confirmation
 {
-  public:
-    replace_confirmation(WorkspaceWindow& window, async_board_runner const& board)
-        : window_(&window)
-        , board_(&board)
-    {
-    }
+    auto const weak = slint::ComponentWeakHandle<WorkspaceWindow> {window};
+    return replace_confirmation {replace_confirmation::hooks {
+        .edited = [&board]() -> bool { return board.edited(); },
+        .show = [weak](std::string_view const action_label) -> void
+        {
+            if (auto locked = weak.lock()) {
+                (*locked)->set_confirm_message("This game has moves that are not saved to any database. Continuing discards them.");
+                (*locked)->set_confirm_action_label(shared_string(action_label));
+                (*locked)->set_confirm_visible(true);
+            }
+        },
+        .hide = [weak]() -> void
+        {
+            if (auto locked = weak.lock()) {
+                (*locked)->set_confirm_visible(false);
+            }
+        },
+        .restore_focus = [weak]() -> void
+        {
+            if (auto locked = weak.lock()) {
+                (*locked)->set_board_load_serial((*locked)->get_board_load_serial() + 1);
+            }
+        },
+    }};
+}
 
-    // Runs `action` at once when nothing would be lost, otherwise shows the
-    // overlay and keeps the action for accept().
-    void request(std::string_view const action_label, std::function<void()> action)
-    {
-        if (gate_.request(board_->edited(), std::move(action)) == motif::slint_app::replace_gate::outcome::ran) {
-            return;
-        }
-        window_->set_confirm_message("This game has moves that are not saved to any database. Replacing it discards them.");
-        window_->set_confirm_action_label(shared_string(action_label));
-        window_->set_confirm_visible(true);
-    }
-
-    void accept()
-    {
-        window_->set_confirm_visible(false);
-        gate_.accept();
-    }
-
-    void cancel()
-    {
-        gate_.cancel();
-        window_->set_confirm_visible(false);
-        // Returns keyboard focus to the board region the overlay took it from.
-        window_->set_board_load_serial(window_->get_board_load_serial() + 1);
-    }
-
-  private:
-    WorkspaceWindow* window_;
-    async_board_runner const* board_;
-    motif::slint_app::replace_gate gate_;
-};
-
-void register_workspace_callbacks(WorkspaceWindow& window,
-                                  motif::slint_app::workspace_service& service,
-                                  motif::slint_app::import_service const& importer,
-                                  async_workspace_runner& runner,
-                                  async_browser_runner& browser,
-                                  async_board_runner& board,
-                                  async_search_runner& search)
+// Every way of leaving the current database or opening another. Each waits for
+// the replace confirmation when an edited or unsaved game is on the board.
+void register_database_open_callbacks(WorkspaceWindow& window,
+                                      motif::slint_app::import_service const& importer,
+                                      async_workspace_runner& runner,
+                                      async_browser_runner& browser,
+                                      async_board_runner& board,
+                                      async_search_runner& search,
+                                      replace_confirmation& confirmation)
 {
     window.on_create_requested(
         [&](slint::SharedString const& dir_path, slint::SharedString const& name) -> void
@@ -1557,15 +1555,20 @@ void register_workspace_callbacks(WorkspaceWindow& window,
             if (importer.active() || browser.is_busy() || board.is_busy() || search.is_busy()) {
                 return;
             }
-            window.set_error_text("");
-            auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
-            auto const trimmed_name = trim_whitespace(std::string_view {name.data(), name.size()});
-            window.set_create_path_text(shared_string(trimmed_path));
-            window.set_create_name_text(shared_string(trimmed_name));
-            if (runner.run_create(std::string {trimmed_path}, std::string {trimmed_name})
-                == async_workspace_runner::start_outcome::accepted) {
-                window.set_busy(true);
-            }
+            confirmation.request("Create database",
+                                 [&, dir_path, name]() -> void
+                                 {
+                                     window.set_error_text("");
+                                     auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
+                                     auto const trimmed_name = trim_whitespace(std::string_view {name.data(), name.size()});
+                                     window.set_create_path_text(shared_string(trimmed_path));
+                                     window.set_create_name_text(shared_string(trimmed_name));
+                                     if (runner.run_create(std::string {trimmed_path}, std::string {trimmed_name})
+                                         == async_workspace_runner::start_outcome::accepted)
+                                     {
+                                         window.set_busy(true);
+                                     }
+                                 });
         });
     window.on_open_requested(
         [&](slint::SharedString const& dir_path) -> void
@@ -1573,12 +1576,16 @@ void register_workspace_callbacks(WorkspaceWindow& window,
             if (importer.active() || browser.is_busy() || board.is_busy() || search.is_busy()) {
                 return;
             }
-            window.set_error_text("");
-            auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
-            window.set_open_path_text(shared_string(trimmed_path));
-            if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
-                window.set_busy(true);
-            }
+            confirmation.request("Open database",
+                                 [&, dir_path]() -> void
+                                 {
+                                     window.set_error_text("");
+                                     auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
+                                     window.set_open_path_text(shared_string(trimmed_path));
+                                     if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
+                                         window.set_busy(true);
+                                     }
+                                 });
         });
     window.on_recent_activated(
         [&](slint::SharedString const& path) -> void
@@ -1586,12 +1593,69 @@ void register_workspace_callbacks(WorkspaceWindow& window,
             if (importer.active() || browser.is_busy() || board.is_busy() || search.is_busy()) {
                 return;
             }
-            window.set_error_text("");
-            auto const trimmed_path = trim_whitespace(std::string_view {path.data(), path.size()});
-            if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
-                window.set_busy(true);
-            }
+            confirmation.request("Open database",
+                                 [&, path]() -> void
+                                 {
+                                     window.set_error_text("");
+                                     auto const trimmed_path = trim_whitespace(std::string_view {path.data(), path.size()});
+                                     if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
+                                         window.set_busy(true);
+                                     }
+                                 });
         });
+}
+
+// Scratch and close: the other ways of leaving the current database.
+void register_database_exit_callbacks(WorkspaceWindow& window,
+                                      motif::slint_app::workspace_service& service,
+                                      motif::slint_app::import_service const& importer,
+                                      async_workspace_runner& runner,
+                                      async_browser_runner& browser,
+                                      async_board_runner& board,
+                                      async_search_runner& search,
+                                      replace_confirmation& confirmation)
+{
+    window.on_scratch_requested(
+        [&]() -> void
+        {
+            if (runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || importer.active()) {
+                return;
+            }
+            confirmation.request("Open scratch database",
+                                 [&]() -> void
+                                 {
+                                     window.set_error_text("");
+                                     if (runner.run_scratch() == async_workspace_runner::start_outcome::accepted) {
+                                         window.set_busy(true);
+                                     }
+                                 });
+        });
+    window.on_close_requested(
+        [&]() -> void
+        {
+            if (runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || importer.active()) {
+                return;
+            }
+            confirmation.request("Close database",
+                                 [&]() -> void
+                                 {
+                                     browser.detach();
+                                     board.detach();
+                                     search.detach();
+                                     service.close_active();
+                                     window.set_error_text("");
+                                     publish_workspace(window, service);
+                                 });
+        });
+}
+
+void register_workspace_callbacks(WorkspaceWindow& window,
+                                  motif::slint_app::workspace_service& service,
+                                  async_workspace_runner const& runner,
+                                  async_browser_runner& browser,
+                                  async_board_runner& board,
+                                  async_search_runner& search)
+{
     window.on_recent_removed(
         [&](slint::SharedString const& path) -> void
         {
@@ -1603,30 +1667,6 @@ void register_workspace_callbacks(WorkspaceWindow& window,
                 window.set_error_text(shared_string(service.error_message()));
                 return;
             }
-            window.set_error_text("");
-            publish_workspace(window, service);
-        });
-    window.on_scratch_requested(
-        [&]() -> void
-        {
-            if (runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || importer.active()) {
-                return;
-            }
-            window.set_error_text("");
-            if (runner.run_scratch() == async_workspace_runner::start_outcome::accepted) {
-                window.set_busy(true);
-            }
-        });
-    window.on_close_requested(
-        [&]() -> void
-        {
-            if (runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || importer.active()) {
-                return;
-            }
-            browser.detach();
-            board.detach();
-            search.detach();
-            service.close_active();
             window.set_error_text("");
             publish_workspace(window, service);
         });
@@ -2061,13 +2101,15 @@ auto main(int const argc, char** const argv) -> int
     auto launch_queue = motif::slint_app::pgn_launch_queue::from_arguments(launch_arguments_list);
     auto import_context_value = import_context {*window, service, importer, runner, browser, board, search, launch_queue, import_timer};
     auto launch_timer = slint::Timer {};
-    auto confirmation = replace_confirmation {*window, board};
+    auto confirmation = make_replace_confirmation(window, board);
 
     clear_browser(*window);
     clear_board(*window);
     clear_search(*window);
     publish_workspace(*window, service);
-    register_workspace_callbacks(*window, service, importer, runner, browser, board, search);
+    register_workspace_callbacks(*window, service, runner, browser, board, search);
+    register_database_open_callbacks(*window, importer, runner, browser, board, search, confirmation);
+    register_database_exit_callbacks(*window, service, importer, runner, browser, board, search, confirmation);
     register_browser_callbacks(*window, browser, importer, runner, board, search, confirmation);
     register_board_callbacks(*window, board, importer, runner, browser, search);
     register_play_callbacks(*window, board, importer, runner, browser, search, confirmation);
@@ -2087,6 +2129,19 @@ auto main(int const argc, char** const argv) -> int
                            import_poll_interval,
                            [&import_context_value, &launch_timer]() -> void { pump_launch_queue(import_context_value, launch_timer); });
     }
+
+    // Closing the window with an edited or unsaved game asks first. Cancelling
+    // keeps the window and the game; confirming hides the window, which ends
+    // the event loop.
+    window->window().on_close_requested(
+        [&confirmation, &window, &board]() -> slint::CloseRequestResponse
+        {
+            if (!board.edited()) {
+                return slint::CloseRequestResponse::HideWindow;
+            }
+            confirmation.request("Quit", [&window]() -> void { window->hide(); });
+            return slint::CloseRequestResponse::KeepWindowShown;
+        });
 
     window->run();
     return 0;
