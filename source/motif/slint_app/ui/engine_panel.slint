@@ -126,6 +126,12 @@ export component EnginePanel inherits Rectangle {
 
         HorizontalLayout {
             spacing: 6px;
+            Text {
+                text: root.limit-kind == 1 ? "Time (ms)" : "Depth";
+                color: Palette.alternate-foreground;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
             SpinBox {
                 horizontal-stretch: 1;
                 minimum: root.limit-kind == 1 ? 100 : 1;

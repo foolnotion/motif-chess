@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -9,6 +10,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <fmt/base.h>
@@ -93,12 +95,17 @@ auto pv_to_san(std::string_view start_fen, std::vector<std::string> const& pv_uc
 // session — private to this translation unit
 // ---------------------------------------------------------------------------
 
+// One event waiting for the subscriber that is being replayed to.
+using replay_event = std::variant<info_event, complete_event, error_event>;
+
 struct session
 {
     std::string analysis_id;
     std::string start_fen;
     analysis_params params;
     std::atomic<bool> terminal {false};
+    // Guards everything from here to `engine`. Client callbacks never run while it
+    // is held.
     std::mutex callback_mutex;
     info_callback on_info;
     complete_callback on_complete;
@@ -109,6 +116,13 @@ struct session
     std::optional<error_event> last_error;
     // Buffered info events so subscribe() can replay them to late subscribers.
     std::vector<info_event> info_history;
+    // A subscribe() is delivering the buffered events. Live events that arrive
+    // meanwhile wait in replay_queue, behind the buffered ones, and are delivered
+    // by that same call, so the subscriber sees every event once and in order.
+    bool replaying {false};
+    std::deque<replay_event> replay_queue;
+    // release_analysis() ran: nothing more is delivered.
+    bool released {false};
     // Declared last so its destructor (which joins the ucilib reader thread)
     // runs before the callback members above are destroyed.
     uci::engine engine;
@@ -123,7 +137,7 @@ struct engine_manager::impl
     std::mutex mutex;
     gtl::flat_hash_map<std::string, engine_config> engines;
     std::vector<std::string> engine_order;
-    gtl::flat_hash_map<std::string, std::unique_ptr<session>> sessions;
+    gtl::flat_hash_map<std::string, std::shared_ptr<session>> sessions;
 };
 
 // ---------------------------------------------------------------------------
@@ -209,7 +223,7 @@ auto make_go_params(analysis_params const& params) -> uci::go_params
     return go_cmd;
 }
 
-auto reserve_analysis_id(gtl::flat_hash_map<std::string, std::unique_ptr<session>> const& sessions) -> std::string
+auto reserve_analysis_id(gtl::flat_hash_map<std::string, std::shared_ptr<session>> const& sessions) -> std::string
 {
     auto analysis_id = generate_analysis_id();
     while (sessions.contains(analysis_id)) {
@@ -218,25 +232,57 @@ auto reserve_analysis_id(gtl::flat_hash_map<std::string, std::unique_ptr<session
     return analysis_id;
 }
 
+// Runs a client callback, keeping a throwing one from reaching the engine's reader thread.
+template<typename Callback, typename Event>
+void invoke_callback(Callback const& callback, Event const& event, std::string_view const name)
+{
+    if (!callback) {
+        return;
+    }
+    try {
+        callback(event);
+    } catch (...) {
+        fmt::print(stderr, "engine_manager: {} callback threw\n", name);
+    }
+}
+
+// Delivers a live event from the reader thread. `record` runs under the session
+// lock and says whether the event is to be delivered at all. While a subscribe()
+// is replaying, the event joins its queue instead; otherwise the subscriber's
+// callback runs here, outside the lock.
+template<typename Event, typename Callback, typename Record>
+void dispatch_live(session& sess, Event const& event, Callback session::* const slot, std::string_view const name, Record const& record)
+{
+    Callback callback;
+    {
+        const std::scoped_lock cb_lock {sess.callback_mutex};
+        if (!record() || sess.released) {
+            return;
+        }
+        if (sess.replaying) {
+            sess.replay_queue.emplace_back(event);
+            return;
+        }
+        callback = sess.*slot;
+    }
+    invoke_callback(callback, event, name);
+}
+
 void register_callbacks(session* sess_ptr)
 {
     sess_ptr->engine.on_info(
         [sess_ptr](uci::info const& info) -> void
         {
-            auto event = map_info(info, sess_ptr->start_fen);
-            info_callback callback;
-            {
-                const std::scoped_lock cb_lock {sess_ptr->callback_mutex};
-                sess_ptr->info_history.push_back(event);
-                callback = sess_ptr->on_info;
-            }
-            if (callback) {
-                try {
-                    callback(event);
-                } catch (...) {
-                    fmt::print(stderr, "engine_manager: on_info callback threw\n");
-                }
-            }
+            auto const event = map_info(info, sess_ptr->start_fen);
+            dispatch_live(*sess_ptr,
+                          event,
+                          &session::on_info,
+                          "on_info",
+                          [&]() -> bool
+                          {
+                              sess_ptr->info_history.push_back(event);
+                              return true;
+                          });
         });
 
     sess_ptr->engine.on_bestmove(
@@ -247,40 +293,34 @@ void register_callbacks(session* sess_ptr)
                 .ponder_uci = best_mv.ponder,
             };
             sess_ptr->terminal.store(true, std::memory_order_relaxed);
-            complete_callback callback;
-            {
-                const std::scoped_lock cb_lock {sess_ptr->callback_mutex};
-                sess_ptr->last_complete = event;
-                callback = sess_ptr->on_complete;
-            }
-            if (callback) {
-                try {
-                    callback(event);
-                } catch (...) {
-                    fmt::print(stderr, "engine_manager: on_complete callback threw\n");
-                }
-            }
+            dispatch_live(*sess_ptr,
+                          event,
+                          &session::on_complete,
+                          "on_complete",
+                          [&]() -> bool
+                          {
+                              sess_ptr->last_complete = event;
+                              return true;
+                          });
         });
 
     sess_ptr->engine.on_error(
         [sess_ptr](std::error_code err) -> void
         {
-            error_callback callback;
             error_event const event {.message = fmt::format("engine crashed: {}", err.message())};
-            {
-                const std::scoped_lock cb_lock {sess_ptr->callback_mutex};
-                if (!sess_ptr->terminal.exchange(true, std::memory_order_relaxed)) {
-                    sess_ptr->last_error = event;
-                    callback = sess_ptr->on_error;
-                }
-            }
-            if (callback) {
-                try {
-                    callback(event);
-                } catch (...) {
-                    fmt::print(stderr, "engine_manager: on_error callback threw\n");
-                }
-            }
+            dispatch_live(*sess_ptr,
+                          event,
+                          &session::on_error,
+                          "on_error",
+                          [&]() -> bool
+                          {
+                              // A crash after a stop or a bestmove is not reported.
+                              if (sess_ptr->terminal.exchange(true, std::memory_order_relaxed)) {
+                                  return false;
+                              }
+                              sess_ptr->last_error = event;
+                              return true;
+                          });
         });
 }
 
@@ -311,7 +351,7 @@ engine_manager::~engine_manager()
     //
     // We move sessions out of the map and quit them outside the lock to avoid
     // any lock-order issues with callbacks that might try to acquire impl_->mutex.
-    gtl::flat_hash_map<std::string, std::unique_ptr<session>> sessions_to_quit;
+    gtl::flat_hash_map<std::string, std::shared_ptr<session>> sessions_to_quit;
     {
         const std::scoped_lock lock {impl_->mutex};
         sessions_to_quit = std::move(impl_->sessions);
@@ -365,7 +405,7 @@ auto engine_manager::start_analysis(analysis_params const& params) -> result<std
         new_id = reserve_analysis_id(impl_->sessions);
     }
 
-    auto sess = std::make_unique<session>();
+    auto sess = std::make_shared<session>();
     sess->analysis_id = new_id;
     sess->start_fen = params.fen.empty() ? std::string {startpos_fen} : params.fen;
     sess->params = params;
@@ -417,23 +457,29 @@ auto engine_manager::stop_analysis(std::string const& analysis_id) -> result<voi
 
 auto engine_manager::release_analysis(std::string const& analysis_id) -> result<void>
 {
-    std::unique_ptr<session> released;
+    std::shared_ptr<session> gone;
     {
         const std::scoped_lock lock {impl_->mutex};
         auto iter = impl_->sessions.find(analysis_id);
         if (iter == impl_->sessions.end()) {
             return tl::unexpected {error_code::analysis_not_found};
         }
-        released = std::move(iter->second);
+        gone = std::move(iter->second);
         impl_->sessions.erase(iter);
+    }
+    {
+        // A replay in progress on another thread stops delivering.
+        const std::scoped_lock cb_lock {gone->callback_mutex};
+        gone->released = true;
     }
     // quit() sends "quit", escalates to terminate and kill, and joins the reader
     // thread, so it blocks and must run outside the manager lock. It also stops
     // a search in progress and still joins the reader of an engine that already
-    // crashed. Once it returns no callback of this session can run, and the
-    // destructor then finds nothing left to join.
-    released->terminal.store(true, std::memory_order_relaxed);
-    static_cast<void>(released->engine.quit());
+    // crashed. Once it returns the engine's reader runs no callback of this
+    // session; a subscribe() that still holds the session sees `released` and
+    // ends, and the session is destroyed when the last holder lets go.
+    gone->terminal.store(true, std::memory_order_relaxed);
+    static_cast<void>(gone->engine.quit());
     return {};
 }
 
@@ -442,45 +488,71 @@ auto engine_manager::subscribe(std::string const& analysis_id,
                                complete_callback const& on_complete,
                                error_callback const& on_error) -> result<subscription>
 {
-    // The replay runs with the manager lock and the session's callback lock held.
-    // The reader thread takes the callback lock for every live event, so every
-    // live event is delivered after the whole replay: replayed lines are never
-    // overtaken by, or interleaved with, newer ones. The manager lock keeps the
-    // session alive meanwhile (release_analysis needs it to erase the session).
-    const std::scoped_lock lock {impl_->mutex};
-    auto iter = impl_->sessions.find(analysis_id);
-    if (iter == impl_->sessions.end()) {
-        return tl::unexpected {error_code::analysis_not_found};
+    // The session is pinned so the manager lock can be dropped: client callbacks
+    // never run under a manager lock and may call back into the manager.
+    std::shared_ptr<session> pinned;
+    {
+        const std::scoped_lock lock {impl_->mutex};
+        auto iter = impl_->sessions.find(analysis_id);
+        if (iter == impl_->sessions.end()) {
+            return tl::unexpected {error_code::analysis_not_found};
+        }
+        pinned = iter->second;
     }
-    auto& sess = *iter->second;
-    const std::scoped_lock cb_lock {sess.callback_mutex};
-    sess.on_info = on_info;
-    sess.on_complete = on_complete;
-    sess.on_error = on_error;
-    // Replay buffered info events first, then the terminal complete or error
-    // event. These events were emitted before subscribe() was called (e.g. a fast
-    // engine that finished, or died, before the subscriber connected).
-    if (on_info) {
+    auto& sess = *pinned;
+
+    // Install the callbacks, queue the buffered events (those emitted before
+    // subscribe() was called: a fast engine that finished, or died, before the
+    // subscriber connected) and start replaying in one critical section. From here
+    // on the reader queues live events behind them instead of delivering them.
+    {
+        const std::scoped_lock cb_lock {sess.callback_mutex};
+        sess.on_info = on_info;
+        sess.on_complete = on_complete;
+        sess.on_error = on_error;
+        if (sess.replaying) {
+            // Another subscribe() is delivering; it now delivers to these callbacks.
+            return subscription {};
+        }
         for (auto const& evt : sess.info_history) {
-            try {
-                on_info(evt);
-            } catch (...) {
-                fmt::print(stderr, "engine_manager: on_info callback threw\n");
+            sess.replay_queue.emplace_back(evt);
+        }
+        if (sess.last_complete.has_value()) {
+            sess.replay_queue.emplace_back(*sess.last_complete);
+        }
+        if (sess.last_error.has_value()) {
+            sess.replay_queue.emplace_back(*sess.last_error);
+        }
+        sess.replaying = true;
+    }
+
+    // Drain the queue outside every lock. Replaying ends in the same critical
+    // section that finds the queue empty, so no live event slips past it or
+    // overtakes a queued one.
+    for (;;) {
+        replay_event next;
+        info_callback info_target;
+        complete_callback complete_target;
+        error_callback error_target;
+        {
+            const std::scoped_lock cb_lock {sess.callback_mutex};
+            if (sess.released || sess.replay_queue.empty()) {
+                sess.replay_queue.clear();
+                sess.replaying = false;
+                break;
             }
+            next = std::move(sess.replay_queue.front());
+            sess.replay_queue.pop_front();
+            info_target = sess.on_info;
+            complete_target = sess.on_complete;
+            error_target = sess.on_error;
         }
-    }
-    if (sess.last_complete.has_value() && on_complete) {
-        try {
-            on_complete(*sess.last_complete);
-        } catch (...) {
-            fmt::print(stderr, "engine_manager: on_complete callback threw\n");
-        }
-    }
-    if (sess.last_error.has_value() && on_error) {
-        try {
-            on_error(*sess.last_error);
-        } catch (...) {
-            fmt::print(stderr, "engine_manager: on_error callback threw\n");
+        if (auto const* const info = std::get_if<info_event>(&next)) {
+            invoke_callback(info_target, *info, "on_info");
+        } else if (auto const* const complete = std::get_if<complete_event>(&next)) {
+            invoke_callback(complete_target, *complete, "on_complete");
+        } else if (auto const* const error = std::get_if<error_event>(&next)) {
+            invoke_callback(error_target, *error, "on_error");
         }
     }
     return subscription {};
