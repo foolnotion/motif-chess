@@ -9,6 +9,7 @@
 #include "motif/slint_app/workspace_service.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 namespace
 {
@@ -356,7 +357,7 @@ TEST_CASE("workspace_service: add_engine ignores an empty or duplicate path and 
     auto const duplicate = service.add_engine(" /opt/engines/stockfish ");
     REQUIRE_FALSE(duplicate.has_value());
     CHECK(duplicate.error() == motif::slint_app::error_code::invalid_argument);
-    CHECK(service.error_message().find("already") != std::string_view::npos);
+    CHECK_THAT(std::string {service.error_message()}, Catch::Matchers::ContainsSubstring("already"));
 
     auto const engines = service.engines();
     CHECK(engines.paths.size() == 2);
@@ -364,6 +365,8 @@ TEST_CASE("workspace_service: add_engine ignores an empty or duplicate path and 
     CHECK(engines.selected == "/opt/engines/lc0");
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("workspace_service: remove_engine moves the selection to the first remaining engine", "[motif-slint-app]")
 {
     tmp_dir const tmp {"engine_remove"};
@@ -427,20 +430,21 @@ TEST_CASE("workspace_service: engine options persist, and out-of-range values ar
     auto const config_path = tmp_config {tmp.path}.path;
     auto service = motif::slint_app::workspace_service {config_path};
 
-    REQUIRE(service.set_engine_options(4, analysis_limit_kind::movetime, 30, 5000).has_value());
+    REQUIRE(service.set_engine_options({.multipv = 4, .limit = analysis_limit_kind::movetime, .depth = 30, .movetime_ms = 5000}).has_value());
     auto const restored = motif::slint_app::workspace_service {config_path}.engines();
     CHECK(restored.multipv == 4);
     CHECK(restored.limit == analysis_limit_kind::movetime);
     CHECK(restored.depth == 30);
     CHECK(restored.movetime_ms == 5000);
 
-    REQUIRE(service.set_engine_options(0, analysis_limit_kind::depth, 500, 5).has_value());
+    REQUIRE(service.set_engine_options({.multipv = 0, .limit = analysis_limit_kind::depth, .depth = 500, .movetime_ms = 5}).has_value());
     auto const low = service.engines();
     CHECK(low.multipv == 1);
     CHECK(low.depth == 99);
     CHECK(low.movetime_ms == 100);
 
-    REQUIRE(service.set_engine_options(50, analysis_limit_kind::movetime, 0, 9'000'000).has_value());
+    REQUIRE(service.set_engine_options({.multipv = 50, .limit = analysis_limit_kind::movetime, .depth = 0, .movetime_ms = 9'000'000})
+                .has_value());
     auto const high = service.engines();
     CHECK(high.multipv == 5);
     CHECK(high.depth == 1);
@@ -478,7 +482,8 @@ TEST_CASE("workspace_service: engine changes that cannot be saved are rolled bac
     CHECK_FALSE(service.add_engine("/e/three").has_value());
     CHECK_FALSE(service.remove_engine("/e/two").has_value());
     CHECK_FALSE(service.select_engine("/e/one").has_value());
-    CHECK_FALSE(service.set_engine_options(5, analysis_limit_kind::movetime, 10, 2000).has_value());
+    CHECK_FALSE(service.set_engine_options({.multipv = 5, .limit = analysis_limit_kind::movetime, .depth = 10, .movetime_ms = 2000})
+                    .has_value());
 
     auto const engines = service.engines();
     CHECK(engines.paths == std::vector<std::string> {"/e/one", "/e/two"});

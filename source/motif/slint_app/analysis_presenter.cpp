@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <set>
@@ -53,7 +54,7 @@ auto read_position_clock(std::string const& fen) -> position_clock
     if (fields.size() > move_number_field) {
         auto number = 0;
         auto const& text = fields[move_number_field];
-        auto const parsed = std::from_chars(text.data(), text.data() + text.size(), number);
+        auto const parsed = std::from_chars(std::to_address(text.begin()), std::to_address(text.end()), number);
         if (parsed.ec == std::errc {} && number >= 1) {
             clock.move_number = number;
         }

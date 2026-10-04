@@ -132,7 +132,7 @@ struct analysis_service::impl
             {
                 std::unique_lock lock {mutex};
                 wake.wait(lock, [this]() -> bool { return pending.has_value() || stopping; });
-                if (stopping) {
+                if (stopping || !pending) {
                     break;
                 }
                 next = std::move(*pending);

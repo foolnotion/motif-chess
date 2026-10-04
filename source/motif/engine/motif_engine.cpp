@@ -266,7 +266,7 @@ void register_callbacks(session* sess_ptr)
         [sess_ptr](std::error_code err) -> void
         {
             error_callback callback;
-            error_event event {.message = fmt::format("engine crashed: {}", err.message())};
+            error_event const event {.message = fmt::format("engine crashed: {}", err.message())};
             {
                 const std::scoped_lock cb_lock {sess_ptr->callback_mutex};
                 if (!sess_ptr->terminal.exchange(true, std::memory_order_relaxed)) {

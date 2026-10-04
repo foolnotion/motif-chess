@@ -17,6 +17,7 @@
 #include "motif/slint_app/analysis_host.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <slint.h>
 
 #include "fake_uci_engine.hpp"
@@ -28,7 +29,8 @@
 
 // Reading a published Slint model back goes through its virtual interface, which
 // the portability check flags at every instantiation point in this file.
-// NOLINTBEGIN(portability-template-virtual-member-function)
+// Test values are plain numbers.
+// NOLINTBEGIN(portability-template-virtual-member-function,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 namespace
 {
 
@@ -305,7 +307,7 @@ TEST_CASE("analysis host: an empty or duplicate path is ignored with a visible m
 
     test.add_engine("/opt/engines/stockfish");
     CHECK(test.names().size() == 1);
-    CHECK(test.notice().find("already") != std::string::npos);
+    CHECK_THAT(test.notice(), Catch::Matchers::ContainsSubstring("already"));
 }
 
 TEST_CASE("analysis host: an engine list that cannot be saved is rolled back and the error shown", "[motif-slint-app][analysis][host]")
@@ -326,6 +328,8 @@ TEST_CASE("analysis host: an engine list that cannot be saved is rolled back and
     CHECK(test.config.engines().paths.size() == 1);
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("analysis host: selection, removal and option changes that cannot be saved leave the stored state on screen",
           "[motif-slint-app][analysis][host]")
 {
@@ -411,6 +415,8 @@ TEST_CASE("analysis host: a burst of engine lines is one scheduled flush that dr
     test.stop();
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("analysis host: a burst queued for an older workspace epoch or session is not drawn", "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
@@ -897,6 +903,8 @@ TEST_CASE("analysis host: the controls that shape a session are locked while ana
     test.stop();
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("analysis host: engine list changes wait for a workspace operation, but Start and Stop never do", "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
@@ -940,4 +948,4 @@ TEST_CASE("analysis host: engine list changes wait for a workspace operation, bu
         CHECK_FALSE(test.window->get_analysis_active());
     }
 }
-// NOLINTEND(portability-template-virtual-member-function)
+// NOLINTEND(portability-template-virtual-member-function,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

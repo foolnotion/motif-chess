@@ -158,14 +158,14 @@ struct async_analysis_runner::impl
          analysis_environment environment_value,
          position_provider position_value)
         : window(std::move(window_value))
-        , config(config_value)
+        , config(&config_value)
         , environment(std::move(environment_value))
         , position(std::move(position_value))
     {
     }
 
     slint::ComponentWeakHandle<WorkspaceWindow> window;
-    workspace_service& config;
+    workspace_service* config;
     analysis_environment environment;
     position_provider position;
     analysis_presenter presenter;
@@ -175,11 +175,10 @@ struct async_analysis_runner::impl
     // Bumped when the workspace changes: events of the old workspace are dropped.
     std::uint64_t epoch {1};
     bool follow_scheduled {false};
-    bool alive {true};
     // Declared last: its destructor ends the engine threads that call into `inbox`.
     std::unique_ptr<analysis_service> service;
 
-    void publish()
+    void publish() const
     {
         if (auto locked = window.lock()) {
             publish_analysis(**locked, presenter.state());
@@ -188,7 +187,7 @@ struct async_analysis_runner::impl
 
     // Runs `task` on the event loop after `delay`, unless the runner was shut
     // down or destroyed by then.
-    void schedule(std::weak_ptr<impl> const& self, std::chrono::milliseconds const delay, void (impl::*task)())
+    void schedule(std::weak_ptr<impl> const& self, std::chrono::milliseconds const delay, void (impl::*task)()) const
     {
         auto const guard = lifetime;
         auto const token = guard->load(std::memory_order_acquire);
@@ -261,7 +260,9 @@ struct async_analysis_runner::impl
     void persist_options()
     {
         auto const& state = presenter.state();
-        if (!config.set_engine_options(state.multipv, state.limit, state.depth, state.movetime_ms)) {
+        if (!config->set_engine_options(engine_options {
+                .multipv = state.multipv, .limit = state.limit, .depth = state.depth, .movetime_ms = state.movetime_ms}))
+        {
             reload_after_failure();
         }
     }
@@ -269,8 +270,8 @@ struct async_analysis_runner::impl
     // A change that could not be saved is not adopted: show the stored state again.
     void reload_after_failure()
     {
-        presenter.configure(config.engines());
-        presenter.set_notice(std::string {config.error_message()});
+        presenter.configure(config->engines());
+        presenter.set_notice(std::string {config->error_message()});
     }
 };
 
@@ -297,7 +298,7 @@ async_analysis_runner::~async_analysis_runner()
 
 void async_analysis_runner::load()
 {
-    impl_->presenter.configure(impl_->config.engines());
+    impl_->presenter.configure(impl_->config->engines());
     impl_->publish();
 }
 
@@ -356,7 +357,7 @@ void async_analysis_runner::workspace_changed()
 void async_analysis_runner::select_engine(int const index)
 {
     if (auto const path = impl_->presenter.select_engine(index)) {
-        if (!impl_->config.select_engine(*path)) {
+        if (!impl_->config->select_engine(*path)) {
             impl_->reload_after_failure();
         }
     }
@@ -368,12 +369,12 @@ void async_analysis_runner::add_engine(std::string_view const path)
     if (impl_->presenter.locked()) {
         return;
     }
-    if (!impl_->config.add_engine(path)) {
-        impl_->presenter.set_notice(std::string {impl_->config.error_message()});
+    if (!impl_->config->add_engine(path)) {
+        impl_->presenter.set_notice(std::string {impl_->config->error_message()});
         impl_->publish();
         return;
     }
-    impl_->presenter.configure(impl_->config.engines());
+    impl_->presenter.configure(impl_->config->engines());
     if (auto const locked = impl_->window.lock()) {
         (*locked)->set_analysis_engine_path_text("");
     }
@@ -387,10 +388,10 @@ void async_analysis_runner::remove_engine()
         return;
     }
     auto const path = state.engines[static_cast<std::size_t>(state.selected_engine)].path;
-    if (!impl_->config.remove_engine(path)) {
+    if (!impl_->config->remove_engine(path)) {
         impl_->reload_after_failure();
     } else {
-        impl_->presenter.configure(impl_->config.engines());
+        impl_->presenter.configure(impl_->config->engines());
     }
     impl_->publish();
 }

@@ -94,7 +94,7 @@ class workspace_service
 
     // Stores the MultiPV count and both limit values (clamped to their ranges)
     // together with which one the next analysis uses.
-    auto set_engine_options(int multipv, analysis_limit_kind limit, int depth, int movetime_ms) -> result<void>;
+    auto set_engine_options(engine_options const& options) -> result<void>;
 
     [[nodiscard]] auto active_database() noexcept -> motif::db::database_manager* { return db_ ? &*db_ : nullptr; }
 
