@@ -329,6 +329,7 @@ TEST_CASE("engine_manager: on_error fires when engine crashes during analysis", 
     CHECK(wait_until(error_seen));
 }
 
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 TEST_CASE("engine_manager: subscribe delivers a crash exactly once, whether it happened before or after subscribing", "[motif-engine]")
 {
     auto const fake_engine = fake_uci::fake_engine {fake_uci::crash_body()};
@@ -396,6 +397,8 @@ auto process_gone(pid_t const process) -> bool
 
 }  // namespace
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("engine_manager: release_analysis ends a running session and its engine process", "[motif-engine]")
 {
     auto const fake_engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body()};
@@ -521,6 +524,8 @@ TEST_CASE("engine_manager: destroying the manager ends every live engine process
     CHECK(process_gone(second_process));
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("engine_manager: a subscriber attached to a fast session sees each line once, in order, then the completion last", "[motif-engine]")
 {
     // The fake engine prints 400 numbered lines at once, so the subscription lands
@@ -562,12 +567,14 @@ TEST_CASE("engine_manager: a subscriber attached to a fast session sees each lin
             }));
         std::scoped_lock const lock {mutex};
         REQUIRE(scores.size() == 400);
-        CHECK(*complete_after == 400);
+        CHECK(complete_after.value_or(0) == 400);
         for (auto index = std::size_t {0}; index < scores.size(); ++index) {
             REQUIRE(scores[index] == static_cast<int>(index) + 1);
         }
     }
 }
+
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 // ---------------------------------------------------------------------------
 // pv_to_san

@@ -175,6 +175,8 @@ inline auto process_alive(pid_t const process) -> bool
     return ::kill(process, 0) == 0;
 }
 
+constexpr auto poll_interval = std::chrono::milliseconds {5};
+
 // Polls `done` until it holds or the timeout passes.
 template<typename Predicate>
 auto wait_for(Predicate const& done, std::chrono::milliseconds const timeout = std::chrono::seconds {10}) -> bool
@@ -184,7 +186,7 @@ auto wait_for(Predicate const& done, std::chrono::milliseconds const timeout = s
         if (std::chrono::steady_clock::now() >= deadline) {
             return done();
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds {5});
+        std::this_thread::sleep_for(poll_interval);
     }
     return true;
 }

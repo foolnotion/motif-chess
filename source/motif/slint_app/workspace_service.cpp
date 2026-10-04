@@ -265,15 +265,14 @@ auto workspace_service::select_engine(std::string const& path) -> result<void>
     return {};
 }
 
-auto workspace_service::set_engine_options(int const multipv, analysis_limit_kind const limit, int const depth, int const movetime_ms)
-    -> result<void>
+auto workspace_service::set_engine_options(engine_options const& options) -> result<void>
 {
     auto next_config = config_;
     auto& prefs = next_config.ui_preferences;
-    prefs.engine_multipv = clamp_engine_multipv(multipv);
-    prefs.engine_limit = std::string {to_string(limit)};
-    prefs.engine_depth = clamp_engine_depth(depth);
-    prefs.engine_movetime_ms = clamp_engine_movetime_ms(movetime_ms);
+    prefs.engine_multipv = clamp_engine_multipv(options.multipv);
+    prefs.engine_limit = std::string {to_string(options.limit)};
+    prefs.engine_depth = clamp_engine_depth(options.depth);
+    prefs.engine_movetime_ms = clamp_engine_movetime_ms(options.movetime_ms);
     if (auto persisted = persist_config(next_config); !persisted) {
         return persisted;
     }

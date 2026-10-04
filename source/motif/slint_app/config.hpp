@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -74,18 +75,28 @@ constexpr int default_engine_movetime_ms {1000};
 
 [[nodiscard]] constexpr auto clamp_engine_multipv(int const value) noexcept -> int
 {
-    return value < min_engine_multipv ? min_engine_multipv : (value > max_engine_multipv ? max_engine_multipv : value);
+    return std::clamp(value, min_engine_multipv, max_engine_multipv);
 }
 
 [[nodiscard]] constexpr auto clamp_engine_depth(int const value) noexcept -> int
 {
-    return value < min_engine_depth ? min_engine_depth : (value > max_engine_depth ? max_engine_depth : value);
+    return std::clamp(value, min_engine_depth, max_engine_depth);
 }
 
 [[nodiscard]] constexpr auto clamp_engine_movetime_ms(int const value) noexcept -> int
 {
-    return value < min_engine_movetime_ms ? min_engine_movetime_ms : (value > max_engine_movetime_ms ? max_engine_movetime_ms : value);
+    return std::clamp(value, min_engine_movetime_ms, max_engine_movetime_ms);
 }
+
+// The options an analysis is started with: MultiPV, which limit applies, and
+// the stored value of each limit. Set together because they are saved together.
+struct engine_options
+{
+    int multipv {default_engine_multipv};
+    analysis_limit_kind limit {analysis_limit_kind::depth};
+    int depth {default_engine_depth};
+    int movetime_ms {default_engine_movetime_ms};
+};
 
 // The engine panel's persisted choices (Story 13.3), normalised: `selected` is
 // always one of `paths` (the first when the stored choice is gone) and every

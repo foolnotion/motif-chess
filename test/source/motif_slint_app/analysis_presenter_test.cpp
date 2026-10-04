@@ -6,11 +6,14 @@
 #include "motif/slint_app/analysis_presenter.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "motif/engine/engine_manager.hpp"
 #include "motif/slint_app/analysis_service.hpp"
 #include "motif/slint_app/config.hpp"
 
+// Test values are plain numbers.
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 namespace
 {
 
@@ -19,6 +22,7 @@ using motif::slint_app::analysis_limit_kind;
 using motif::slint_app::analysis_presenter;
 using motif::slint_app::analysis_status;
 using motif::slint_app::engine_settings;
+using Catch::Matchers::ContainsSubstring;
 
 constexpr auto start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 constexpr auto black_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
@@ -31,6 +35,8 @@ auto make_settings(std::vector<std::string> paths, std::string selected = {}) ->
     return settings;
 }
 
+// The three ints are rank, depth and centipawns, always passed positionally in the tests.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 auto make_info(int const rank, int const depth, int const centipawns, std::vector<std::string> san = {}) -> info_event
 {
     auto event = info_event {};
@@ -44,6 +50,14 @@ auto make_info(int const rank, int const depth, int const centipawns, std::vecto
     return event;
 }
 
+// The value of an optional the test requires to be set; the test stops here otherwise.
+template<typename Value>
+auto unwrap(std::optional<Value> const& value) -> Value
+{
+    REQUIRE(value.has_value());
+    return value.value_or(Value {});
+}
+
 // A presenter with one engine, analysing the starting position.
 struct running
 {
@@ -53,9 +67,7 @@ struct running
     explicit running(std::string const& fen = start_fen)
     {
         presenter.configure(make_settings({"/opt/engines/stockfish"}));
-        auto started = presenter.begin(fen);
-        REQUIRE(started);
-        request = *started;
+        request = unwrap(presenter.begin(fen));
     }
 };
 
@@ -118,25 +130,23 @@ TEST_CASE("analysis presenter: begin asks for the selected engine, MultiPV and e
     settings.movetime_ms = 2500;
     presenter.configure(settings);
 
-    auto const by_depth = presenter.begin(start_fen);
-    REQUIRE(by_depth);
-    CHECK(by_depth->engine_name == "lc0");
-    CHECK(by_depth->engine_path == "/opt/b/lc0");
-    CHECK(by_depth->fen == start_fen);
-    CHECK(by_depth->multipv == 4);
-    CHECK(by_depth->depth == 30);
-    CHECK_FALSE(by_depth->movetime_ms.has_value());
-    CHECK(by_depth->generation != 0);
+    auto const by_depth = unwrap(presenter.begin(start_fen));
+    CHECK(by_depth.engine_name == "lc0");
+    CHECK(by_depth.engine_path == "/opt/b/lc0");
+    CHECK(by_depth.fen == start_fen);
+    CHECK(by_depth.multipv == 4);
+    CHECK(by_depth.depth == 30);
+    CHECK_FALSE(by_depth.movetime_ms.has_value());
+    CHECK(by_depth.generation != 0);
     CHECK(presenter.state().status == analysis_status::analysing);
     CHECK(presenter.state().status_text == "Analysing");
 
     presenter.stop();
     presenter.set_limit(analysis_limit_kind::movetime);
-    auto const by_time = presenter.begin(start_fen);
-    REQUIRE(by_time);
-    CHECK(by_time->movetime_ms == 2500);
-    CHECK_FALSE(by_time->depth.has_value());
-    CHECK(by_time->generation > by_depth->generation);
+    auto const by_time = unwrap(presenter.begin(start_fen));
+    CHECK(by_time.movetime_ms == 2500);
+    CHECK_FALSE(by_time.depth.has_value());
+    CHECK(by_time.generation > by_depth.generation);
 }
 
 TEST_CASE("analysis presenter: option values are clamped to their ranges", "[motif-slint-app][analysis]")
@@ -180,7 +190,7 @@ TEST_CASE("analysis presenter: each MultiPV line shows rank, depth, White-relati
     CHECK(lines[1].rank == 2);
     CHECK(lines[1].score == "-0.30");
     CHECK(lines[1].moves == "1.d4 d5");
-    CHECK(lines[0].accessible_label.find("+0.35") != std::string::npos);
+    CHECK_THAT(lines[0].accessible_label, ContainsSubstring("+0.35"));
 
     // A deeper line for the same rank replaces it.
     CHECK(test.presenter.apply_info(test.request.generation, make_info(1, 22, 41, {"e4", "c5"})));
@@ -208,8 +218,8 @@ TEST_CASE("analysis presenter: a line without SAN is shown as unavailable, never
 
     REQUIRE(test.presenter.state().lines.size() == 1);
     CHECK(test.presenter.state().lines[0].moves.empty());
-    CHECK(test.presenter.state().lines[0].accessible_label.find("no line available") != std::string::npos);
-    CHECK(test.presenter.state().lines[0].accessible_label.find("e2e4") == std::string::npos);
+    CHECK_THAT(test.presenter.state().lines[0].accessible_label, ContainsSubstring("no line available"));
+    CHECK_THAT(test.presenter.state().lines[0].accessible_label, !ContainsSubstring("e2e4"));
 }
 
 TEST_CASE("analysis presenter: info without a score or for a rank beyond MultiPV is ignored", "[motif-slint-app][analysis]")
@@ -217,7 +227,7 @@ TEST_CASE("analysis presenter: info without a score or for a rank beyond MultiPV
     auto test = running {};
     test.presenter.stop();
     test.presenter.set_multipv(2);
-    test.request = *test.presenter.begin(start_fen);
+    test.request = unwrap(test.presenter.begin(start_fen));
 
     auto no_score = make_info(1, 3, 0);
     no_score.score = {};
@@ -284,9 +294,8 @@ TEST_CASE("analysis presenter: an engine crash is visible with its message and S
     CHECK(state.lines.size() == 1);
 
     // Restart is the ordinary Start, with a new session.
-    auto const again = test.presenter.begin(start_fen);
-    REQUIRE(again);
-    CHECK(again->generation > test.request.generation);
+    auto const again = unwrap(test.presenter.begin(start_fen));
+    CHECK(again.generation > test.request.generation);
     CHECK(test.presenter.state().lines.empty());
 }
 
@@ -294,10 +303,9 @@ TEST_CASE("analysis presenter: a start failure says only to check the path, nami
 {
     auto presenter = analysis_presenter {};
     presenter.configure(make_settings({"/nowhere/missing-engine"}));
-    auto const request = presenter.begin(start_fen);
-    REQUIRE(request);
+    auto const request = unwrap(presenter.begin(start_fen));
 
-    CHECK(presenter.apply_start_failure(request->generation));
+    CHECK(presenter.apply_start_failure(request.generation));
 
     auto const& state = presenter.state();
     CHECK(state.status == analysis_status::failed);
@@ -327,13 +335,12 @@ TEST_CASE("analysis presenter: a position change clears the lines and drops the 
     CHECK(test.presenter.state().lines.empty());
     CHECK(test.presenter.state().status == analysis_status::analysing);
 
-    auto const next = test.presenter.restart(black_fen);
-    REQUIRE(next);
-    CHECK(next->fen == black_fen);
-    CHECK(next->generation > test.request.generation);
+    auto const next = unwrap(test.presenter.restart(black_fen));
+    CHECK(next.fen == black_fen);
+    CHECK(next.generation > test.request.generation);
     CHECK_FALSE(test.presenter.restart_pending());
     CHECK(test.presenter.analysed_fen() == black_fen);
-    CHECK(test.presenter.apply_info(next->generation, make_info(1, 10, 20, {"e5"})));
+    CHECK(test.presenter.apply_info(next.generation, make_info(1, 10, 20, {"e5"})));
     CHECK(test.presenter.state().lines[0].score == "-0.20");
 }
 
@@ -422,3 +429,5 @@ TEST_CASE("analysis presenter: a removed selected engine falls back to the first
     CHECK(presenter.state().selected_engine == -1);
     CHECK(presenter.state().status_text == "No engine configured - add an engine path");
 }
+
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

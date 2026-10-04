@@ -18,6 +18,8 @@
 #include "fake_uci_engine.hpp"
 #include "motif/engine/engine_manager.hpp"
 
+// The test engines and timings are plain numbers.
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 namespace
 {
 
@@ -88,6 +90,8 @@ auto process_gone(pid_t const process) -> bool
 
 }  // namespace
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("analysis service: a session reports its lines and completion with the epoch and generation it was asked for", "[motif-slint-app][analysis]")
 {
     auto const engine = fake_uci::fake_engine {fake_uci::fast_complete_body()};
@@ -176,6 +180,8 @@ TEST_CASE("analysis service: stop releases the engine and silences its late even
     CHECK(events.count<motif::engine::complete_event>(2) == 0);
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("analysis service: a new session replaces the old one, which is released before the next engine runs", "[motif-slint-app][analysis]")
 {
     auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body()};
@@ -200,6 +206,8 @@ TEST_CASE("analysis service: a new session replaces the old one, which is releas
     CHECK(process_gone(processes[1]));
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("analysis service: a burst of starts leaves one live engine and the last position", "[motif-slint-app][analysis]")
 {
     auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body()};
@@ -354,3 +362,5 @@ TEST_CASE("analysis service: shutdown during a hung handshake returns within the
     // The superseded start never reports: shutdown silenced its generation.
     CHECK(events.events().empty());
 }
+
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
