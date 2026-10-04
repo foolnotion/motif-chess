@@ -1882,4 +1882,32 @@ TEST_CASE("workspace layout: the engine panel locks its engine and option contro
     CHECK(removed == 0);
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: a scrolled engine line list keeps its position when the host republishes the lines",
+          "[motif-slint-app][layout][analysis]")
+{
+    // The host replaces the whole line model about ten times a second.
+    auto const state = use_snapshot_platform(narrow_analysis.width, narrow_analysis.height);
+    auto window = make_analysis_workspace(*state);
+    window->set_analysis_active(true);
+    window->set_analysis_lines(make_analysis_lines(3));
+    auto const top = render_at_size(*state, narrow_analysis.width);
+
+    // The list shows one row at this size; scroll to the last one.
+    auto const over_list = slint::LogicalPosition {slint::Point<float> {.x = 700.0F, .y = 236.0F}};
+    window->window().dispatch_pointer_move_event(over_list);
+    window->window().dispatch_pointer_scroll_event(over_list, 0.0F, -200.0F);
+    // Scrolling is animated; let the animation clock run to completion.
+    std::this_thread::sleep_for(std::chrono::milliseconds {500});
+    slint::platform::update_timers_and_animations();
+    auto const scrolled = render_at_size(*state, narrow_analysis.width);
+    REQUIRE(sidebar_difference_bounds(top, scrolled, narrow_analysis.width).found);
+
+    window->set_analysis_lines(make_analysis_lines(3));
+    auto const republished = render_at_size(*state, narrow_analysis.width);
+
+    CHECK_FALSE(sidebar_difference_bounds(scrolled, republished, narrow_analysis.width).found);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

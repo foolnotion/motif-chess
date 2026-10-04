@@ -25,8 +25,10 @@ namespace motif::slint_app
 
 // Engine info lines are redrawn at most about ten times a second.
 constexpr auto analysis_flush_interval = std::chrono::milliseconds {100};
-// A position change restarts the analysis after this pause, so a burst of
-// navigation costs one engine launch for the position it ends on.
+// The restart is throttled, not debounced: the first position change of a burst
+// arms one timer of this length and later changes do not re-arm it. When it fires
+// the engine starts on the position then on the board, so a burst of navigation
+// costs one launch and the final position is the one analysed.
 constexpr auto analysis_follow_delay = std::chrono::milliseconds {150};
 
 // How the runner reaches the event loop. `schedule` may be called from any

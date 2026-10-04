@@ -148,7 +148,6 @@ class analysis_presenter
     bool restart_pending_ {false};
 
     auto make_request(std::string const& fen) -> analysis_request;
-    void refresh_idle_text();
     void clear_session_display();
     // Engine, options or list changed: any earlier session display is obsolete.
     void reset_display();

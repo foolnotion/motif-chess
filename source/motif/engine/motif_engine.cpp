@@ -442,31 +442,26 @@ auto engine_manager::subscribe(std::string const& analysis_id,
                                complete_callback const& on_complete,
                                error_callback const& on_error) -> result<subscription>
 {
-    std::optional<complete_event> complete_to_replay;
-    std::optional<error_event> error_to_replay;
-    std::vector<info_event> info_to_replay;
-    {
-        const std::scoped_lock lock {impl_->mutex};
-        auto iter = impl_->sessions.find(analysis_id);
-        if (iter == impl_->sessions.end()) {
-            return tl::unexpected {error_code::analysis_not_found};
-        }
-        auto& sess = *iter->second;
-        {
-            const std::scoped_lock cb_lock {sess.callback_mutex};
-            sess.on_info = on_info;
-            sess.on_complete = on_complete;
-            sess.on_error = on_error;
-            info_to_replay = sess.info_history;
-            complete_to_replay = sess.last_complete;
-            error_to_replay = sess.last_error;
-        }
+    // The replay runs with the manager lock and the session's callback lock held.
+    // The reader thread takes the callback lock for every live event, so every
+    // live event is delivered after the whole replay: replayed lines are never
+    // overtaken by, or interleaved with, newer ones. The manager lock keeps the
+    // session alive meanwhile (release_analysis needs it to erase the session).
+    const std::scoped_lock lock {impl_->mutex};
+    auto iter = impl_->sessions.find(analysis_id);
+    if (iter == impl_->sessions.end()) {
+        return tl::unexpected {error_code::analysis_not_found};
     }
+    auto& sess = *iter->second;
+    const std::scoped_lock cb_lock {sess.callback_mutex};
+    sess.on_info = on_info;
+    sess.on_complete = on_complete;
+    sess.on_error = on_error;
     // Replay buffered info events first, then the terminal complete or error
     // event. These events were emitted before subscribe() was called (e.g. a fast
     // engine that finished, or died, before the subscriber connected).
     if (on_info) {
-        for (auto const& evt : info_to_replay) {
+        for (auto const& evt : sess.info_history) {
             try {
                 on_info(evt);
             } catch (...) {
@@ -474,16 +469,16 @@ auto engine_manager::subscribe(std::string const& analysis_id,
             }
         }
     }
-    if (complete_to_replay.has_value() && on_complete) {
+    if (sess.last_complete.has_value() && on_complete) {
         try {
-            on_complete(*complete_to_replay);
+            on_complete(*sess.last_complete);
         } catch (...) {
             fmt::print(stderr, "engine_manager: on_complete callback threw\n");
         }
     }
-    if (error_to_replay.has_value() && on_error) {
+    if (sess.last_error.has_value() && on_error) {
         try {
-            on_error(*error_to_replay);
+            on_error(*sess.last_error);
         } catch (...) {
             fmt::print(stderr, "engine_manager: on_error callback threw\n");
         }

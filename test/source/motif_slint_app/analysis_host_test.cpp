@@ -326,6 +326,114 @@ TEST_CASE("analysis host: an engine list that cannot be saved is rolled back and
     CHECK(test.config.engines().paths.size() == 1);
 }
 
+TEST_CASE("analysis host: selection, removal and option changes that cannot be saved leave the stored state on screen",
+          "[motif-slint-app][analysis][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    test.add_engine("/e/one");
+    test.add_engine("/e/two");
+    std::filesystem::remove_all(test.config_path.parent_path());
+    {
+        auto blocker = std::ofstream {test.config_path.parent_path()};
+        blocker << "not a directory";
+    }
+    // The window's controls hold the new value before the host hears of it.
+    auto const expect_stored = [&test]() -> void
+    {
+        CHECK(test.names() == std::vector<std::string> {"one", "two"});
+        CHECK(test.window->get_analysis_selected_engine() == 1);
+        CHECK(test.window->get_analysis_multipv() == 3);
+        CHECK(test.window->get_analysis_limit_kind() == 0);
+        CHECK(test.window->get_analysis_limit_value() == 20);
+        CHECK_FALSE(test.notice().empty());
+    };
+
+    test.window->set_analysis_selected_engine(0);
+    test.window->invoke_analysis_engine_selected(0);
+    expect_stored();
+
+    test.window->set_analysis_notice("");
+    test.window->invoke_analysis_engine_removed();
+    expect_stored();
+
+    test.window->set_analysis_multipv(5);
+    test.window->invoke_analysis_multipv_changed(5);
+    expect_stored();
+
+    test.window->set_analysis_limit_kind(1);
+    test.window->invoke_analysis_limit_kind_changed(1);
+    expect_stored();
+
+    test.window->set_analysis_limit_value(77);
+    test.window->invoke_analysis_limit_value_changed(77);
+    expect_stored();
+    CHECK(test.config.engines().paths.size() == 2);
+}
+
+namespace
+{
+
+// A two-line burst engine, started through the real window callbacks.
+auto start_burst(host& test, std::unique_ptr<fake_uci::fake_engine> const& engine) -> void
+{
+    test.add_engine(engine->path());
+    test.window->invoke_analysis_multipv_changed(2);
+    test.start();
+    test.analysis->wait_until_idle();
+    // Give the engine time to print all 400 pairs; the checks below hold however
+    // many of them have arrived.
+    REQUIRE(fake_uci::wait_for([&]() -> bool { return test.loop.pending(analysis_flush_interval) >= 1; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds {400});
+}
+
+}  // namespace
+
+TEST_CASE("analysis host: a burst of engine lines is one scheduled flush that draws the newest line of each rank",
+          "[motif-slint-app][analysis][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    auto const engine = make_engine(fake_uci::burst_body(2));
+
+    start_burst(test, engine);
+
+    CHECK(test.loop.pending(analysis_flush_interval) == 1);
+    CHECK(test.lines().empty());
+    REQUIRE(test.loop.pump_until([&]() -> bool { return test.lines().size() == 2 && host::text(test.lines()[0].score) == "+4.00"; }));
+    auto const lines = test.lines();
+    CHECK(lines[0].rank == 1);
+    CHECK(host::text(lines[0].score) == "+4.00");
+    CHECK(lines[1].rank == 2);
+    CHECK(host::text(lines[1].score) == "+14.00");
+    // Nothing is left over once the burst is drawn.
+    CHECK(test.loop.pending(analysis_flush_interval) == 0);
+    test.stop();
+}
+
+TEST_CASE("analysis host: a burst queued for an older workspace epoch or session is not drawn", "[motif-slint-app][analysis][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    for (auto const change_epoch : {true, false}) {
+        auto test = host {};
+        auto const engine = make_engine(fake_uci::burst_body(2));
+        start_burst(test, engine);
+        REQUIRE(test.loop.pending(analysis_flush_interval) == 1);
+
+        if (change_epoch) {
+            test.analysis->workspace_changed();
+        } else {
+            test.play("e4");  // a new session generation
+        }
+        static_cast<void>(test.loop.run(analysis_flush_interval));
+
+        INFO((change_epoch ? std::string {"workspace epoch changed"} : std::string {"session replaced"}));
+        CHECK(test.lines().empty());
+        CHECK(test.status() == (change_epoch ? "Ready" : "Analysing"));
+        test.analysis->shutdown();
+    }
+}
+
 TEST_CASE("analysis host: removing the selected engine selects the first remaining one, then the empty state", "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
@@ -798,7 +906,21 @@ TEST_CASE("analysis host: engine list changes wait for a workspace operation, bu
     test.activity = workspace_activity {.workspace_busy = true};
 
     test.add_engine("/opt/other/engine");
+    // The window's spin box and combo boxes already hold the new values.
+    test.window->set_analysis_multipv(1);
     test.window->invoke_analysis_multipv_changed(1);
+    CHECK(test.window->get_analysis_multipv() == 3);
+    CHECK_FALSE(test.notice().empty());
+    test.window->set_analysis_notice("");
+    test.window->set_analysis_limit_kind(1);
+    test.window->invoke_analysis_limit_kind_changed(1);
+    CHECK(test.window->get_analysis_limit_kind() == 0);
+    CHECK_FALSE(test.notice().empty());
+    test.window->set_analysis_notice("");
+    test.window->set_analysis_limit_value(5);
+    test.window->invoke_analysis_limit_value_changed(5);
+    CHECK(test.window->get_analysis_limit_value() == 20);
+    CHECK_FALSE(test.notice().empty());
     test.window->invoke_analysis_engine_removed();
     CHECK(test.names().size() == 1);
     CHECK(test.config.engines().multipv == 3);
