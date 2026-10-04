@@ -49,6 +49,57 @@ enum class workspace_preset_kind : std::uint8_t
 [[nodiscard]] auto to_string(workspace_preset_kind kind) noexcept -> std::string_view;
 [[nodiscard]] auto workspace_preset_from_string(std::string_view name) noexcept -> workspace_preset_kind;
 
+// The single bounded limit of an engine analysis (Story 13.3): search to a depth
+// or for a fixed time. The motif_engine API rejects a request with neither or both.
+enum class analysis_limit_kind : std::uint8_t
+{
+    depth,
+    movetime,
+};
+
+[[nodiscard]] auto to_string(analysis_limit_kind kind) noexcept -> std::string_view;
+[[nodiscard]] auto analysis_limit_from_string(std::string_view name) noexcept -> analysis_limit_kind;
+
+// What the engine panel lets a user choose. Values outside these ranges (a
+// hand-edited file, a stale control) are clamped, never rejected.
+constexpr int min_engine_multipv {1};
+constexpr int max_engine_multipv {5};
+constexpr int default_engine_multipv {3};
+constexpr int min_engine_depth {1};
+constexpr int max_engine_depth {99};
+constexpr int default_engine_depth {20};
+constexpr int min_engine_movetime_ms {100};
+constexpr int max_engine_movetime_ms {600'000};
+constexpr int default_engine_movetime_ms {1000};
+
+[[nodiscard]] constexpr auto clamp_engine_multipv(int const value) noexcept -> int
+{
+    return value < min_engine_multipv ? min_engine_multipv : (value > max_engine_multipv ? max_engine_multipv : value);
+}
+
+[[nodiscard]] constexpr auto clamp_engine_depth(int const value) noexcept -> int
+{
+    return value < min_engine_depth ? min_engine_depth : (value > max_engine_depth ? max_engine_depth : value);
+}
+
+[[nodiscard]] constexpr auto clamp_engine_movetime_ms(int const value) noexcept -> int
+{
+    return value < min_engine_movetime_ms ? min_engine_movetime_ms : (value > max_engine_movetime_ms ? max_engine_movetime_ms : value);
+}
+
+// The engine panel's persisted choices (Story 13.3), normalised: `selected` is
+// always one of `paths` (the first when the stored choice is gone) and every
+// number is inside its range.
+struct engine_settings
+{
+    std::vector<std::string> paths;
+    std::string selected;
+    int multipv {default_engine_multipv};
+    analysis_limit_kind limit {analysis_limit_kind::depth};
+    int depth {default_engine_depth};
+    int movetime_ms {default_engine_movetime_ms};
+};
+
 struct ui_preferences
 {
     std::string board_theme {"classic"};
@@ -56,6 +107,14 @@ struct ui_preferences
     int prefetch_depth {default_prefetch_depth};
     std::string notation_layout {"right"};
     std::string workspace_preset {"review"};
+    // Engine panel choices (Story 13.3). The engine itself is the path stored in
+    // workspace_config::engine_paths; an empty or no longer listed selection
+    // means the first engine. A running analysis is never stored.
+    std::string engine_selected;
+    int engine_multipv {default_engine_multipv};
+    std::string engine_limit {"depth"};
+    int engine_depth {default_engine_depth};
+    int engine_movetime_ms {default_engine_movetime_ms};
 };
 
 struct workspace_config

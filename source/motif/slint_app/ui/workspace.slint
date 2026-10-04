@@ -1,3 +1,4 @@
+import { AnalysisLine, EnginePanel } from "engine_panel.slint";
 import { GameBrowser, GameRow } from "game_browser.slint";
 import { GameReviewPanel, NotationToken, SquareHighlight } from "board_notation.slint";
 import { ContinuationRow, ContinuationTotal, PositionSearchPanel, SearchMatchRow } from "position_search.slint";
@@ -94,6 +95,21 @@ export component WorkspaceWindow inherits Window {
     in property <bool> search-busy: false;
     // The explorer rows were searched for another position than the board's (auto-search off).
     in property <bool> search-rows-stale: false;
+    // Engine analysis panel (Story 13.3), shown in the Analysis preset. The host
+    // publishes analysis_presenter's state; the panel draws it.
+    in property <[string]> analysis-engine-names;
+    in-out property <int> analysis-selected-engine: -1;
+    in-out property <int> analysis-multipv: 3;
+    // 0 limits the search by depth, 1 by move time.
+    in-out property <int> analysis-limit-kind: 0;
+    in-out property <int> analysis-limit-value: 20;
+    in property <bool> analysis-active: false;
+    in property <string> analysis-status-text;
+    in property <string> analysis-notice;
+    in property <[AnalysisLine]> analysis-lines;
+    in property <bool> analysis-lines-stale: false;
+    in property <bool> analysis-can-start: false;
+    in-out property <string> analysis-engine-path-text;
     // In-window confirmation shown before an edited or unsaved game is
     // replaced; the host owns the pending action.
     in property <bool> confirm-visible: false;
@@ -137,6 +153,16 @@ export component WorkspaceWindow inherits Window {
     callback board-orientation-toggled();
     callback board-panel-visibility-toggled();
     callback notation-layout-toggled();
+    callback analysis-start-requested();
+    callback analysis-stop-requested();
+    callback analysis-engine-selected(int);
+    callback analysis-engine-added(string);
+    callback analysis-engine-removed();
+    callback analysis-multipv-changed(int);
+    callback analysis-limit-kind-changed(int);
+    callback analysis-limit-value-changed(int);
+    // Leaving the Analysis preset unmounts the panel; the host stops the analysis.
+    callback analysis-panel-left();
     callback preset-selected(WorkspacePreset);
     callback search-requested();
     callback search-auto-search-toggled(bool);
@@ -147,6 +173,18 @@ export component WorkspaceWindow inherits Window {
     function select-preset(preset: WorkspacePreset) {
         root.workspace-preset = preset;
         root.preset-selected(preset);
+    }
+
+    // Compact panels for a short window. Assigned from the window height rather
+    // than bound to it: a layout size bound to `height` forms a binding loop,
+    // and the Explorer panel's own binding is already one too many.
+    property <bool> short-window: false;
+    init => { root.short-window = root.height < 640px; }
+    changed height => { root.short-window = root.height < 640px; }
+    changed workspace-preset => {
+        if (root.workspace-preset != WorkspacePreset.analysis) {
+            root.analysis-panel-left();
+        }
     }
 
     property <bool> board-interaction-enabled: !root.busy && !root.browser-busy && !root.import-active && !root.search-busy && !root.confirm-visible;
@@ -372,7 +410,7 @@ export component WorkspaceWindow inherits Window {
                 Button {
                     text: "Analysis";
                     checked: root.workspace-preset == WorkspacePreset.analysis;
-                    accessible-description: "Large board with the game browser; engine analysis arrives in a later story";
+                    accessible-description: "Large board with engine analysis and the game browser";
                     clicked => { root.select-preset(WorkspacePreset.analysis); }
                 }
                 Text {
@@ -449,12 +487,31 @@ export component WorkspaceWindow inherits Window {
                 vertical-stretch: 1;
                 spacing: StyleMetrics.layout-spacing;
 
-                // EXTENSION SEAM (Stories 13.2 and 13.3): the analysis region
-                // belongs at the top of this column. Explorer will mount the
-                // lazy opening tree there and Analysis the engine panel; each
-                // is gated on `root.workspace-preset` like the panels below.
-                // Neither is rendered yet, so the region occupies no space.
-
+                if root.workspace-preset == WorkspacePreset.analysis: EnginePanel {
+                    vertical-stretch: 1;
+                    engine-names: root.analysis-engine-names;
+                    selected-engine <=> root.analysis-selected-engine;
+                    multipv <=> root.analysis-multipv;
+                    limit-kind <=> root.analysis-limit-kind;
+                    limit-value <=> root.analysis-limit-value;
+                    active: root.analysis-active;
+                    status-text: root.analysis-status-text;
+                    notice: root.analysis-notice;
+                    lines: root.analysis-lines;
+                    lines-stale: root.analysis-lines-stale;
+                    can-start: root.analysis-can-start;
+                    config-enabled: !root.busy;
+                    compact: root.short-window;
+                    path-text <=> root.analysis-engine-path-text;
+                    start-requested() => { root.analysis-start-requested(); }
+                    stop-requested() => { root.analysis-stop-requested(); }
+                    engine-selected(index) => { root.analysis-engine-selected(index); }
+                    engine-added(path) => { root.analysis-engine-added(path); }
+                    engine-removed() => { root.analysis-engine-removed(); }
+                    multipv-changed(count) => { root.analysis-multipv-changed(count); }
+                    limit-kind-changed(kind) => { root.analysis-limit-kind-changed(kind); }
+                    limit-value-changed(value) => { root.analysis-limit-value-changed(value); }
+                }
                 if root.workspace-preset != WorkspacePreset.explorer: GameBrowser {
                     vertical-stretch: 1;
                     games: root.game-rows;

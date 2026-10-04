@@ -1,0 +1,224 @@
+import { Button, ComboBox, LineEdit, ListView, Palette, SpinBox } from "std-widgets.slint";
+
+// One MultiPV row of the engine panel. Every figure and the numbered SAN line
+// are derived by analysis_presenter.cpp; this file only draws them.
+export struct AnalysisLine {
+    rank: int,
+    depth: int,
+    score: string,
+    moves: string,
+    accessible-label: string,
+}
+
+// Engine analysis controls and live lines (Story 13.3). The panel holds no UCI,
+// engine or chess logic: it draws the state it is given and reports user intent
+// through callbacks. Tab order is the declaration order: engine, Remove, path,
+// Add, lines, limit kind, limit value, then Start/Stop.
+export component EnginePanel inherits Rectangle {
+    in property <[string]> engine-names;
+    in-out property <int> selected-engine: -1;
+    in-out property <int> multipv: 3;
+    // 0 limits the search by depth, 1 by move time in milliseconds.
+    in-out property <int> limit-kind: 0;
+    in-out property <int> limit-value: 20;
+    // Analysis is on (running, or finished and following the board): the
+    // controls that shape a session are locked and the button reads Stop.
+    in property <bool> active: false;
+    in property <string> status-text;
+    in property <string> notice;
+    in property <[AnalysisLine]> lines;
+    // The lines no longer belong to a live session: drawn dimmed.
+    in property <bool> lines-stale: false;
+    in property <bool> can-start: false;
+    // False while the workspace changes, which owns the stored engine list.
+    in property <bool> config-enabled: true;
+    in property <bool> compact: false;
+    in-out property <string> path-text;
+
+    callback start-requested();
+    callback stop-requested();
+    callback engine-selected(int);
+    callback engine-added(string);
+    callback engine-removed();
+    callback multipv-changed(int);
+    callback limit-kind-changed(int);
+    callback limit-value-changed(int);
+
+    property <bool> has-engines: root.engine-names.length > 0;
+    property <bool> locked: root.active || !root.config-enabled;
+    property <length> row-height: root.compact ? 22px : 26px;
+
+    function add-engine() {
+        if (root.config-enabled && !root.active && root.path-text != "") {
+            root.engine-added(root.path-text);
+        }
+    }
+
+    background: Palette.background;
+    accessible-role: groupbox;
+    accessible-label: "Engine analysis";
+
+    VerticalLayout {
+        padding: root.compact ? 6px : 10px;
+        spacing: root.compact ? 4px : 6px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            engine-box := ComboBox {
+                horizontal-stretch: 1;
+                model: root.engine-names;
+                current-index <=> root.selected-engine;
+                enabled: root.has-engines && !root.locked;
+                accessible-label: "Engine";
+                selected(value) => { root.engine-selected(self.current-index); }
+            }
+            Button {
+                text: "Remove";
+                enabled: root.has-engines && !root.locked;
+                accessible-description: "Removes the selected engine from the list";
+                clicked => { root.engine-removed(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: "Engine path";
+                text <=> root.path-text;
+                enabled: !root.locked;
+                accessible-label: "Engine path to add";
+                accepted => { root.add-engine(); }
+            }
+            Button {
+                text: "Add";
+                enabled: !root.locked && root.path-text != "";
+                accessible-description: "Adds the typed engine path to the list";
+                clicked => { root.add-engine(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: "Lines";
+                color: Palette.alternate-foreground;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            SpinBox {
+                minimum: 1;
+                maximum: 5;
+                value <=> root.multipv;
+                enabled: !root.locked;
+                accessible-label: "Number of lines (MultiPV)";
+                edited(value) => { root.multipv-changed(value); }
+            }
+            limit-box := ComboBox {
+                horizontal-stretch: 1;
+                model: ["Depth", "Move time (ms)"];
+                current-index <=> root.limit-kind;
+                enabled: !root.locked;
+                accessible-label: "Limit";
+                selected(value) => { root.limit-kind-changed(self.current-index); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            SpinBox {
+                horizontal-stretch: 1;
+                minimum: root.limit-kind == 1 ? 100 : 1;
+                maximum: root.limit-kind == 1 ? 600000 : 99;
+                step-size: root.limit-kind == 1 ? 100 : 1;
+                value <=> root.limit-value;
+                enabled: !root.locked;
+                accessible-label: root.limit-kind == 1 ? "Move time in milliseconds" : "Depth";
+                edited(value) => { root.limit-value-changed(value); }
+            }
+            // One button whose label changes: two conditional buttons would
+            // destroy the focused element on every toggle.
+            Button {
+                text: root.active ? "Stop" : "Start";
+                enabled: root.active || root.can-start;
+                accessible-description: root.active ? "Stops the analysis" : "Analyses the position on the board and follows it";
+                clicked => {
+                    if (root.active) {
+                        root.stop-requested();
+                    } else {
+                        root.start-requested();
+                    }
+                }
+            }
+        }
+
+        // Its own row so that a longer message (a start failure names the
+        // engine) wraps instead of being cut off.
+        Text {
+            text: root.status-text;
+            color: Palette.foreground;
+            wrap: word-wrap;
+            accessible-role: text;
+            accessible-label: root.status-text;
+        }
+
+        if root.notice != "": Text {
+            text: root.notice;
+            color: Palette.accent-foreground;
+            font-size: 11px;
+            wrap: word-wrap;
+            accessible-role: text;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: root.row-height;
+            border-width: 1px;
+            border-color: Palette.border;
+            ListView {
+                for line in root.lines: Rectangle {
+                    height: root.row-height;
+                    opacity: root.lines-stale ? 0.55 : 1.0;
+                    background: Math.mod(line.rank, 2) == 0 ? Palette.alternate-background : Palette.background;
+                    accessible-role: list-item;
+                    accessible-label: line.accessible-label;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        Text {
+                            width: 14px;
+                            text: line.rank;
+                            color: Palette.alternate-foreground;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            width: 52px;
+                            text: line.score;
+                            color: Palette.foreground;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            width: 28px;
+                            text: "d" + line.depth;
+                            color: Palette.alternate-foreground;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: line.moves == "" ? "no line available" : line.moves;
+                            color: Palette.foreground;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -80,6 +80,22 @@ class workspace_service
 
     auto set_preset(workspace_preset_kind kind) -> result<void>;
 
+    [[nodiscard]] auto engines() const -> engine_settings;
+
+    // Appends a UCI engine path (surrounding whitespace is dropped) and selects it.
+    // An empty or already listed path changes nothing and reports
+    // invalid_argument with a message in error_message().
+    auto add_engine(std::string_view path) -> result<void>;
+
+    // Removes a listed engine; the selection moves to the first remaining one.
+    auto remove_engine(std::string const& path) -> result<void>;
+
+    auto select_engine(std::string const& path) -> result<void>;
+
+    // Stores the MultiPV count and both limit values (clamped to their ranges)
+    // together with which one the next analysis uses.
+    auto set_engine_options(int multipv, analysis_limit_kind limit, int depth, int movetime_ms) -> result<void>;
+
     [[nodiscard]] auto active_database() noexcept -> motif::db::database_manager* { return db_ ? &*db_ : nullptr; }
 
   private:

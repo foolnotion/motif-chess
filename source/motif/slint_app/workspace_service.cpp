@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -181,6 +183,102 @@ auto workspace_service::set_preset(workspace_preset_kind const kind) -> result<v
         return persisted;
     }
     config_ = std::move(next_config);
+    return {};
+}
+
+auto workspace_service::engines() const -> engine_settings
+{
+    auto const& prefs = config_.ui_preferences;
+    auto settings = engine_settings {
+        .paths = config_.engine_paths,
+        .selected = {},
+        .multipv = clamp_engine_multipv(prefs.engine_multipv),
+        .limit = analysis_limit_from_string(prefs.engine_limit),
+        .depth = clamp_engine_depth(prefs.engine_depth),
+        .movetime_ms = clamp_engine_movetime_ms(prefs.engine_movetime_ms),
+    };
+    if (std::ranges::find(settings.paths, prefs.engine_selected) != settings.paths.end()) {
+        settings.selected = prefs.engine_selected;
+    } else if (!settings.paths.empty()) {
+        settings.selected = settings.paths.front();
+    }
+    return settings;
+}
+
+auto workspace_service::add_engine(std::string_view const path) -> result<void>
+{
+    constexpr auto whitespace = " \t\n\r\f\v";
+    auto const begin = path.find_first_not_of(whitespace);
+    auto const trimmed = begin == std::string_view::npos ? std::string_view {} : path.substr(begin, path.find_last_not_of(whitespace) - begin + 1);
+    if (trimmed.empty()) {
+        error_message_ = "Enter the path of a UCI engine to add.";
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    if (std::ranges::find(config_.engine_paths, trimmed) != config_.engine_paths.end()) {
+        error_message_ = "That engine is already in the list.";
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    auto next_config = config_;
+    next_config.engine_paths.emplace_back(trimmed);
+    next_config.ui_preferences.engine_selected = std::string {trimmed};
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+    config_ = std::move(next_config);
+    error_message_.clear();
+    return {};
+}
+
+auto workspace_service::remove_engine(std::string const& path) -> result<void>
+{
+    auto next_config = config_;
+    auto const removed = std::erase(next_config.engine_paths, path);
+    if (removed == 0) {
+        error_message_ = "That engine is not in the list.";
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    auto& selected = next_config.ui_preferences.engine_selected;
+    if (std::ranges::find(next_config.engine_paths, selected) == next_config.engine_paths.end()) {
+        selected = next_config.engine_paths.empty() ? std::string {} : next_config.engine_paths.front();
+    }
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+    config_ = std::move(next_config);
+    error_message_.clear();
+    return {};
+}
+
+auto workspace_service::select_engine(std::string const& path) -> result<void>
+{
+    if (std::ranges::find(config_.engine_paths, path) == config_.engine_paths.end()) {
+        error_message_ = "That engine is not in the list.";
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    auto next_config = config_;
+    next_config.ui_preferences.engine_selected = path;
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+    config_ = std::move(next_config);
+    error_message_.clear();
+    return {};
+}
+
+auto workspace_service::set_engine_options(int const multipv, analysis_limit_kind const limit, int const depth, int const movetime_ms)
+    -> result<void>
+{
+    auto next_config = config_;
+    auto& prefs = next_config.ui_preferences;
+    prefs.engine_multipv = clamp_engine_multipv(multipv);
+    prefs.engine_limit = std::string {to_string(limit)};
+    prefs.engine_depth = clamp_engine_depth(depth);
+    prefs.engine_movetime_ms = clamp_engine_movetime_ms(movetime_ms);
+    if (auto persisted = persist_config(next_config); !persisted) {
+        return persisted;
+    }
+    config_ = std::move(next_config);
+    error_message_.clear();
     return {};
 }
 

@@ -67,6 +67,7 @@ add_executable(motif_engine_test
 )
 target_link_libraries(motif_engine_test PRIVATE motif_engine Catch2::Catch2WithMain)
 target_compile_features(motif_engine_test PRIVATE cxx_std_23)
+target_include_directories(motif_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
 catch_discover_tests(motif_engine_test)
 
 add_executable(motif_http_test
@@ -111,6 +112,9 @@ endif()
 
 if(motif_ENABLE_SLINT_APP)
     add_executable(motif_slint_app_service_test
+        source/motif_slint_app/analysis_host_test.cpp
+        source/motif_slint_app/analysis_presenter_test.cpp
+        source/motif_slint_app/analysis_service_test.cpp
         source/motif_slint_app/board_presenter_test.cpp
         source/motif_slint_app/import_service_test.cpp
         source/motif_slint_app/pgn_launch_queue_test.cpp
@@ -136,6 +140,7 @@ if(motif_ENABLE_SLINT_APP)
     )
     target_sources(motif_slint_app_service_test PRIVATE
         "${CMAKE_BINARY_DIR}/source/motif/slint_app/slint_generated_workspace_1.cpp"
+        "${CMAKE_SOURCE_DIR}/source/motif/slint_app/analysis_host.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/board_host.cpp"
     )
     set_source_files_properties(

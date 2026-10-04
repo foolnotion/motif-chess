@@ -104,6 +104,9 @@ struct session
     complete_callback on_complete;
     error_callback on_error;
     std::optional<complete_event> last_complete;
+    // The crash report, kept like last_complete so a subscriber that attaches
+    // after the engine died still learns about it.
+    std::optional<error_event> last_error;
     // Buffered info events so subscribe() can replay them to late subscribers.
     std::vector<info_event> info_history;
     // Declared last so its destructor (which joins the ucilib reader thread)
@@ -263,15 +266,17 @@ void register_callbacks(session* sess_ptr)
         [sess_ptr](std::error_code err) -> void
         {
             error_callback callback;
+            error_event event {.message = fmt::format("engine crashed: {}", err.message())};
             {
                 const std::scoped_lock cb_lock {sess_ptr->callback_mutex};
                 if (!sess_ptr->terminal.exchange(true, std::memory_order_relaxed)) {
+                    sess_ptr->last_error = event;
                     callback = sess_ptr->on_error;
                 }
             }
             if (callback) {
                 try {
-                    callback(error_event {.message = fmt::format("engine crashed: {}", err.message())});
+                    callback(event);
                 } catch (...) {
                     fmt::print(stderr, "engine_manager: on_error callback threw\n");
                 }
@@ -410,12 +415,35 @@ auto engine_manager::stop_analysis(std::string const& analysis_id) -> result<voi
     return {};
 }
 
+auto engine_manager::release_analysis(std::string const& analysis_id) -> result<void>
+{
+    std::unique_ptr<session> released;
+    {
+        const std::scoped_lock lock {impl_->mutex};
+        auto iter = impl_->sessions.find(analysis_id);
+        if (iter == impl_->sessions.end()) {
+            return tl::unexpected {error_code::analysis_not_found};
+        }
+        released = std::move(iter->second);
+        impl_->sessions.erase(iter);
+    }
+    // quit() sends "quit", escalates to terminate and kill, and joins the reader
+    // thread, so it blocks and must run outside the manager lock. It also stops
+    // a search in progress and still joins the reader of an engine that already
+    // crashed. Once it returns no callback of this session can run, and the
+    // destructor then finds nothing left to join.
+    released->terminal.store(true, std::memory_order_relaxed);
+    static_cast<void>(released->engine.quit());
+    return {};
+}
+
 auto engine_manager::subscribe(std::string const& analysis_id,
                                info_callback const& on_info,
                                complete_callback const& on_complete,
                                error_callback const& on_error) -> result<subscription>
 {
     std::optional<complete_event> complete_to_replay;
+    std::optional<error_event> error_to_replay;
     std::vector<info_event> info_to_replay;
     {
         const std::scoped_lock lock {impl_->mutex};
@@ -431,11 +459,12 @@ auto engine_manager::subscribe(std::string const& analysis_id,
             sess.on_error = on_error;
             info_to_replay = sess.info_history;
             complete_to_replay = sess.last_complete;
+            error_to_replay = sess.last_error;
         }
     }
-    // Replay buffered info events first, then the terminal complete event.
-    // These events were emitted before subscribe() was called (e.g. a fast engine
-    // that finished before the SSE subscriber connected).
+    // Replay buffered info events first, then the terminal complete or error
+    // event. These events were emitted before subscribe() was called (e.g. a fast
+    // engine that finished, or died, before the subscriber connected).
     if (on_info) {
         for (auto const& evt : info_to_replay) {
             try {
@@ -450,6 +479,13 @@ auto engine_manager::subscribe(std::string const& analysis_id,
             on_complete(*complete_to_replay);
         } catch (...) {
             fmt::print(stderr, "engine_manager: on_complete callback threw\n");
+        }
+    }
+    if (error_to_replay.has_value() && on_error) {
+        try {
+            on_error(*error_to_replay);
+        } catch (...) {
+            fmt::print(stderr, "engine_manager: on_error callback threw\n");
         }
     }
     return subscription {};
