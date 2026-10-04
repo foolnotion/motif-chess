@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <slint.h>
 
@@ -65,7 +66,8 @@ class async_board_runner
     // Fired after publish whenever the presenter reports a position hash.
     using position_changed_handler = std::function<void(motif::db::zobrist_hash)>;
 
-    void set_position_changed_handler(position_changed_handler handler) { state_->position_changed = std::move(handler); }
+    // Handlers run in the order they were added, each with the same hash.
+    void add_position_changed_handler(position_changed_handler handler) { state_->position_changed.push_back(std::move(handler)); }
 
     [[nodiscard]] auto is_busy() const noexcept -> bool { return state_->busy; }
 
@@ -206,7 +208,7 @@ class async_board_runner
         slint::ComponentWeakHandle<WorkspaceWindow> window;
         std::shared_ptr<motif::slint_app::board_presenter> presenter;
         bool busy {false};
-        position_changed_handler position_changed;
+        std::vector<position_changed_handler> position_changed;
     };
 
     std::shared_ptr<state> state_;
@@ -227,9 +229,11 @@ class async_board_runner
             if (auto locked = state_->window.lock()) {
                 publish_board(**locked, state_->presenter->state());
             }
-            if (publish_position_change && state_->position_changed) {
+            if (publish_position_change && !state_->position_changed.empty()) {
                 if (auto const hash = state_->presenter->state().current_hash) {
-                    state_->position_changed(*hash);
+                    for (auto const& handler : state_->position_changed) {
+                        handler(*hash);
+                    }
                 }
             }
         }

@@ -44,9 +44,9 @@ using motif::slint_app::workspace_activity;
 class manual_loop
 {
   public:
-    [[nodiscard]] auto environment() -> motif::slint_app::analysis_environment
+    [[nodiscard]] auto environment() -> motif::slint_app::event_loop_environment
     {
-        return motif::slint_app::analysis_environment {
+        return motif::slint_app::event_loop_environment {
             .schedule = [this](std::chrono::milliseconds const delay, std::function<void()> task) -> void
             {
                 std::scoped_lock const lock {mutex_};
@@ -167,7 +167,7 @@ struct host
             config,
             loop.environment(),
             [this]() -> std::optional<std::string> { return board.current_fen(); });
-        board.set_position_changed_handler([this](motif::db::zobrist_hash) -> void { analysis->position_changed(); });
+        board.add_position_changed_handler([this](motif::db::zobrist_hash) -> void { analysis->position_changed(); });
         auto const probe = motif::slint_app::activity_probe {[this]() -> workspace_activity { return activity; }};
         motif::slint_app::register_analysis_callbacks(*window, *analysis, probe);
         analysis->load();

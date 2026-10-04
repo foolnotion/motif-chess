@@ -56,6 +56,12 @@ export component WorkspaceWindow inherits Window {
     in property <[int]> game-column-widths;
     in property <int> game-sort-column: 0;
     in property <bool> game-sort-ascending: true;
+    // Follow board (Story 13.5): the list shows only games that reach the board position.
+    in property <bool> game-following: false;
+    in property <bool> game-refreshing: false;
+    in property <bool> game-progress-visible: false;
+    in property <string> game-status-text: "";
+    in property <int> game-result-serial: 0;
     // A game, stored or unsaved, is on the board. The board itself is always
     // playable: an empty one shows the starting position.
     in property <bool> board-loaded;
@@ -137,6 +143,10 @@ export component WorkspaceWindow inherits Window {
     callback game-activate-requested();
     callback game-sort-requested(int, bool);
     callback game-column-resized(int, int);
+    // Follow board: the user pressed the toggle; the host publishes `game-following`.
+    callback game-follow-toggled(bool);
+    // The game browser was mounted (the Explorer preset has none).
+    callback game-browser-shown();
     callback board-square-activated(int, int);
     callback board-node-activated(int);
     callback board-promotion-chosen(string);
@@ -527,6 +537,11 @@ export component WorkspaceWindow inherits Window {
                     sort-column: root.game-sort-column;
                     sort-ascending: root.game-sort-ascending;
                     column-widths: root.game-column-widths;
+                    following: root.game-following;
+                    refreshing: root.game-refreshing;
+                    progress-visible: root.game-progress-visible;
+                    status-text: root.game-status-text;
+                    result-serial: root.game-result-serial;
                     filters-changed(player, result) => { root.game-filters-changed(player, result); }
                     page-requested(page) => { root.game-page-requested(page); }
                     select-row(row) => { root.game-selected(row); }
@@ -534,6 +549,8 @@ export component WorkspaceWindow inherits Window {
                     activate-selected() => { root.game-activate-requested(); }
                     sort-requested(column, ascending) => { root.game-sort-requested(column, ascending); }
                     column-resized(column, width) => { root.game-column-resized(column, width); }
+                    follow-toggled(on) => { root.game-follow-toggled(on); }
+                    shown() => { root.game-browser-shown(); }
                 }
 
                 if root.workspace-preset == WorkspacePreset.explorer: PositionSearchPanel {

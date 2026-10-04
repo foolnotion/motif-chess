@@ -1,12 +1,17 @@
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "motif/slint_app/game_browser_presenter.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
 #include "test_helpers.hpp"
@@ -390,4 +395,487 @@ TEST_CASE("game_browser_presenter: external activation loads by id independent o
     } else {
         FAIL("external activation must select its game row");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Follow board (Story 13.5)
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+using moves = std::vector<std::string>;
+
+auto make_played_game(moves const& sans, std::string white, std::string black, std::string result = "1-0") -> motif::db::game
+{
+    auto position = motif::chess::board {};
+    auto game = make_game(std::move(white), std::move(black), std::move(result));
+    for (auto const& san : sans) {
+        auto const move = motif::chess::apply_san(position, san);
+        REQUIRE(move);
+        game.moves.push_back(*move);
+    }
+    return game;
+}
+
+auto hash_after(moves const& sans) -> motif::db::zobrist_hash
+{
+    auto position = motif::chess::board {};
+    for (auto const& san : sans) {
+        auto const move = motif::chess::apply_san(position, san);
+        REQUIRE(move);
+    }
+    return motif::db::zobrist_hash {position.hash()};
+}
+
+auto starting_hash() -> motif::db::zobrist_hash
+{
+    return motif::db::zobrist_hash {motif::chess::board {}.hash()};
+}
+
+void add_played(motif::db::database_manager& database, moves const& sans, std::string white, std::string black, std::string result = "1-0")
+{
+    auto const game = make_played_game(sans, std::move(white), std::move(black), std::move(result));
+    REQUIRE(database.insert_game(game).has_value());
+}
+
+void index_positions(motif::db::database_manager& database)
+{
+    REQUIRE(database.rebuild_position_postings().has_value());
+}
+
+auto names(motif::slint_app::game_browser_presenter const& presenter) -> std::vector<std::string>
+{
+    auto result = std::vector<std::string> {};
+    for (auto const& game : presenter.state().games) {
+        result.push_back(game.white);
+    }
+    return result;
+}
+
+// Runs the query a follow call prepared, the way the runner's worker does.
+void land(motif::slint_app::game_browser_presenter& presenter, motif::slint_app::browser_result<motif::slint_app::browser_query> const& query)
+{
+    REQUIRE(query.has_value());
+    REQUIRE(load(presenter, *query).value_or(false));
+}
+
+// Four games: three reach the knights position (two by transposition), one does not.
+auto make_knights_database() -> motif::db::database_manager
+{
+    auto created = motif::db::database_manager::create_scratch();
+    REQUIRE(created.has_value());
+    auto database = std::move(*created);
+    add_played(database, {"Nf3", "Nc6", "Nc3", "Nf6"}, "Alice", "Bob", "1-0");
+    add_played(database, {"Nc3", "Nf6", "Nf3", "Nc6"}, "Carol", "Dan", "0-1");
+    add_played(database, {"e4", "e5"}, "Erin", "Frank", "1-0");
+    add_played(database, {"Nc3", "Nc6", "Nf3", "Nf6"}, "Alice", "Hal", "0-1");
+    index_positions(database);
+    return database;
+}
+
+auto knights() -> moves
+{
+    return {"Nf3", "Nc6", "Nc3", "Nf6"};
+}
+
+// Reports a new board position and lands the refresh it asks for.
+void follow_to(motif::slint_app::game_browser_presenter& presenter, motif::db::zobrist_hash const hash)
+{
+    auto query = presenter.follow_position(hash);
+    REQUIRE(query.has_value());
+    auto const& refresh = *query;
+    if (!refresh) {
+        FAIL("the position change asked for no refresh");
+        return;
+    }
+    REQUIRE(load(presenter, *refresh).value_or(false));
+}
+
+auto follow_on(motif::slint_app::game_browser_presenter& presenter, motif::db::zobrist_hash const hash)
+    -> motif::slint_app::browser_result<motif::slint_app::browser_query>
+{
+    return presenter.set_follow(/*enabled=*/true, hash);
+}
+
+auto follow_off(motif::slint_app::game_browser_presenter& presenter) -> motif::slint_app::browser_result<motif::slint_app::browser_query>
+{
+    return presenter.set_follow(/*enabled=*/false, std::nullopt);
+}
+
+void load_first_page(motif::slint_app::game_browser_presenter& presenter)
+{
+    land(presenter, presenter.prepare_initial_load());
+}
+
+}  // namespace
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: following lists the games that reach the position, transpositions included, under the filters",
+          "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+    REQUIRE(presenter.state().games.size() == 4);
+
+    auto query = follow_on(presenter, hash_after(knights()));
+    REQUIRE(query.has_value());
+    CHECK(query->filter.position == hash_after(knights()));
+    CHECK(query->filter.offset == 0);
+    CHECK(presenter.state().loading);
+    land(presenter, query);
+
+    CHECK(presenter.state().following);
+    CHECK_FALSE(presenter.state().loading);
+    CHECK(presenter.state().rows_restricted);
+    CHECK(presenter.state().total_count == 3);
+    CHECK(names(presenter) == std::vector<std::string> {"Alice", "Alice", "Carol"});  // White ascending, as before
+    CHECK(presenter.state().row_plies == std::vector<std::uint16_t> {4, 4, 4});
+
+    // The player filter intersects with the position, and so does the result.
+    land(presenter, presenter.set_filters("Alice", ""));
+    CHECK(presenter.state().total_count == 2);
+    CHECK(names(presenter) == std::vector<std::string> {"Alice", "Alice"});
+    land(presenter, presenter.set_filters("Alice", "1-0"));
+    CHECK(presenter.state().total_count == 1);
+    CHECK(presenter.state().games.front().black == "Bob");
+    land(presenter, presenter.set_filters("", "0-1"));
+    CHECK(presenter.state().total_count == 2);
+    CHECK(presenter.state().following);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: the starting position restricts nothing and matches the unfollowed list", "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+    auto const unfollowed_names = names(presenter);
+    auto const unfollowed_total = presenter.state().total_count;
+
+    auto query = follow_on(presenter, starting_hash());
+    REQUIRE(query.has_value());
+    CHECK_FALSE(query->filter.position.has_value());
+    land(presenter, query);
+
+    CHECK(presenter.state().following);
+    CHECK_FALSE(presenter.state().rows_restricted);
+    CHECK(names(presenter) == unfollowed_names);
+    CHECK(presenter.state().total_count == unfollowed_total);
+    CHECK(presenter.state().row_plies.empty());
+    CHECK(motif::slint_app::browser_status_text(presenter.state()).empty());
+
+    // Moving off the start restricts; coming back lifts the restriction again.
+    follow_to(presenter, hash_after({"e4"}));
+    CHECK(presenter.state().rows_restricted);
+    CHECK(presenter.state().total_count == 1);
+    follow_to(presenter, starting_hash());
+    CHECK_FALSE(presenter.state().rows_restricted);
+    CHECK(presenter.state().total_count == unfollowed_total);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: a position no game reaches gives an empty list that says so", "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+
+    land(presenter, follow_on(presenter, hash_after({"d4", "d5", "c4"})));
+    CHECK(presenter.state().games.empty());
+    CHECK(presenter.state().total_count == 0);
+    CHECK(presenter.state().rows_restricted);
+    CHECK(motif::slint_app::browser_status_text(presenter.state()) == "No games reach this position");
+
+    land(presenter, presenter.set_filters("Alice", ""));
+    CHECK(motif::slint_app::browser_status_text(presenter.state()) == "No games reach this position with these filters");
+
+    // Without Follow board an empty list needs no explanation.
+    land(presenter, presenter.set_filters("Nobody", ""));
+    land(presenter, follow_off(presenter));
+    CHECK(presenter.state().games.empty());
+    CHECK(motif::slint_app::browser_status_text(presenter.state()).empty());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: turning follow off removes only the position and returns to the page shown before", "[motif-slint-app][follow]")
+{
+    auto created = motif::db::database_manager::create_scratch();
+    REQUIRE(created.has_value());
+    auto database = std::move(*created);
+    REQUIRE(database.writer().begin_transaction().has_value());
+    for (auto index = std::size_t {0}; index < selection_game_count; ++index) {
+        REQUIRE(database.writer().insert(make_played_game({"e4"}, "White " + std::to_string(1000 + index), "Black")).has_value());
+    }
+    REQUIRE(database.writer().commit_transaction().has_value());
+    index_positions(database);
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+    land(presenter, presenter.set_page(1));
+    REQUIRE(presenter.state().page_index == 1);
+
+    // On: the followed list starts at its first page and shows the games under the filters.
+    land(presenter, follow_on(presenter, hash_after({"e4"})));
+    CHECK(presenter.state().page_index == 0);
+    CHECK(std::cmp_equal(presenter.state().total_count, selection_game_count));
+    land(presenter, presenter.set_page(1));
+    CHECK(presenter.state().page_index == 1);
+
+    // Off: back on the page that was showing at turn-on.
+    land(presenter, follow_off(presenter));
+    CHECK_FALSE(presenter.state().following);
+    CHECK_FALSE(presenter.state().rows_restricted);
+    CHECK(presenter.state().page_index == 1);
+    CHECK(presenter.state().games.size() == selection_game_count - motif::slint_app::browser_page_size);
+
+    // A filter or sort change while following makes the old page meaningless.
+    land(presenter, follow_on(presenter, hash_after({"e4"})));
+    land(presenter, presenter.set_page(1));
+    land(presenter, presenter.sort_games(1, /*ascending=*/false));
+    land(presenter, follow_off(presenter));
+    CHECK(presenter.state().page_index == 0);
+    CHECK_FALSE(presenter.state().sort_ascending);
+
+    land(presenter, presenter.set_page(1));
+    land(presenter, follow_on(presenter, hash_after({"e4"})));
+    land(presenter, presenter.set_filters("White 1005", ""));
+    land(presenter, follow_off(presenter));
+    CHECK(presenter.state().page_index == 0);
+    CHECK(presenter.state().player_filter == "White 1005");
+    CHECK(presenter.state().total_count == 1);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: a position change keeps a selected game that is still listed and drops one that is not",
+          "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+    land(presenter, follow_on(presenter, hash_after(knights())));
+
+    // Carol's game (row 2) reaches the knights position and, one move earlier, Nc3.
+    REQUIRE(presenter.select_game(2).has_value());
+    auto const carol = presenter.state().selected_game_id;
+    follow_to(presenter, hash_after({"Nc3"}));
+    CHECK(presenter.state().has_selection);
+    REQUIRE(presenter.state().selected_row.has_value());
+    CHECK(presenter.state().games.at(presenter.state().selected_row.value()).id == carol);
+
+    // Erin's game does not reach Nc3: no hidden selection survives.
+    land(presenter, presenter.set_filters("", ""));
+    follow_to(presenter, hash_after({"e4", "e5"}));
+    REQUIRE(presenter.select_game(0).has_value());
+    follow_to(presenter, hash_after({"Nc3"}));
+    CHECK_FALSE(presenter.state().has_selection);
+    CHECK_FALSE(presenter.state().selected_row.has_value());
+    CHECK_FALSE(presenter.prepare_activation().has_value());
+
+    // Filters, sort and paging keep a selection that is off the visible rows, as they always did.
+    REQUIRE(presenter.select_game(0).has_value());
+    land(presenter, presenter.set_filters("Nobody", ""));
+    CHECK(presenter.state().has_selection);
+    CHECK_FALSE(presenter.state().selected_row.has_value());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: follow_position acts only for a followed list and a new position", "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+
+    auto unfollowed = presenter.follow_position(hash_after({"e4"}));
+    REQUIRE(unfollowed.has_value());
+    CHECK_FALSE(unfollowed->has_value());
+
+    land(presenter, follow_on(presenter, hash_after({"e4"})));
+    auto const generation = presenter.state().query_generation;
+    auto same = presenter.follow_position(hash_after({"e4"}));
+    REQUIRE(same.has_value());
+    CHECK_FALSE(same->has_value());
+    CHECK(presenter.state().query_generation == generation);
+
+    auto changed = presenter.follow_position(hash_after({"Nf3"}));
+    REQUIRE(changed.has_value());
+    REQUIRE(changed->has_value());
+    CHECK(changed->value().generation == generation + 1);
+    CHECK(changed->value().filter.offset == 0);
+    CHECK(changed->value().filter.position == hash_after({"Nf3"}));
+    CHECK(presenter.state().followed_hash == hash_after({"Nf3"}));
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: an older follow result never replaces a newer one", "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+    land(presenter, follow_on(presenter, starting_hash()));
+
+    auto older = presenter.follow_position(hash_after({"e4"}));
+    auto newer = presenter.follow_position(hash_after(knights()));
+    REQUIRE(older.has_value());
+    REQUIRE(newer.has_value());
+    REQUIRE(older->has_value());
+    REQUIRE(newer->has_value());
+    auto const serial = presenter.state().result_serial;
+
+    auto older_page = presenter.execute_query(older->value());
+    auto newer_page = presenter.execute_query(newer->value());
+    REQUIRE(older_page.has_value());
+    REQUIRE(newer_page.has_value());
+    REQUIRE(presenter.apply_query(std::move(*newer_page)).value_or(false));
+    CHECK_FALSE(presenter.apply_query(std::move(*older_page)).value_or(true));
+
+    CHECK(presenter.state().total_count == 3);
+    CHECK(presenter.state().result_serial == serial + 1);
+    CHECK_FALSE(presenter.state().loading);
+
+    // An older failure is dropped as well.
+    auto stale = presenter.apply_query_error(older->value().generation, {.code = motif::slint_app::error_code::database_failure, .message = "late"});
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(*stale);
+    CHECK(presenter.state().games.size() == 3);
+    CHECK(presenter.state().error_text.empty());
+}
+
+// A landed result bumps the serial; selection and activation do not.
+TEST_CASE("game_browser_presenter: result_serial moves with landed results only", "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    CHECK(presenter.state().result_serial == 0);
+    load_first_page(presenter);
+    auto const first = presenter.state().result_serial;
+    CHECK(first > 0);
+
+    REQUIRE(presenter.select_game(1).has_value());
+    REQUIRE(presenter.move_selection(1).has_value());
+    CHECK(presenter.state().result_serial == first);
+
+    land(presenter, presenter.set_filters("Alice", ""));
+    CHECK(presenter.state().result_serial == first + 1);
+    land(presenter, presenter.sort_games(1, /*ascending=*/false));
+    CHECK(presenter.state().result_serial == first + 2);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: a failed follow refresh drops the rows, says so, and the next change retries", "[motif-slint-app][follow]")
+{
+    // No position index: the database manager refuses a positioned query.
+    auto created = motif::db::database_manager::create_scratch();
+    REQUIRE(created.has_value());
+    auto database = std::move(*created);
+    add_played(database, {"e4", "e5"}, "Alice", "Bob");
+    add_played(database, {"d4", "d5"}, "Carol", "Dan");
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+    REQUIRE(presenter.select_game(0).has_value());
+    REQUIRE(presenter.state().games.size() == 2);
+    auto const serial = presenter.state().result_serial;
+
+    land(presenter, follow_on(presenter, hash_after({"e4"})));
+
+    CHECK(presenter.state().following);
+    CHECK(presenter.state().games.empty());
+    CHECK(presenter.state().total_count == 0);
+    CHECK_FALSE(presenter.state().has_selection);
+    CHECK_FALSE(presenter.state().has_next_page);
+    CHECK_FALSE(presenter.state().loading);
+    CHECK(presenter.state().load_failed);
+    CHECK_FALSE(presenter.state().error_text.empty());
+    CHECK(presenter.state().result_serial > serial);
+    CHECK(motif::slint_app::browser_status_text(presenter.state()) == "Could not load the games for this position");
+
+    // The index appears (for example the import finished); the next position change retries.
+    index_positions(database);
+    follow_to(presenter, hash_after({"d4"}));
+    CHECK_FALSE(presenter.state().load_failed);
+    CHECK(presenter.state().error_text.empty());
+    CHECK(presenter.state().total_count == 1);
+    CHECK(presenter.state().games.front().white == "Carol");
+
+    // Turning follow off lists everything again.
+    land(presenter, follow_off(presenter));
+    CHECK(presenter.state().total_count == 2);
+}
+
+TEST_CASE("game_browser_presenter: following is refused without a board position and leaves the list alone", "[motif-slint-app][follow]")
+{
+    auto database = make_knights_database();
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+    auto const generation = presenter.state().query_generation;
+
+    auto refused = presenter.set_follow(/*enabled=*/true, std::nullopt);
+
+    CHECK_FALSE(refused.has_value());
+    CHECK_FALSE(presenter.state().following);
+    CHECK_FALSE(presenter.state().error_text.empty());
+    CHECK(presenter.state().query_generation == generation);
+    CHECK_FALSE(presenter.state().loading);
+    CHECK(presenter.state().games.size() == 4);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("game_browser_presenter: activating a followed row carries the first ply that reaches the position", "[motif-slint-app][follow]")
+{
+    auto created = motif::db::database_manager::create_scratch();
+    REQUIRE(created.has_value());
+    auto database = std::move(*created);
+    add_played(database, {"Nf3", "Nc6"}, "Early", "Bob");
+    add_played(database, {"Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nc6"}, "Late", "Dan");
+    add_played(database, {"e4", "e5"}, "Other", "Fay");
+    index_positions(database);
+    auto presenter = motif::slint_app::game_browser_presenter {database};
+    load_first_page(presenter);
+
+    // Unfollowed rows open at the start, as before.
+    REQUIRE(presenter.select_game(0).has_value());
+    auto plain = presenter.prepare_activation();
+    REQUIRE(plain.has_value());
+    CHECK_FALSE(plain->ply.has_value());
+
+    land(presenter, follow_on(presenter, hash_after({"Nf3", "Nc6"})));
+    REQUIRE(names(presenter) == std::vector<std::string> {"Early", "Late"});
+    CHECK(presenter.state().row_plies == std::vector<std::uint16_t> {2, 6});
+
+    REQUIRE(presenter.select_game(1).has_value());
+    auto late = presenter.prepare_activation();
+    REQUIRE(late.has_value());
+    REQUIRE(late->ply.has_value());
+    CHECK(late->ply.value() == 6);
+    CHECK(late->game_id == presenter.state().games.at(1).id);
+    auto loaded = presenter.execute_activation(*late);
+    REQUIRE(loaded.has_value());
+    REQUIRE(presenter.apply_external_activation(std::move(*loaded)).value_or(false));
+    CHECK(presenter.state().selected_row == 1);
+    CHECK(presenter.state().active_game_id == late->game_id);
+
+    REQUIRE(presenter.select_game(0).has_value());
+    auto early = presenter.prepare_activation();
+    REQUIRE(early.has_value());
+    CHECK(early->ply == 2);
+
+    // A selection that is not a visible row is not opened.
+    land(presenter, presenter.set_filters("Late", ""));
+    REQUIRE(presenter.select_game(0).has_value());
+    land(presenter, presenter.set_filters("Early", ""));
+    REQUIRE(presenter.state().has_selection);
+    REQUIRE_FALSE(presenter.state().selected_row.has_value());
+    auto const generation = presenter.state().activation_generation;
+    CHECK_FALSE(presenter.prepare_activation().has_value());
+    CHECK_FALSE(presenter.state().error_text.empty());
+    CHECK(presenter.state().activation_generation == generation);
 }

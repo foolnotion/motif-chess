@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "motif/slint_app/board_host.hpp"
@@ -265,7 +266,7 @@ TEST_CASE("board host: activating an explorer row plays its move and the board r
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
     auto positions = std::vector<motif::db::zobrist_hash> {};
-    test.board.set_position_changed_handler([&positions](motif::db::zobrist_hash const hash) -> void { positions.push_back(hash); });
+    test.board.add_position_changed_handler([&positions](motif::db::zobrist_hash const hash) -> void { positions.push_back(hash); });
 
     test.window->invoke_search_continuation_activated("e4");
     REQUIRE(test.tokens() == std::vector<std::string> {"e4"});
@@ -293,7 +294,7 @@ TEST_CASE("board host: explorer rows are ignored under each busy condition and w
         auto test = host {};
         test.window->invoke_board_play_san("e4");
         auto positions = std::size_t {0};
-        test.board.set_position_changed_handler([&positions](motif::db::zobrist_hash) -> void { ++positions; });
+        test.board.add_position_changed_handler([&positions](motif::db::zobrist_hash) -> void { ++positions; });
         test.activity = busy;
 
         test.window->invoke_search_continuation_activated("e5");
@@ -307,6 +308,23 @@ TEST_CASE("board host: explorer rows are ignored under each busy condition and w
     stale.rows_current = false;  // the rows on screen belong to another position
     stale.window->invoke_search_continuation_activated("e5");
     CHECK(stale.tokens() == std::vector<std::string> {"e4"});
+}
+
+TEST_CASE("board host: every position handler runs in registration order with the same hash", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    auto calls = std::vector<std::pair<int, motif::db::zobrist_hash>> {};
+    test.board.add_position_changed_handler([&calls](motif::db::zobrist_hash const hash) -> void { calls.emplace_back(1, hash); });
+    test.board.add_position_changed_handler([&calls](motif::db::zobrist_hash const hash) -> void { calls.emplace_back(2, hash); });
+
+    test.window->invoke_board_play_san("e4");
+
+    REQUIRE(calls.size() == 2);
+    CHECK(calls.front().first == 1);
+    CHECK(calls.back().first == 2);
+    CHECK(calls.front().second == calls.back().second);
+    CHECK(test.board.current_hash() == calls.back().second);
 }
 
 TEST_CASE("board host: a rejected explorer move leaves the board unchanged and shows the board's message", "[motif-slint-app][host]")

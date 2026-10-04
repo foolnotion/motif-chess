@@ -1,4 +1,4 @@
-import { Button, ComboBox, LineEdit, ListView, Palette, StyleMetrics } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ListView, Palette, ProgressIndicator, StyleMetrics } from "std-widgets.slint";
 
 export struct GameRow {
     white: string,
@@ -59,6 +59,78 @@ component TableHeader inherits Rectangle {
     }
 }
 
+// A check box that stays a tab stop while the workspace is busy: a disabled
+// widget drops keyboard focus and would not get it back when a refresh ends.
+// It never changes its own state; the host answers `toggled` by publishing the
+// state it accepted, so a refused press leaves the box as it was.
+component FollowToggle inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> dimmed: false;
+    callback toggled(bool);
+
+    forward-focus: scope;
+    background: transparent;
+    border-radius: 4px;
+    border-width: scope.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    opacity: root.dimmed ? 0.6 : 1.0;
+    min-width: layout.min-width;
+    preferred-width: layout.preferred-width;
+    max-width: layout.preferred-width;
+    horizontal-stretch: 0;
+
+    scope := FocusScope {
+        accessible-role: AccessibleRole.checkbox;
+        accessible-checkable: true;
+        accessible-checked: root.checked;
+        accessible-label: "Show only games that reach the board position";
+        key-pressed(event) => {
+            if (!event.repeat && (event.text == " " || event.text == Key.Return)) {
+                root.toggled(!root.checked);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    layout := HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 6px;
+        alignment: start;
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.checked ? Palette.accent-background : Palette.border;
+            background: root.checked ? Palette.accent-background : Palette.control-background;
+            if root.checked: Path {
+                commands: "M 3 8.5 L 6.5 12 L 13 4.5";
+                stroke: Palette.accent-foreground;
+                stroke-width: 2px;
+                width: 16px;
+                height: 16px;
+                viewbox-width: 16;
+                viewbox-height: 16;
+            }
+        }
+        Text {
+            text: "Follow board";
+            color: Palette.foreground;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            scope.focus();
+            root.toggled(!root.checked);
+        }
+    }
+}
+
 export component GameBrowser inherits Rectangle {
     in property <[GameRow]> games;
     in property <int> total-count;
@@ -73,6 +145,16 @@ export component GameBrowser inherits Rectangle {
     in property <[int]> column-widths;
     in property <int> sort-column: 0;
     in property <bool> sort-ascending: true;
+    // Follow board: the list is the games that reach the board position.
+    in property <bool> following: false;
+    // A list query is in flight: the rows on screen are about to be replaced.
+    in property <bool> refreshing: false;
+    // The query has taken long enough to show a progress bar.
+    in property <bool> progress-visible: false;
+    // Explains an empty list or a failed refresh; empty when nothing needs saying.
+    in property <string> status-text: "";
+    // Changes whenever a result lands.
+    in property <int> result-serial: 0;
     callback filters-changed(string, string);
     callback page-requested(int);
     callback select-row(int);
@@ -80,6 +162,11 @@ export component GameBrowser inherits Rectangle {
     callback activate-selected();
     callback sort-requested(int, bool);
     callback column-resized(int, int);
+    // Follow board: the user asked to switch it to the given state. The host
+    // decides and publishes `following` either way.
+    callback follow-toggled(bool);
+    // The browser was mounted (it is not part of every preset).
+    callback shown();
 
     property <length> white-width: root.column-widths.length == 6 ? root.column-widths[0] * 1px : 145px;
     property <length> black-width: root.column-widths.length == 6 ? root.column-widths[1] * 1px : 145px;
@@ -116,6 +203,16 @@ export component GameBrowser inherits Rectangle {
     // `changed` does not fire when a key requests the row that is already
     // selected, so Home/End also call reveal-row directly.
     changed selected-row => { root.reveal-row(root.selected-row); }
+
+    // The host replaces the model on every publish, and a ListView keeps its
+    // scroll offset across that. A new result is a different list: start at
+    // the top, then bring the selected game, if it is still there, into view.
+    changed result-serial => {
+        list.content-y = 0px;
+        root.reveal-row(root.selected-row);
+    }
+
+    init => { root.shown(); }
 
     // The table itself scrolls horizontally. Its intrinsic column total must
     // not become the workspace sidebar's minimum width, or it defeats the
@@ -228,6 +325,8 @@ export component GameBrowser inherits Rectangle {
                         for row[index] in root.games: row-box := Rectangle {
                             property <bool> selected: index == root.selected-row;
                             property <color> row-foreground: row-box.selected ? Palette.selection-foreground : Palette.foreground;
+                            // Rows of the list before the one being fetched: dimmed, and inert through `busy`.
+                            opacity: root.refreshing ? 0.45 : 1.0;
                             width: root.table-width;
                             height: root.row-height;
                             accessible-role: AccessibleRole.list-item;
@@ -273,15 +372,42 @@ export component GameBrowser inherits Rectangle {
                     }
                 }
             }
+
+            // Drawn over the table so that neither appearing nor going away
+            // moves another control. Only the table body, below its header.
+            if root.progress-visible: ProgressIndicator {
+                x: 0px;
+                y: 36px;
+                width: parent.width;
+                height: 4px;
+                indeterminate: true;
+                accessible-label: "Searching games";
+            }
+            if root.status-text != "" && !root.refreshing: Text {
+                x: 8px;
+                y: 36px + 16px;
+                width: parent.width - 16px;
+                text: root.status-text;
+                color: Palette.alternate-foreground;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
         }
 
         // Two rows: the counters/title may elide, while the page and open
         // buttons keep their natural width. A single row forced the sidebar
         // wider than its allocation and clipped Open Game at small windows.
+        // Follow board sits at the left of the counters row: a row of its own
+        // would take the only table row Analysis has at 960x560.
         VerticalLayout {
             spacing: 4px;
             HorizontalLayout {
                 spacing: 8px;
+                FollowToggle {
+                    checked: root.following;
+                    dimmed: root.busy;
+                    toggled(on) => { root.follow-toggled(on); }
+                }
                 Text {
                     text: root.total-count == 0 ? "No games" : "Games " + (root.page-index * 100 + 1) + "–" + min(root.total-count, (root.page-index + 1) * 100) + " of " + root.total-count;
                     color: Palette.alternate-foreground;
