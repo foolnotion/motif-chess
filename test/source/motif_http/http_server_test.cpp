@@ -3151,6 +3151,54 @@ TEST_CASE("server: GET /api/engine/analyses/:id/stream receives info and complet
     CHECK(collected_events.find("event: complete") != std::string::npos);  // NOLINT(abseil-string-find-str-contains)
 }
 
+// An engine that dies right after "go" must end the stream with an error event,
+// whether the crash reaches the server before or after it subscribes.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: GET /api/engine/analyses/:id/stream reports an engine that crashes at once", "[motif-http]")
+{
+    auto const fake_engine = make_fake_engine_http("      exit 1\n");
+    auto const tdir = tmp_dir {"engine_analyses_stream_crash"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-stream-crash");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18143};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const cfg_res =
+        cli.Post("/api/engine/engines", fmt::format(R"({{"name":"fake","path":"{}"}})", fake_engine.string()), "application/json");
+    REQUIRE(cfg_res != nullptr);
+    REQUIRE(cfg_res->status == 200);
+
+    auto const start_res = cli.Post(
+        "/api/engine/analyses", R"({"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","depth":1})", "application/json");
+    REQUIRE(start_res != nullptr);
+    REQUIRE(start_res->status == 202);
+
+    motif_http_test::start_analysis_response analysis_resp;
+    REQUIRE(!glz::read_json(analysis_resp, start_res->body));
+    REQUIRE(!analysis_resp.analysis_id.empty());
+
+    std::string collected_events;
+    cli.Get(fmt::format("/api/engine/analyses/{}/stream", analysis_resp.analysis_id),
+            [&collected_events](const char* data, size_t size) -> bool
+            {
+                collected_events.append(data, size);
+                return true;
+            });
+
+    srv.stop();
+    server_thread.join();
+    static_cast<void>(std::filesystem::remove(fake_engine));
+
+    CHECK(collected_events.find("event: error") != std::string::npos);  // NOLINT(abseil-string-find-str-contains)
+    CHECK(collected_events.find("engine crashed") != std::string::npos);  // NOLINT(abseil-string-find-str-contains)
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("server: DELETE /api/engine/analyses/:id for active session returns 204", "[motif-http]")
 {

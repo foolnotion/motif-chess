@@ -1,8 +1,11 @@
 #include <atomic>
-#include <cstddef>
-#include <mutex>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -330,6 +333,173 @@ TEST_CASE("engine_manager: on_error fires when engine crashes during analysis", 
 }
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+namespace
+{
+
+struct replay_counts
+{
+    std::atomic<int> infos {0};
+    std::atomic<int> completes {0};
+    std::atomic<int> errors {0};
+};
+
+// Runs `body` on its own thread, with the manager it uses kept alive by that thread, and
+// reports whether it finished in time. A deadlocked body is abandoned, so a regression
+// fails this check instead of hanging the whole suite.
+auto finishes_within(std::shared_ptr<motif::engine::engine_manager> const& manager,
+                     std::function<void(motif::engine::engine_manager&)> body,
+                     std::chrono::milliseconds const timeout) -> bool
+{
+    auto done = std::make_shared<std::promise<void>>();
+    auto finished = done->get_future();
+    std::thread {[manager, done, body = std::move(body)]() -> void
+                 {
+                     body(*manager);
+                     done->set_value();
+                 }}
+        .detach();
+    return finished.wait_for(timeout) == std::future_status::ready;
+}
+
+// Calls back into the manager the way a subscriber well may: list, stop, release.
+void reenter(motif::engine::engine_manager& manager, std::string const& analysis_id, bool const release)
+{
+    static_cast<void>(manager.list_engines());
+    static_cast<void>(manager.stop_analysis(analysis_id));
+    if (release) {
+        static_cast<void>(manager.release_analysis(analysis_id));
+    }
+}
+
+constexpr auto reentry_timeout = std::chrono::seconds {10};
+
+}  // namespace
+
+TEST_CASE("engine_manager: replay callbacks may call back into the manager without deadlock", "[motif-engine]")
+{
+    // A finished session replays its lines, then its completion. The line callback lists and
+    // stops; the completion callback also releases the session it is running for.
+    auto const fake_engine = fake_uci::fake_engine {fake_uci::fast_complete_body()};
+    auto const manager = std::make_shared<motif::engine::engine_manager>();
+    REQUIRE(manager->configure_engine(motif::engine::engine_config {.name = "fake", .path = fake_engine.path()}).has_value());
+    auto const analysis_id = manager->start_analysis(motif::engine::analysis_params {
+        .fen = startpos_fen, .engine = "fake", .multipv = 1, .depth = default_depth, .movetime_ms = std::nullopt});
+    REQUIRE(analysis_id.has_value());
+    std::atomic<bool> complete_seen {false};
+    REQUIRE(manager
+                ->subscribe(
+                    *analysis_id,
+                    [](motif::engine::info_event const&) -> void {},
+                    [&complete_seen](motif::engine::complete_event const&) -> void { complete_seen.store(true); },
+                    [](motif::engine::error_event const&) -> void {})
+                .has_value());
+    REQUIRE(wait_until(complete_seen));
+    auto const counts = std::make_shared<replay_counts>();
+    auto const& session_id = *analysis_id;
+
+    auto const finished = finishes_within(
+        manager,
+        [counts, session_id](motif::engine::engine_manager& target) -> void
+        {
+            static_cast<void>(target.subscribe(
+                session_id,
+                [&target, counts, session_id](motif::engine::info_event const&) -> void
+                {
+                    ++counts->infos;
+                    reenter(target, session_id, /*release=*/false);
+                },
+                [&target, counts, session_id](motif::engine::complete_event const&) -> void
+                {
+                    ++counts->completes;
+                    reenter(target, session_id, /*release=*/true);
+                },
+                [](motif::engine::error_event const&) -> void {}));
+        },
+        reentry_timeout);
+
+    REQUIRE(finished);
+    CHECK(counts->infos.load() == 1);
+    CHECK(counts->completes.load() == 1);
+    // The completion callback released the session.
+    CHECK(manager->release_analysis(session_id).error() == motif::engine::error_code::analysis_not_found);
+}
+
+TEST_CASE("engine_manager: a replayed crash may call back into the manager without deadlock", "[motif-engine]")
+{
+    auto const fake_engine = fake_uci::fake_engine {fake_uci::crash_body()};
+    auto const manager = std::make_shared<motif::engine::engine_manager>();
+    REQUIRE(manager->configure_engine(motif::engine::engine_config {.name = "crash", .path = fake_engine.path()}).has_value());
+    auto const analysis_id = manager->start_analysis(motif::engine::analysis_params {
+        .fen = startpos_fen, .engine = "crash", .multipv = 1, .depth = default_depth, .movetime_ms = std::nullopt});
+    REQUIRE(analysis_id.has_value());
+    std::atomic<bool> error_seen {false};
+    REQUIRE(manager
+                ->subscribe(
+                    *analysis_id,
+                    [](motif::engine::info_event const&) -> void {},
+                    [](motif::engine::complete_event const&) -> void {},
+                    [&error_seen](motif::engine::error_event const&) -> void { error_seen.store(true); })
+                .has_value());
+    REQUIRE(wait_until(error_seen));
+    auto const counts = std::make_shared<replay_counts>();
+    auto const& session_id = *analysis_id;
+
+    auto const finished = finishes_within(
+        manager,
+        [counts, session_id](motif::engine::engine_manager& target) -> void
+        {
+            static_cast<void>(target.subscribe(
+                session_id,
+                [](motif::engine::info_event const&) -> void {},
+                [](motif::engine::complete_event const&) -> void {},
+                [&target, counts, session_id](motif::engine::error_event const&) -> void
+                {
+                    ++counts->errors;
+                    reenter(target, session_id, /*release=*/true);
+                }));
+        },
+        reentry_timeout);
+
+    REQUIRE(finished);
+    CHECK(counts->errors.load() == 1);
+    CHECK(manager->release_analysis(session_id).error() == motif::engine::error_code::analysis_not_found);
+}
+
+TEST_CASE("engine_manager: releasing the session from a replayed line stops the replay", "[motif-engine]")
+{
+    // The burst session holds 400 lines; the callback releases on the first one it gets.
+    auto const fake_engine = fake_uci::fake_engine {fake_uci::burst_complete_body()};
+    auto const manager = std::make_shared<motif::engine::engine_manager>();
+    REQUIRE(manager->configure_engine(motif::engine::engine_config {.name = "burst", .path = fake_engine.path()}).has_value());
+    auto const analysis_id = manager->start_analysis(motif::engine::analysis_params {
+        .fen = startpos_fen, .engine = "burst", .multipv = 1, .depth = default_depth, .movetime_ms = std::nullopt});
+    REQUIRE(analysis_id.has_value());
+    REQUIRE(fake_uci::wait_for([&]() -> bool { return !fake_engine.commands_starting_with("go").empty(); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds {300});
+    auto const counts = std::make_shared<replay_counts>();
+    auto const& session_id = *analysis_id;
+
+    auto const finished = finishes_within(
+        manager,
+        [counts, session_id](motif::engine::engine_manager& target) -> void
+        {
+            static_cast<void>(target.subscribe(
+                session_id,
+                [&target, counts, session_id](motif::engine::info_event const&) -> void
+                {
+                    ++counts->infos;
+                    reenter(target, session_id, /*release=*/true);
+                },
+                [counts](motif::engine::complete_event const&) -> void { ++counts->completes; },
+                [](motif::engine::error_event const&) -> void {}));
+        },
+        reentry_timeout);
+
+    REQUIRE(finished);
+    CHECK(counts->infos.load() == 1);
+    CHECK(counts->completes.load() == 0);
+}
+
 TEST_CASE("engine_manager: subscribe delivers a crash exactly once, whether it happened before or after subscribing", "[motif-engine]")
 {
     auto const fake_engine = fake_uci::fake_engine {fake_uci::crash_body()};
