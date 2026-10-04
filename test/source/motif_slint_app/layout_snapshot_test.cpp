@@ -25,7 +25,6 @@ namespace
 {
 using snapshot_test::snapshot_platform;
 using snapshot_test::snapshot_state;
-using snapshot_test::snapshot_window_adapter;
 using snapshot_test::use_snapshot_platform;
 
 void write_ppm(std::filesystem::path const& directory, std::string const& name, std::span<slint::Rgb8Pixel const> pixels)
@@ -69,6 +68,11 @@ auto render_layout(snapshot_state const& state, std::string const& name) -> std:
 }
 
 }  // namespace
+
+constexpr auto recents_below_center = 120.F;
+constexpr auto scroll_to_end_distance = 100000.F;
+constexpr auto scroll_animation_settle = std::chrono::milliseconds {500};
+constexpr auto clip_probe_columns = 8U;
 
 TEST_CASE("workspace layout: renders right and below notation without a display server", "[motif-slint-app][layout]")
 {
@@ -172,12 +176,12 @@ TEST_CASE("workspace layout: a long recent list scrolls so later entries become 
     // The recents card is centered in the setup screen, so the window center is over the list.
     auto const center = slint::LogicalPosition {slint::Point<float> {
         .x = static_cast<float>(snapshot_platform::width) / 2.F,
-        .y = static_cast<float>(snapshot_platform::height) / 2.F + 120.F,
+        .y = (static_cast<float>(snapshot_platform::height) / 2.F) + recents_below_center,
     }};
     window->window().dispatch_pointer_move_event(center);
-    window->window().dispatch_pointer_scroll_event(center, 0.F, -100000.F);
+    window->window().dispatch_pointer_scroll_event(center, 0.F, -scroll_to_end_distance);
     // Scrolling is animated; let the animation clock run to completion.
-    std::this_thread::sleep_for(std::chrono::milliseconds {500});
+    std::this_thread::sleep_for(scroll_animation_settle);
     slint::platform::update_timers_and_animations();
     auto const bottom = render_layout(*state, "recent-list-bottom");
 
@@ -980,7 +984,7 @@ TEST_CASE("workspace layout: each preset renders a distinct composition at narro
             auto const reference = renders.back()[size.width - 1];
             auto clipped = 0;
             for (auto row = 0U; row < size.height; ++row) {
-                for (auto col = size.width - 8; col < size.width; ++col) {
+                for (auto col = size.width - clip_probe_columns; col < size.width; ++col) {
                     auto const pixel = renders.back()[(static_cast<std::size_t>(row) * size.width) + col];
                     clipped += (pixel.r != reference.r || pixel.g != reference.g || pixel.b != reference.b) ? 1 : 0;
                 }

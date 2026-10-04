@@ -968,6 +968,9 @@ void register_search_callbacks(WorkspaceWindow& window,
         });
 }
 
+// A bundle of long-lived objects owned by main(); every member outlives the context,
+// so references are the honest type here.
+// NOLINTBEGIN(cppcoreguidelines-avoid-const-or-ref-data-members)
 struct import_context
 {
     WorkspaceWindow& window;
@@ -980,6 +983,8 @@ struct import_context
     motif::slint_app::pgn_launch_queue& launch_queue;
     slint::Timer& poll_timer;
 };
+
+// NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 
 constexpr auto import_poll_interval = std::chrono::milliseconds {200};
 
@@ -1102,7 +1107,17 @@ auto main(int const argc, char** const argv) -> int
     auto import_timer = slint::Timer {};
     auto launch_arguments_list = launch_arguments(std::span<char* const> {argv, static_cast<std::size_t>(argc)});
     auto launch_queue = motif::slint_app::pgn_launch_queue::from_arguments(launch_arguments_list);
-    auto import_context_value = import_context {*window, service, importer, runner, browser, board, search, launch_queue, import_timer};
+    auto import_context_value = import_context {
+        .window = *window,
+        .service = service,
+        .importer = importer,
+        .runner = runner,
+        .browser = browser,
+        .board = board,
+        .search = search,
+        .launch_queue = launch_queue,
+        .poll_timer = import_timer,
+    };
     auto launch_timer = slint::Timer {};
     auto confirmation = motif::slint_app::make_replace_confirmation(window, board);
     auto const activity = motif::slint_app::activity_probe {[&]() -> motif::slint_app::workspace_activity

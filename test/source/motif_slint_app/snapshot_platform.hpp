@@ -88,6 +88,8 @@ class snapshot_platform final : public slint::platform::Platform
 // aborts. Install it once and hand every test the same state, reconfigured
 // with the window size that test needs. Running the test binary directly
 // (without ctest's one-process-per-case isolation) therefore stays safe.
+// Width and height are swappable by type only; every caller passes a named pair.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 inline auto use_snapshot_platform(std::uint32_t const width = snapshot_platform::width,
                                   std::uint32_t const height = snapshot_platform::height) -> std::shared_ptr<snapshot_state>
 {
