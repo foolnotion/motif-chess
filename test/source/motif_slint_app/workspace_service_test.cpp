@@ -600,7 +600,7 @@ TEST_CASE("workspace_service: recent states flag bundles that are no longer on d
     tmp_dir const empty_dir {"recent_empty_dir"};
     std::filesystem::create_directories(empty_dir.path);
 
-    motif::slint_app::workspace_service service {config_path};
+    motif::slint_app::workspace_service const service {config_path};
     auto config = motif::slint_app::workspace_config {};
     config.recent_databases = service.recent_databases();
     motif::slint_app::push_recent(config, "EmptyDir", empty_dir.path.string());
