@@ -225,7 +225,8 @@ auto game_browser_presenter::set_follow(bool const enabled, std::optional<motif:
 
 auto game_browser_presenter::follow_position(motif::db::zobrist_hash const hash) -> browser_result<std::optional<browser_query>>
 {
-    if (!state_.following || state_.followed_hash == hash) {
+    // A failed refresh is not a followed position: the same position retries (a remount, say).
+    if (!state_.following || (state_.followed_hash == hash && !state_.load_failed)) {
         return std::optional<browser_query> {};
     }
     state_.followed_hash = hash;

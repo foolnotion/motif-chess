@@ -965,4 +965,34 @@ TEST_CASE("browser host: an import that finishes reloads the followed list for t
     CHECK(test.window->get_game_following());
 }
 
+TEST_CASE("browser host: a runner destroyed while refreshes are in flight or queued shuts down cleanly", "[motif-slint-app][host][browser][follow]")
+{
+    // Built for the sanitizer runs: toggling, position churn and shutdown with work still queued.
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(120);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    motif::slint_app::clear_browser(*window);
+    {
+        auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+        browser.attach(database);
+        browser.load_initial();
+        browser.wait_for_worker();
+        loop.run(no_delay);
+        browser.set_follow(/*enabled=*/true, hash_of({"e4"}));
+        for (auto round = 0; round < 40; ++round) {
+            browser.position_changed(hash_of(round % 2 == 0 ? std::vector<std::string> {"e4", "e5"} : std::vector<std::string> {"e4"}));
+            if (round % 8 == 0) {
+                browser.wait_for_worker();
+                loop.run(no_delay);
+            }
+        }
+        browser.set_follow(/*enabled=*/false, std::nullopt);
+    }
+    // Everything still scheduled belongs to a runner that is gone: it must not touch the window.
+    loop.run(no_delay);
+    loop.run(motif::slint_app::browser_progress_delay);
+    CHECK_FALSE(window->get_game_progress_visible());
+}
+
 // NOLINTEND(portability-template-virtual-member-function,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

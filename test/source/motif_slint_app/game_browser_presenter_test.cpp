@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -406,6 +407,16 @@ namespace
 
 using moves = std::vector<std::string>;
 
+// The value of an optional a test has established, in a form the static analysis accepts.
+template<typename T>
+auto value_of(std::optional<T> const& optional_value) -> T const&
+{
+    if (!optional_value) {
+        throw std::logic_error("the test expected a value");
+    }
+    return *optional_value;
+}
+
 auto make_played_game(moves const& sans, std::string white, std::string black, std::string result = "1-0") -> motif::db::game
 {
     auto position = motif::chess::board {};
@@ -626,8 +637,12 @@ TEST_CASE("game_browser_presenter: turning follow off removes only the position 
     land(presenter, presenter.set_page(1));
     CHECK(presenter.state().page_index == 1);
 
-    // Off: back on the page that was showing at turn-on.
+    // Off: back on the page that was showing at turn-on, with the selected game still selected.
+    REQUIRE(presenter.select_game(0).has_value());
+    auto const selected_id = presenter.state().selected_game_id;
     land(presenter, follow_off(presenter));
+    CHECK(presenter.state().has_selection);
+    CHECK(presenter.state().selected_game_id == selected_id);
     CHECK_FALSE(presenter.state().following);
     CHECK_FALSE(presenter.state().rows_restricted);
     CHECK(presenter.state().page_index == 1);
@@ -666,7 +681,7 @@ TEST_CASE("game_browser_presenter: a position change keeps a selected game that 
     follow_to(presenter, hash_after({"Nc3"}));
     CHECK(presenter.state().has_selection);
     REQUIRE(presenter.state().selected_row.has_value());
-    CHECK(presenter.state().games.at(presenter.state().selected_row.value()).id == carol);
+    CHECK(presenter.state().games.at(value_of(presenter.state().selected_row)).id == carol);
 
     // Erin's game does not reach Nc3: no hidden selection survives.
     land(presenter, presenter.set_filters("", ""));
@@ -706,9 +721,9 @@ TEST_CASE("game_browser_presenter: follow_position acts only for a followed list
     auto changed = presenter.follow_position(hash_after({"Nf3"}));
     REQUIRE(changed.has_value());
     REQUIRE(changed->has_value());
-    CHECK(changed->value().generation == generation + 1);
-    CHECK(changed->value().filter.offset == 0);
-    CHECK(changed->value().filter.position == hash_after({"Nf3"}));
+    CHECK(value_of(*changed).generation == generation + 1);
+    CHECK(value_of(*changed).filter.offset == 0);
+    CHECK(value_of(*changed).filter.position == hash_after({"Nf3"}));
     CHECK(presenter.state().followed_hash == hash_after({"Nf3"}));
 }
 
@@ -729,8 +744,8 @@ TEST_CASE("game_browser_presenter: an older follow result never replaces a newer
     REQUIRE(newer->has_value());
     auto const serial = presenter.state().result_serial;
 
-    auto older_page = presenter.execute_query(older->value());
-    auto newer_page = presenter.execute_query(newer->value());
+    auto older_page = presenter.execute_query(value_of(*older));
+    auto newer_page = presenter.execute_query(value_of(*newer));
     REQUIRE(older_page.has_value());
     REQUIRE(newer_page.has_value());
     REQUIRE(presenter.apply_query(std::move(*newer_page)).value_or(false));
@@ -741,7 +756,7 @@ TEST_CASE("game_browser_presenter: an older follow result never replaces a newer
     CHECK_FALSE(presenter.state().loading);
 
     // An older failure is dropped as well.
-    auto stale = presenter.apply_query_error(older->value().generation, {.code = motif::slint_app::error_code::database_failure, .message = "late"});
+    auto stale = presenter.apply_query_error(value_of(*older).generation, {.code = motif::slint_app::error_code::database_failure, .message = "late"});
     REQUIRE(stale.has_value());
     CHECK_FALSE(*stale);
     CHECK(presenter.state().games.size() == 3);
@@ -796,6 +811,11 @@ TEST_CASE("game_browser_presenter: a failed follow refresh drops the rows, says 
     CHECK_FALSE(presenter.state().error_text.empty());
     CHECK(presenter.state().result_serial > serial);
     CHECK(motif::slint_app::browser_status_text(presenter.state()) == "Could not load the games for this position");
+
+    // The same position retries after a failure (a remount, for instance).
+    auto again = presenter.follow_position(hash_after({"e4"}));
+    REQUIRE(again.has_value());
+    CHECK(again->has_value());
 
     // The index appears (for example the import finished); the next position change retries.
     index_positions(database);
@@ -855,7 +875,7 @@ TEST_CASE("game_browser_presenter: activating a followed row carries the first p
     auto late = presenter.prepare_activation();
     REQUIRE(late.has_value());
     REQUIRE(late->ply.has_value());
-    CHECK(late->ply.value() == 6);
+    CHECK(value_of(late->ply) == 6);
     CHECK(late->game_id == presenter.state().games.at(1).id);
     auto loaded = presenter.execute_activation(*late);
     REQUIRE(loaded.has_value());
