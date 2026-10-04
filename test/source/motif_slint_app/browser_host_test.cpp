@@ -995,4 +995,94 @@ TEST_CASE("browser host: a runner destroyed while refreshes are in flight or que
     CHECK_FALSE(window->get_game_progress_visible());
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: returning from the Explorer while a search runs still catches the list up", "[motif-slint-app][host][browser][follow]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto database = make_opening_database();
+    auto test = host {};
+    test.window->set_has_database(true);
+    test.open(database);
+    state->window_adapter->render();
+    test.play({"Nf3", "Nc6"});
+    test.follow_on();
+    test.settle();
+    REQUIRE(test.names() == names_list {"Early", "Knight", "Late"});
+
+    test.window->set_workspace_preset(WorkspacePreset::Explorer);
+    state->window_adapter->render();
+    test.play({"Nc3"});  // the Explorer's auto-search would now be running
+    test.activity = workspace_activity {.search_busy = true};
+    test.window->set_workspace_preset(WorkspacePreset::Review);
+    state->window_adapter->render();  // mounts while the search runs
+
+    CHECK(test.browser.is_busy());  // the catch-up was queued, not dropped
+    test.activity = workspace_activity {};
+    test.settle();
+    CHECK(test.names() == names_list {"Knight"});
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: an import that ends in the Explorer runs no follow query and the list catches up on return",
+          "[motif-slint-app][host][browser][follow]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto database = make_opening_database();
+    auto test = host {};
+    test.window->set_has_database(true);
+    test.open(database);
+    state->window_adapter->render();
+    test.play({"Nf3", "Nc6"});
+    test.follow_on();
+    test.settle();
+    REQUIRE(test.row_count() == 3);
+
+    test.window->set_workspace_preset(WorkspacePreset::Explorer);
+    state->window_adapter->render();
+    test.play({"Nc3"});
+    REQUIRE(database.insert_game(make_game("Zed", "Zoe", "1-0", {"Nf3", "Nc6", "Nc3"})).has_value());
+    REQUIRE(database.rebuild_position_postings().has_value());
+    test.browser.load_initial();  // what main() does when an import finishes
+
+    CHECK_FALSE(test.browser.is_busy());
+    CHECK(test.loop.pending(no_delay) == 0);
+    CHECK(test.row_count() == 3);
+
+    test.window->set_workspace_preset(WorkspacePreset::Review);
+    state->window_adapter->render();
+    test.settle();
+    CHECK(test.names() == names_list {"Knight", "Zed"});
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: mounting during an import waits for the reload that ends it", "[motif-slint-app][host][browser][follow]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto database = make_opening_database();
+    auto test = host {};
+    test.window->set_has_database(true);
+    test.open(database);
+    state->window_adapter->render();
+    test.play({"Nf3", "Nc6"});
+    test.follow_on();
+    test.settle();
+
+    test.window->set_workspace_preset(WorkspacePreset::Explorer);
+    state->window_adapter->render();
+    test.play({"Nc3"});
+    test.activity = workspace_activity {.import_active = true};
+    test.window->set_workspace_preset(WorkspacePreset::Review);
+    state->window_adapter->render();
+    CHECK_FALSE(test.browser.is_busy());  // the index is unusable until the import ends
+    CHECK(test.row_count() == 3);
+
+    test.activity = workspace_activity {};
+    test.browser.load_initial();
+    test.settle();
+    CHECK(test.names() == names_list {"Knight"});
+}
+
 // NOLINTEND(portability-template-virtual-member-function,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

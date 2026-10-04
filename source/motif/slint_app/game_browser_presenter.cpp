@@ -237,6 +237,16 @@ auto game_browser_presenter::follow_position(motif::db::zobrist_hash const hash)
     return std::optional<browser_query> {std::move(*query)};
 }
 
+auto game_browser_presenter::reload(std::optional<motif::db::zobrist_hash> const board_hash) -> browser_result<browser_query>
+{
+    if (!state_.following || !board_hash) {
+        return make_query(0);
+    }
+    auto const moved = state_.followed_hash != board_hash;
+    state_.followed_hash = board_hash;
+    return make_query(0, /*drop_missing_selection=*/moved);
+}
+
 auto game_browser_presenter::apply_query_error(std::uint64_t const generation, browser_error query_error) -> browser_result<bool>
 {
     if (generation != state_.query_generation) {

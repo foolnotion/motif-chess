@@ -163,6 +163,10 @@ class game_browser_presenter
     // follows that position.
     auto set_follow(bool enabled, std::optional<motif::db::zobrist_hash> board_hash) -> browser_result<browser_query>;
     auto follow_position(motif::db::zobrist_hash hash) -> browser_result<std::optional<browser_query>>;
+    // Reloads the first page. A followed list is brought to `board_hash` first
+    // (and drops a selection that is not in the new list when that is a different
+    // position); an unfollowed list ignores it.
+    auto reload(std::optional<motif::db::zobrist_hash> board_hash) -> browser_result<browser_query>;
 
     [[nodiscard]] auto execute_query(browser_query const& query) const -> browser_result<browser_page>;
     auto apply_query(browser_page page) -> browser_result<bool>;
