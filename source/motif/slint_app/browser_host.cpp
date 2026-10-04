@@ -165,6 +165,10 @@ struct async_browser_runner::impl
     std::optional<browser_query_result> pending_query;
     std::optional<activation_result> pending_activation;
     std::optional<pending_external_activation> pending_external;
+    // A followed list owes a reload for the board position: an import ended
+    // while the browser was unmounted, or a mount had to wait.
+    bool reload_pending {false};
+    std::function<std::optional<motif::db::zobrist_hash>()> board_position;
     std::uint64_t epoch {};
     // Added to the presenter's result serial, so replacing the presenter (a
     // workspace change) still moves the published serial forward.
@@ -465,6 +469,7 @@ void async_browser_runner::attach(motif::db::database_manager& database)
 {
     ++impl_->epoch;
     impl_->retire_presenter();
+    impl_->reload_pending = false;
     impl_->presenter = std::make_shared<game_browser_presenter>(database);
     impl_->pending_query.reset();
     impl_->pending_activation.reset();
@@ -475,6 +480,7 @@ void async_browser_runner::detach()
 {
     ++impl_->epoch;
     impl_->retire_presenter();
+    impl_->reload_pending = false;
     impl_->pending_query.reset();
     impl_->pending_activation.reset();
     impl_->pending_external.reset();
@@ -516,9 +522,36 @@ auto async_browser_runner::active_filter() const -> motif::db::search_filter
     return filter;
 }
 
+void async_browser_runner::set_board_position_provider(std::function<std::optional<motif::db::zobrist_hash>()> provider)
+{
+    impl_->board_position = std::move(provider);
+}
+
 void async_browser_runner::load_initial()
 {
+    if (!impl_->presenter) {
+        return;
+    }
+    if (impl_->presenter->state().following) {
+        // The Explorer preset shows no game list, and its own search covers the
+        // position: the reload waits for the browser to come back.
+        if (auto locked = impl_->window.lock(); !locked || (*locked)->get_workspace_preset() == WorkspacePreset::Explorer) {
+            impl_->reload_pending = true;
+            return;
+        }
+        impl_->reload_pending = false;
+        auto const position = impl_->board_position ? impl_->board_position() : std::nullopt;
+        impl::run_query(impl_, impl_->presenter->reload(position), impl_->epoch);
+        return;
+    }
     impl_->prepare_query(impl_, [](auto& presenter) -> auto { return presenter.prepare_initial_load(); });
+}
+
+void async_browser_runner::defer_catch_up()
+{
+    if (impl_->presenter && impl_->presenter->state().following) {
+        impl_->reload_pending = true;
+    }
 }
 
 void async_browser_runner::set_filters(std::string player, std::string result)
@@ -636,6 +669,11 @@ void async_browser_runner::position_changed(motif::db::zobrist_hash const positi
 
 void async_browser_runner::shown(std::optional<motif::db::zobrist_hash> const board_position)
 {
+    if (impl_->presenter && impl_->reload_pending) {
+        impl_->reload_pending = false;
+        impl::run_query(impl_, impl_->presenter->reload(board_position), impl_->epoch);
+        return;
+    }
     if (board_position) {
         follow_board_position(*board_position);
     }
@@ -746,12 +784,20 @@ void register_browser_callbacks(WorkspaceWindow& window,
                 browser.republish();
             }
         });
-    // Mounting the browser catches the list up with the board, unless the workspace is
-    // busy (an import, say, leaves the position index unusable until it ends).
+    // Mounting the browser catches the list up with the board. A running search or
+    // list query does not matter (the runner keeps only the newest request); an
+    // import or a workspace change does: the position index is unusable then, so
+    // the catch-up waits for the reload that follows them.
+    browser.set_board_position_provider(hooks.board_position);
     window.on_game_browser_shown(
         [&browser, activity, board_position = std::move(hooks.board_position)]() -> void
         {
-            (void)run_when_idle(activity(), [&]() -> void { browser.shown(board_position ? board_position() : std::nullopt); });
+            auto const current = activity();
+            if (current.import_active || current.workspace_busy) {
+                browser.defer_catch_up();
+                return;
+            }
+            browser.shown(board_position ? board_position() : std::nullopt);
         });
 }
 

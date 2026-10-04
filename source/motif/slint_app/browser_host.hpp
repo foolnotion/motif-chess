@@ -101,6 +101,11 @@ class async_browser_runner
     void position_changed(motif::db::zobrist_hash position);
     // The browser was mounted: a position change it missed is applied now.
     void shown(std::optional<motif::db::zobrist_hash> board_position);
+    // The browser was mounted while an import or a workspace change made a
+    // catch-up unsafe: the next load_initial() (or a later mount) does it.
+    void defer_catch_up();
+    // Where the board is now; load_initial() and the catch-ups follow it.
+    void set_board_position_provider(std::function<std::optional<motif::db::zobrist_hash>()> provider);
     // Publishes the runner's state as it is, for example to snap a refused
     // toggle back.
     void republish();
