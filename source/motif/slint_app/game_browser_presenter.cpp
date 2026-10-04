@@ -5,11 +5,13 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "motif/slint_app/game_browser_presenter.hpp"
 
 #include <tl/expected.hpp>
 
+#include "motif/chess/chess.hpp"
 #include "motif/db/error.hpp"
 #include "motif/db/types.hpp"
 
@@ -45,8 +47,21 @@ auto nonempty_optional(std::string const& value) -> std::optional<std::string>
 
 }  // namespace
 
+auto browser_status_text(game_browser_state const& state) -> std::string
+{
+    if (state.load_failed) {
+        return state.following ? "Could not load the games for this position" : "Could not load the games";
+    }
+    if (state.following && state.rows_restricted && state.games.empty() && !state.loading) {
+        auto const filtered = !state.player_filter.empty() || !state.result_filter.empty();
+        return filtered ? "No games reach this position with these filters" : "No games reach this position";
+    }
+    return {};
+}
+
 game_browser_presenter::game_browser_presenter(motif::db::database_manager& database) noexcept
     : database_(&database)
+    , starting_hash_ {motif::chess::board {}.hash()}
 {
 }
 
@@ -59,6 +74,7 @@ auto game_browser_presenter::set_filters(std::string player_name, std::string re
 {
     state_.player_filter = std::move(player_name);
     state_.result_filter = std::move(result);
+    state_.restore_page.reset();
     return make_query(0);
 }
 
@@ -69,6 +85,7 @@ auto game_browser_presenter::sort_games(std::size_t const column, bool const asc
     }
     state_.sort_column = static_cast<browser_sort_column>(column);
     state_.sort_ascending = ascending;
+    state_.restore_page.reset();
     return make_query(0);
 }
 
@@ -100,15 +117,58 @@ auto game_browser_presenter::previous_page() -> browser_result<browser_query>
 
 auto game_browser_presenter::execute_query(browser_query const& query) const -> browser_result<browser_page>
 {
-    auto result = database_->store().find_games(query.filter);
+    auto const page_index = query.filter.offset / browser_page_size;
+    if (!query.filter.position) {
+        auto result = database_->store().find_games(query.filter);
+        if (!result) {
+            return tl::unexpected {from_database_error(result.error())};
+        }
+        return browser_page {
+            .generation = query.generation,
+            .games = std::move(result->games),
+            .total_count = result->total_count,
+            .page_index = page_index,
+            .plies = {},
+            .restricted = false,
+            .drop_missing_selection = query.drop_missing_selection,
+        };
+    }
+
+    // Only the database manager matches positions; the game store ignores them.
+    auto result = database_->find_games(query.filter);
     if (!result) {
         return tl::unexpected {from_database_error(result.error())};
+    }
+    auto plies = std::vector<std::uint16_t> {};
+    if (!result->games.empty()) {
+        auto game_ids = std::vector<motif::db::game_id> {};
+        game_ids.reserve(result->games.size());
+        for (auto const& game : result->games) {
+            game_ids.push_back(game.id);
+        }
+        auto matches = database_->query_position_first_matches(*query.filter.position, game_ids);
+        if (!matches) {
+            return tl::unexpected {from_database_error(matches.error())};
+        }
+        std::ranges::sort(*matches, {}, &motif::db::position_match::game_id);
+        plies.reserve(result->games.size());
+        for (auto const& game : result->games) {
+            auto const found = std::ranges::lower_bound(*matches, game.id, {}, &motif::db::position_match::game_id);
+            if (found == matches->end() || found->game_id != game.id) {
+                return tl::unexpected {
+                    browser_error {.code = error_code::database_failure, .message = "Position results changed while the game list was loaded."}};
+            }
+            plies.push_back(found->ply);
+        }
     }
     return browser_page {
         .generation = query.generation,
         .games = std::move(result->games),
         .total_count = result->total_count,
-        .page_index = query.filter.offset / browser_page_size,
+        .page_index = page_index,
+        .plies = std::move(plies),
+        .restricted = true,
+        .drop_missing_selection = query.drop_missing_selection,
     };
 }
 
@@ -119,6 +179,8 @@ auto game_browser_presenter::apply_query(browser_page page) -> browser_result<bo
     }
 
     state_.games = std::move(page.games);
+    state_.row_plies = std::move(page.plies);
+    state_.rows_restricted = page.restricted;
     state_.total_count = page.total_count;
     state_.page_index = page.page_index;
     state_.has_previous_page = page.page_index > 0;
@@ -129,10 +191,49 @@ auto game_browser_presenter::apply_query(browser_page page) -> browser_result<bo
         auto const selected = std::ranges::find(state_.games, state_.selected_game_id, &motif::db::game_list_entry::id);
         if (selected != state_.games.end()) {
             state_.selected_row = static_cast<std::size_t>(std::distance(state_.games.begin(), selected));
+        } else if (page.drop_missing_selection) {
+            state_.has_selection = false;
         }
     }
     state_.error_text.clear();
+    state_.loading = false;
+    state_.load_failed = false;
+    ++state_.result_serial;
     return true;
+}
+
+auto game_browser_presenter::set_follow(bool const enabled, std::optional<motif::db::zobrist_hash> const board_hash)
+    -> browser_result<browser_query>
+{
+    if (enabled) {
+        if (!board_hash) {
+            return fail_query({.code = error_code::invalid_argument, .message = "The position on the board cannot be followed"});
+        }
+        if (!state_.following) {
+            state_.restore_page = state_.page_index;
+        }
+        state_.following = true;
+        state_.followed_hash = board_hash;
+        return make_query(0, /*drop_missing_selection=*/true);
+    }
+    auto const restore = state_.restore_page.value_or(0);
+    state_.following = false;
+    state_.followed_hash.reset();
+    state_.restore_page.reset();
+    return make_query(restore);
+}
+
+auto game_browser_presenter::follow_position(motif::db::zobrist_hash const hash) -> browser_result<std::optional<browser_query>>
+{
+    if (!state_.following || state_.followed_hash == hash) {
+        return std::optional<browser_query> {};
+    }
+    state_.followed_hash = hash;
+    auto query = make_query(0, /*drop_missing_selection=*/true);
+    if (!query) {
+        return tl::unexpected {query.error()};
+    }
+    return std::optional<browser_query> {std::move(*query)};
 }
 
 auto game_browser_presenter::apply_query_error(std::uint64_t const generation, browser_error query_error) -> browser_result<bool>
@@ -140,7 +241,23 @@ auto game_browser_presenter::apply_query_error(std::uint64_t const generation, b
     if (generation != state_.query_generation) {
         return false;
     }
+    state_.loading = false;
     state_.error_text = std::move(query_error.message);
+    // Rows of another position, or of a restriction that is gone, must not
+    // stay on screen as if they were the answer.
+    if (state_.following || state_.rows_restricted) {
+        state_.games.clear();
+        state_.row_plies.clear();
+        state_.rows_restricted = false;
+        state_.total_count = 0;
+        state_.page_index = 0;
+        state_.has_previous_page = false;
+        state_.has_next_page = false;
+        state_.selected_row.reset();
+        state_.has_selection = false;
+        state_.load_failed = true;
+        ++state_.result_serial;
+    }
     return true;
 }
 
@@ -183,9 +300,19 @@ auto game_browser_presenter::prepare_activation() -> browser_result<activation_r
         auto failure = fail({.code = error_code::invalid_argument, .message = "Select a game before activation"});
         return tl::unexpected {failure.error()};
     }
+    // A followed list opens a game where it reaches the followed position, and
+    // knows that ply only for a row on screen.
+    auto ply = std::optional<std::size_t> {};
+    if (state_.rows_restricted) {
+        if (!state_.selected_row || *state_.selected_row >= state_.row_plies.size()) {
+            auto failure = fail({.code = error_code::invalid_argument, .message = "Select a game in the list to open it at this position"});
+            return tl::unexpected {failure.error()};
+        }
+        ply = state_.row_plies[*state_.selected_row];
+    }
     ++state_.activation_generation;
     state_.error_text.clear();
-    return activation_request {.generation = state_.activation_generation, .game_id = state_.selected_game_id};
+    return activation_request {.generation = state_.activation_generation, .game_id = state_.selected_game_id, .ply = ply};
 }
 
 auto game_browser_presenter::execute_activation(activation_request const& request) const -> browser_result<loaded_game>
@@ -266,7 +393,7 @@ auto game_browser_presenter::state() const noexcept -> game_browser_state const&
     return state_;
 }
 
-auto game_browser_presenter::make_query(std::size_t const page_index) -> browser_result<browser_query>
+auto game_browser_presenter::make_query(std::size_t const page_index, bool const drop_missing_selection) -> browser_result<browser_query>
 {
     constexpr auto max_page_index = std::numeric_limits<std::size_t>::max() / browser_page_size;
     if (page_index > max_page_index) {
@@ -274,6 +401,9 @@ auto game_browser_presenter::make_query(std::size_t const page_index) -> browser
     }
     ++state_.query_generation;
     state_.error_text.clear();
+    state_.loading = true;
+    state_.load_failed = false;
+    auto const restricted = state_.following && state_.followed_hash && *state_.followed_hash != starting_hash_;
     return browser_query {
         .generation = state_.query_generation,
         .filter =
@@ -284,12 +414,13 @@ auto game_browser_presenter::make_query(std::size_t const page_index) -> browser
                 .max_elo = std::nullopt,
                 .result = nonempty_optional(state_.result_filter),
                 .eco_prefix = std::nullopt,
-                .position = std::nullopt,
+                .position = restricted ? state_.followed_hash : std::nullopt,
                 .offset = page_index * browser_page_size,
                 .limit = browser_page_size,
                 .sort_column = to_database_sort(state_.sort_column),
                 .sort_ascending = state_.sort_ascending,
             },
+        .drop_missing_selection = drop_missing_selection,
     };
 }
 

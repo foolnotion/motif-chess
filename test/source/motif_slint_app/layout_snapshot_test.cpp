@@ -1910,4 +1910,355 @@ TEST_CASE("workspace layout: a scrolled engine line list keeps its position when
     CHECK_FALSE(sidebar_difference_bounds(scrolled, republished, narrow_analysis.width).found);
 }
 
+
+// ---------------------------------------------------------------------------
+// Follow board (Story 13.5)
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+constexpr auto follow_margin = 8;
+// One table row is 34 px; a fully visible row differs from an empty table by at least this much.
+constexpr auto full_row_height = 30;
+
+// A populated workspace in the given preset. Analysis gets its engine panel the way make_analysis_workspace does.
+auto make_follow_workspace(snapshot_state const& state, WorkspacePreset const preset, int const games = typical_games)
+    -> slint::ComponentHandle<WorkspaceWindow>
+{
+    auto window = make_loaded_workspace({.games = games, .moves = 0});
+    window->set_board_loaded(true);
+    window->set_workspace_preset(preset);
+    if (preset == WorkspacePreset::Analysis) {
+        window->set_analysis_engine_names(std::make_shared<slint::VectorModel<slint::SharedString>>(
+            std::vector<slint::SharedString> {slint::SharedString {"stockfish"}}));
+        window->set_analysis_selected_engine(0);
+        window->set_analysis_can_start(true);
+        window->set_analysis_status_text("Ready");
+        window->set_analysis_lines(make_analysis_lines(0));
+    }
+    // The first frame lays out before the window's short-height mode is known.
+    state.window_adapter->render();
+    state.window_adapter->render();
+    return window;
+}
+
+auto right_margin_is_plain(std::span<slint::Rgb8Pixel const> const pixels, analysis_size const size) -> bool
+{
+    auto const reference = pixels[size.width - 1];
+    for (auto row = 0U; row < size.height; ++row) {
+        for (auto col = size.width - follow_margin; col < size.width; ++col) {
+            auto const pixel = pixels[(static_cast<std::size_t>(row) * size.width) + col];
+            if (pixel.r != reference.r || pixel.g != reference.g || pixel.b != reference.b) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+auto center_of(pixel_bounds const& bounds) -> slint::LogicalPosition
+{
+    return slint::LogicalPosition {slint::Point<float> {
+        .x = static_cast<float>(bounds.left + bounds.right) / 2.0F,
+        .y = static_cast<float>(bounds.top + bounds.bottom) / 2.0F,
+    }};
+}
+
+void click_at(WorkspaceWindow& window, slint::LogicalPosition const position)
+{
+    window.window().dispatch_pointer_move_event(position);
+    window.window().dispatch_pointer_press_event(position, slint::PointerEventButton::Left);
+    window.window().dispatch_pointer_release_event(position, slint::PointerEventButton::Left);
+}
+
+}  // namespace
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the Follow board toggle fits the sidebar with the footer and leaves a table row at narrow and wide sizes",
+          "[motif-slint-app][layout][follow]")
+{
+    for (auto const size : {narrow_analysis, wide_analysis}) {
+        for (auto const preset : {WorkspacePreset::Review, WorkspacePreset::Analysis}) {
+            INFO("size " << size.width << "x" << size.height << " preset " << static_cast<int>(preset));
+            auto const state = use_snapshot_platform(size.width, size.height);
+            auto window = make_follow_workspace(*state, preset);
+            window->set_game_has_previous_page(true);
+            window->set_game_has_next_page(true);
+            window->set_game_selected_row(-1);
+            window->set_game_active_title("Averylongfirstname, Averylongsurname - Anotherlongname, X  0-1");
+            auto const off = render_at_size(*state, size.width);
+            dump_frame(*state, "follow-off-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
+
+            // The toggle: visible when on, inside the window, in the sidebar column.
+            window->set_game_following(true);
+            auto const checked_frame = render_at_size(*state, size.width);
+            dump_frame(*state, "follow-on-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
+            auto const toggle = sidebar_difference_bounds(off, checked_frame, size.width);
+            REQUIRE(toggle.found);
+            CHECK(std::cmp_less(toggle.right, size.width - follow_margin));
+            CHECK(std::cmp_less(toggle.bottom, size.height - follow_margin));
+            CHECK(right_margin_is_plain(checked_frame, size));
+
+            // The footer buttons still draw inside the window: Open Game enabled by a selection.
+            window->set_game_selected_row(2);
+            auto const selected = render_at_size(*state, size.width);
+            auto const open_game = sidebar_difference_bounds(checked_frame, selected, size.width);
+            REQUIRE(open_game.found);
+            CHECK(std::cmp_less(open_game.right, size.width - follow_margin));
+            CHECK(std::cmp_less(open_game.bottom, size.height - follow_margin));
+            CHECK(open_game.bottom > toggle.bottom);  // the button sits in the row below the counters
+            CHECK(right_margin_is_plain(selected, size));
+
+            // At least one whole table row sits above the toggle.
+            window->set_game_rows(make_game_rows(0));
+            auto const no_rows = render_at_size(*state, size.width);
+            window->set_game_rows(make_game_rows(typical_games));
+            auto const rows = render_at_size(*state, size.width);
+            auto const row_bounds = sidebar_difference_bounds(no_rows, rows, size.width);
+            REQUIRE(row_bounds.found);
+            CHECK(row_bounds.height() >= full_row_height);
+            CHECK(row_bounds.bottom < toggle.top);
+        }
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: Follow board is a tab stop operated by Space, Enter and the mouse, and keeps focus through its own refresh",
+          "[motif-slint-app][layout][follow]")
+{
+    for (auto const size : {narrow_analysis, wide_analysis}) {
+        for (auto const preset : {WorkspacePreset::Review, WorkspacePreset::Analysis}) {
+            INFO("size " << size.width << "x" << size.height << " preset " << static_cast<int>(preset));
+            auto const state = use_snapshot_platform(size.width, size.height);
+            auto window = make_follow_workspace(*state, preset);
+            auto requests = std::vector<bool> {};
+            // The host answers by publishing the state it accepted.
+            window->on_game_follow_toggled(
+                [&requests, &window](bool const enabled) -> void
+                {
+                    requests.push_back(enabled);
+                    window->set_game_following(enabled);
+                });
+            state->window_adapter->render();
+
+            // Tab reaches it; Space operates it. Space on the toolbar's preset buttons on the
+            // way switches the preset, so the layout the toggle is found in may differ from the start.
+            constexpr auto max_tab_stops = 80;
+            for (auto stop = 0; stop < max_tab_stops && requests.empty(); ++stop) {
+                press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+                press_key_and_render(*state, *window, slint::platform::key_codes::Space);
+            }
+            REQUIRE(requests == std::vector<bool> {true});
+            CHECK(window->get_game_following());
+            state->window_adapter->render();
+            dump_frame(*state, "follow-focus-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
+
+            // The refresh it started runs and lands: the toggle is still the focus.
+            window->set_browser_busy(true);
+            window->set_game_refreshing(true);
+            state->window_adapter->render();
+            window->set_browser_busy(false);
+            window->set_game_refreshing(false);
+            state->window_adapter->render();
+            press_key_and_render(*state, *window, slint::platform::key_codes::Space);
+            CHECK(requests == std::vector<bool> {true, false});
+            press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+            CHECK(requests == std::vector<bool> {true, false, true});
+            CHECK(window->get_game_following());
+
+            // A key that repeats does not flip it again and again.
+            auto const before_repeat = requests.size();
+            window->window().dispatch_key_press_repeat_event(slint::SharedString {slint::platform::key_codes::Space});
+            CHECK(requests.size() == before_repeat);
+
+            // The mouse operates it as well (Slint pointer events delivered to the window).
+            window->set_game_following(false);
+            state->window_adapter->render();
+            // Where the box is drawn in the layout the window has now.
+            window->set_game_following(false);
+            auto const off = render_at_size(*state, size.width);
+            window->set_game_following(true);
+            auto const checked_frame = render_at_size(*state, size.width);
+            window->set_game_following(false);
+            auto const box = sidebar_difference_bounds(off, checked_frame, size.width);
+            REQUIRE(box.found);
+            state->window_adapter->render();
+            click_at(*window, center_of(box));
+            CHECK(requests.size() == before_repeat + 1);
+            CHECK(requests.back());
+        }
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: Follow board shows a keyboard focus ring", "[motif-slint-app][layout][follow]")
+{
+    auto const state = use_snapshot_platform(narrow_analysis.width, narrow_analysis.height);
+    auto window = make_follow_workspace(*state, WorkspacePreset::Review);
+    auto requests = 0;
+    window->on_game_follow_toggled([&requests](bool) -> void { ++requests; });
+    auto const unfocused = render_at_size(*state, narrow_analysis.width);
+
+    constexpr auto max_tab_stops = 80;
+    for (auto stop = 0; stop < max_tab_stops && requests == 0; ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Space);
+    }
+    REQUIRE(requests == 1);
+    auto const focused = render_at_size(*state, narrow_analysis.width);
+    auto const ring = sidebar_difference_bounds(unfocused, focused, narrow_analysis.width);
+    REQUIRE(ring.found);
+    // The ring surrounds the box and its label: wider than a box, not a bare cursor.
+    CHECK(ring.width() > 60);
+    CHECK(ring.height() >= 16);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: rows of a list being refreshed are dimmed and inert", "[motif-slint-app][layout][follow]")
+{
+    auto const state = use_snapshot_platform(wide_analysis.width, wide_analysis.height);
+    auto window = make_follow_workspace(*state, WorkspacePreset::Review);
+    window->set_game_following(true);
+    auto selected = std::vector<int> {};
+    auto activated = 0;
+    window->on_game_selected([&selected](int const row) -> void { selected.push_back(row); });
+    window->on_game_activate_requested([&activated]() -> void { ++activated; });
+    auto const idle = render_at_size(*state, wide_analysis.width);
+
+    window->set_browser_busy(true);
+    window->set_game_refreshing(true);
+    auto const refreshing = render_at_size(*state, wide_analysis.width);
+    dump_frame(*state, "follow-refreshing-1280", wide_analysis);
+    CHECK(sidebar_difference_bounds(idle, refreshing, wide_analysis.width).found);
+
+    // Where the first row is: the rows differ from an empty table.
+    window->set_game_refreshing(false);
+    window->set_browser_busy(false);
+    window->set_game_rows(make_game_rows(0));
+    auto const no_rows = render_at_size(*state, wide_analysis.width);
+    window->set_game_rows(make_game_rows(typical_games));
+    auto const rows = render_at_size(*state, wide_analysis.width);
+    auto const row_area = sidebar_difference_bounds(no_rows, rows, wide_analysis.width);
+    REQUIRE(row_area.found);
+    auto const first_row = slint::LogicalPosition {slint::Point<float> {
+        .x = static_cast<float>(row_area.left + 20),
+        .y = static_cast<float>(row_area.top + 10),
+    }};
+
+    window->set_browser_busy(true);
+    window->set_game_refreshing(true);
+    state->window_adapter->render();
+    click_at(*window, first_row);
+    click_at(*window, first_row);
+    CHECK(selected.empty());
+    CHECK(activated == 0);
+
+    window->set_browser_busy(false);
+    window->set_game_refreshing(false);
+    state->window_adapter->render();
+    click_at(*window, first_row);
+    CHECK(selected == std::vector<int> {0});
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the progress bar and the empty-list text draw over the table without moving a control",
+          "[motif-slint-app][layout][follow]")
+{
+    for (auto const size : {narrow_analysis, wide_analysis}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto window = make_follow_workspace(*state, WorkspacePreset::Review, few_games);
+        window->set_game_following(true);
+        window->set_game_rows(make_game_rows(0));
+        window->set_game_total_count(0);
+        auto const plain = render_at_size(*state, size.width);
+
+        // The bar is a thin band across the table.
+        window->set_game_progress_visible(true);
+        auto const bar = render_at_size(*state, size.width);
+        dump_frame(*state, "follow-progress-" + std::to_string(size.width), size);
+        auto const band = sidebar_difference_bounds(plain, bar, size.width);
+        REQUIRE(band.found);
+        CHECK(band.height() <= 8);
+        CHECK(band.width() > 100);
+        window->set_game_progress_visible(false);
+
+        // The text of an empty followed list or a failed refresh fills the table body only.
+        window->set_game_status_text("No games reach this position");
+        auto const empty_text = render_at_size(*state, size.width);
+        dump_frame(*state, "follow-empty-" + std::to_string(size.width), size);
+        auto const text_area = sidebar_difference_bounds(plain, empty_text, size.width);
+        REQUIRE(text_area.found);
+        CHECK(text_area.top > band.bottom);
+        CHECK(text_area.width() > 100);
+        window->set_game_status_text("Could not load the games for this position");
+        auto const failed_text = render_at_size(*state, size.width);
+        dump_frame(*state, "follow-failed-" + std::to_string(size.width), size);
+        CHECK(differs(empty_text, failed_text));
+        CHECK(right_margin_is_plain(failed_text, size));
+
+        // While the next result is on its way the text is hidden.
+        window->set_game_refreshing(true);
+        auto const hidden = render_at_size(*state, size.width);
+        CHECK_FALSE(sidebar_difference_bounds(plain, hidden, size.width).found);
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: a new result scrolls the table to the top and reveals a selected game that is still listed",
+          "[motif-slint-app][layout][follow]")
+{
+    constexpr auto game_count = 60;
+    auto const state = use_snapshot_platform();
+    auto window = make_follow_workspace(*state, WorkspacePreset::Review, game_count);
+    window->on_game_selected([&window](int const row) -> void { window->set_game_selected_row(row); });
+    window->on_game_move_selection([&window](int const delta) -> void { window->set_game_selected_row(std::clamp(window->get_game_selected_row() + delta, 0, game_count - 1)); });
+
+    // Focus the table (its focus ring is part of every later frame), then show it from the top with nothing selected.
+    constexpr auto max_tab_stops = 80;
+    for (auto stop = 0; stop < max_tab_stops && window->get_game_selected_row() < 0; ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::DownArrow);
+    }
+    REQUIRE(window->get_game_selected_row() == 0);
+    window->set_game_selected_row(-1);
+    auto const top = render_at_size(*state, snapshot_platform::width);
+
+    // Scroll to the end with the keyboard.
+    press_key_and_render(*state, *window, slint::platform::key_codes::End);
+    auto const bottom = render_at_size(*state, snapshot_platform::width);
+    REQUIRE(differs(top, bottom));
+
+    // A new result that no longer lists the selected game: back at the top, nothing selected.
+    window->set_game_selected_row(-1);
+    window->set_game_rows(make_game_rows(game_count));
+    window->set_game_result_serial(window->get_game_result_serial() + 1);
+    slint::platform::update_timers_and_animations();
+    CHECK_FALSE(differs(top, render_at_size(*state, snapshot_platform::width)));
+
+    // A new result that still lists the selected game far down: that row is brought into view.
+    window->set_game_selected_row(game_count - 1);
+    window->set_game_rows(make_game_rows(game_count));
+    window->set_game_result_serial(window->get_game_result_serial() + 1);
+    slint::platform::update_timers_and_animations();
+    auto const revealed = render_at_size(*state, snapshot_platform::width);
+    CHECK(differs(top, revealed));
+    // The selected row's fill (dark teal) is on screen, as it is when the user scrolls there.
+    auto const selection_pixels = [](std::span<slint::Rgb8Pixel const> const pixels) -> std::ptrdiff_t
+    {
+        return std::ranges::count_if(pixels,
+                                     [](slint::Rgb8Pixel const pixel) -> bool
+                                     { return pixel.r < 40 && pixel.g > pixel.r + 30 && pixel.b > pixel.r + 30; });
+    };
+    CHECK(selection_pixels(top) < selection_pixels(revealed) - 1'000);
+    CHECK(selection_pixels(revealed) > 1'000);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

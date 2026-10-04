@@ -12,6 +12,7 @@
 
 #include "motif/slint_app/analysis_presenter.hpp"
 #include "motif/slint_app/board_host.hpp"
+#include "motif/slint_app/event_loop.hpp"
 #include "motif/slint_app/workspace_service.hpp"
 #include "workspace.h"
 
@@ -30,16 +31,6 @@ constexpr auto analysis_flush_interval = std::chrono::milliseconds {100};
 // the engine starts on the position then on the board, so a burst of navigation
 // costs one launch and the final position is the one analysed.
 constexpr auto analysis_follow_delay = std::chrono::milliseconds {150};
-
-// How the runner reaches the event loop. `schedule` may be called from any
-// thread and runs the task on the event-loop thread after the delay.
-struct analysis_environment
-{
-    std::function<void(std::chrono::milliseconds, std::function<void()>)> schedule;
-};
-
-// Slint's event loop: invoke_from_event_loop, and a single-shot timer for delays.
-[[nodiscard]] auto make_event_loop_environment() -> analysis_environment;
 
 void publish_analysis(WorkspaceWindow& window, analysis_state const& state);
 
@@ -60,7 +51,7 @@ class async_analysis_runner
 
     async_analysis_runner(slint::ComponentWeakHandle<WorkspaceWindow> window,
                           workspace_service& config,
-                          analysis_environment environment,
+                          event_loop_environment environment,
                           position_provider position);
     ~async_analysis_runner();
 

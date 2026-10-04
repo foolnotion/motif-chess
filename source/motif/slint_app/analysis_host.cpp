@@ -97,24 +97,6 @@ class analysis_inbox
 
 }  // namespace
 
-auto make_event_loop_environment() -> analysis_environment
-{
-    return analysis_environment {
-        .schedule = [](std::chrono::milliseconds const delay, std::function<void()> task) -> void
-        {
-            slint::invoke_from_event_loop(
-                [delay, task = std::move(task)]() mutable -> void
-                {
-                    if (delay.count() <= 0) {
-                        task();
-                    } else {
-                        slint::Timer::single_shot(delay, std::move(task));
-                    }
-                });
-        },
-    };
-}
-
 void publish_analysis(WorkspaceWindow& window, analysis_state const& state)
 {
     auto names = std::vector<slint::SharedString> {};
@@ -155,7 +137,7 @@ struct async_analysis_runner::impl
 {
     impl(slint::ComponentWeakHandle<WorkspaceWindow> window_value,
          workspace_service& config_value,
-         analysis_environment environment_value,
+         event_loop_environment environment_value,
          position_provider position_value)
         : window(std::move(window_value))
         , config(&config_value)
@@ -166,7 +148,7 @@ struct async_analysis_runner::impl
 
     slint::ComponentWeakHandle<WorkspaceWindow> window;
     workspace_service* config;
-    analysis_environment environment;
+    event_loop_environment environment;
     position_provider position;
     analysis_presenter presenter;
     std::shared_ptr<analysis_inbox> inbox {std::make_shared<analysis_inbox>()};
@@ -277,7 +259,7 @@ struct async_analysis_runner::impl
 
 async_analysis_runner::async_analysis_runner(slint::ComponentWeakHandle<WorkspaceWindow> window,
                                              workspace_service& config,
-                                             analysis_environment environment,
+                                             event_loop_environment environment,
                                              position_provider position)
     : impl_ {std::make_shared<impl>(std::move(window), config, std::move(environment), std::move(position))}
 {

@@ -24,6 +24,7 @@
 #include "motif/slint_app/analysis_host.hpp"
 #include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/board_presenter.hpp"
+#include "motif/slint_app/browser_host.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/import_service.hpp"
 #include "motif/slint_app/pgn_launch_queue.hpp"
@@ -37,12 +38,9 @@ namespace
 {
 
 using motif::slint_app::async_board_runner;
+using motif::slint_app::async_browser_runner;
 using replace_confirmation = motif::slint_app::replace_controller;
 using workspace_result = motif::slint_app::result<void>;
-using browser_query_result = motif::slint_app::browser_result<motif::slint_app::browser_query>;
-using activation_result = motif::slint_app::browser_result<motif::slint_app::activation_request>;
-using browser_page_result = motif::slint_app::browser_result<motif::slint_app::browser_page>;
-using loaded_game_result = motif::slint_app::browser_result<motif::slint_app::loaded_game>;
 using search_query_result = motif::slint_app::search_result<motif::slint_app::search_query>;
 using search_page_result = motif::slint_app::search_result<motif::slint_app::search_page>;
 
@@ -182,59 +180,6 @@ auto publish_import_state(WorkspaceWindow& window, motif::slint_app::import_serv
     return active;
 }
 
-void clear_browser(WorkspaceWindow& window)
-{
-    window.set_game_rows(std::make_shared<slint::VectorModel<GameRow>>());
-    window.set_game_total_count(0);
-    window.set_game_page_index(0);
-    window.set_game_has_previous_page(false);
-    window.set_game_has_next_page(false);
-    window.set_game_selected_row(-1);
-    window.set_game_player_filter("");
-    window.set_game_result_filter("");
-    window.set_game_sort_column(0);
-    window.set_game_sort_ascending(true);
-    window.set_game_active_title("");
-    window.set_game_column_widths(std::make_shared<slint::VectorModel<std::int32_t>>());
-    window.set_browser_busy(false);
-}
-
-void publish_browser(WorkspaceWindow& window, motif::slint_app::game_browser_state const& state)
-{
-    auto rows = std::vector<GameRow> {};
-    rows.reserve(state.games.size());
-    for (auto const& game : state.games) {
-        rows.push_back(GameRow {
-            .white = shared_string(game.white),
-            .black = shared_string(game.black),
-            .result = shared_string(game.result),
-            .event = shared_string(game.event),
-            .date = shared_string(game.date),
-            .eco = shared_string(game.eco),
-        });
-    }
-    window.set_game_rows(std::make_shared<slint::VectorModel<GameRow>>(std::move(rows)));
-    window.set_game_total_count(to_ui_count(state.total_count));
-    window.set_game_page_index(to_ui_count(state.page_index));
-    window.set_game_has_previous_page(state.has_previous_page);
-    window.set_game_has_next_page(state.has_next_page);
-    window.set_game_selected_row(state.selected_row ? to_ui_count(*state.selected_row) : -1);
-    window.set_game_player_filter(shared_string(state.player_filter));
-    window.set_game_result_filter(shared_string(state.result_filter));
-    window.set_game_sort_column(static_cast<std::int32_t>(state.sort_column));
-    window.set_game_sort_ascending(state.sort_ascending);
-    window.set_browser_error_text(shared_string(state.error_text));
-    auto column_widths = std::vector<std::int32_t> {state.column_widths.begin(), state.column_widths.end()};
-    window.set_game_column_widths(std::make_shared<slint::VectorModel<std::int32_t>>(std::move(column_widths)));
-
-    if (state.active_game) {
-        auto const title = state.active_game->white.name + " – " + state.active_game->black.name + "  " + state.active_game->result;
-        window.set_game_active_title(shared_string(title));
-    } else {
-        window.set_game_active_title("");
-    }
-}
-
 void clear_search(WorkspaceWindow& window)
 {
     window.set_search_matches(std::make_shared<slint::VectorModel<SearchMatchRow>>());
@@ -311,467 +256,6 @@ auto component_matches(slint::ComponentWeakHandle<WorkspaceWindow> const& window
 {
     return lifetime->load(std::memory_order_acquire) == lifetime_token && window.lock().has_value();
 }
-
-class async_browser_runner
-{
-  public:
-    explicit async_browser_runner(slint::ComponentWeakHandle<WorkspaceWindow> window)
-        : state_(std::make_shared<state>(std::move(window)))
-    {
-    }
-
-    ~async_browser_runner()
-    {
-        state_->lifetime->fetch_add(1, std::memory_order_acq_rel);
-        std::scoped_lock const lock {state_->worker_mutex};
-        if (state_->worker.joinable()) {
-            state_->worker.join();
-        }
-    }
-
-    async_browser_runner(async_browser_runner const&) = delete;
-    auto operator=(async_browser_runner const&) -> async_browser_runner& = delete;
-    async_browser_runner(async_browser_runner&&) = delete;
-    auto operator=(async_browser_runner&&) -> async_browser_runner& = delete;
-
-    void attach(motif::db::database_manager& database)
-    {
-        ++state_->epoch;
-        state_->presenter = std::make_shared<motif::slint_app::game_browser_presenter>(database);
-        state_->pending_query.reset();
-        state_->pending_activation.reset();
-        state_->pending_external_activation.reset();
-    }
-
-    void detach()
-    {
-        ++state_->epoch;
-        state_->presenter.reset();
-        state_->pending_query.reset();
-        state_->pending_activation.reset();
-        state_->pending_external_activation.reset();
-        if (auto locked = state_->window.lock()) {
-            clear_browser(**locked);
-        }
-    }
-
-    using activation_success_handler = std::function<void(motif::db::game_id, motif::db::game const&)>;
-    using activation_failure_handler = std::function<void()>;
-
-    void set_activation_handlers(activation_success_handler success, activation_failure_handler failure)
-    {
-        state_->activation_succeeded = std::move(success);
-        state_->activation_failed = std::move(failure);
-    }
-
-    // Handlers for activations that originate outside this runner's own row
-    // selection (e.g. a search-result row): reuses the identical
-    // single-read pipeline as row activation via activate_by_id(), so the
-    // completion carries the caller-supplied ply alongside the loaded game.
-    using external_activation_success_handler = std::function<void(motif::db::game_id, motif::db::game const&, std::size_t)>;
-
-    void set_external_activation_handlers(external_activation_success_handler success, activation_failure_handler failure)
-    {
-        state_->external_activation_succeeded = std::move(success);
-        state_->external_activation_failed = std::move(failure);
-    }
-
-    [[nodiscard]] auto is_busy() const noexcept -> bool { return state_->busy.load(std::memory_order_acquire); }
-
-    // Snapshot of the browser's current player/result filters, reused as-is
-    // by search queries so the two presenters share one filter model
-    // without coupling to each other directly.
-    [[nodiscard]] auto active_filter() const -> motif::db::search_filter
-    {
-        auto filter = motif::db::search_filter {};
-        if (!state_->presenter) {
-            return filter;
-        }
-        auto const& browser_state = state_->presenter->state();
-        if (!browser_state.player_filter.empty()) {
-            filter.player_name = browser_state.player_filter;
-        }
-        if (!browser_state.result_filter.empty()) {
-            filter.result = browser_state.result_filter;
-        }
-        return filter;
-    }
-
-    void load_initial()
-    {
-        prepare_query([](auto& presenter) -> auto { return presenter.prepare_initial_load(); });
-    }
-
-    void set_filters(std::string player, std::string result)
-    {
-        prepare_query([player = std::move(player), result = std::move(result)](auto& presenter) mutable -> auto
-                      { return presenter.set_filters(std::move(player), std::move(result)); });
-    }
-
-    void set_page(std::size_t page_index)
-    {
-        prepare_query([page_index](auto& presenter) -> auto { return presenter.set_page(page_index); });
-    }
-
-    void sort(std::size_t column, bool ascending)
-    {
-        prepare_query([column, ascending](auto& presenter) -> auto { return presenter.sort_games(column, ascending); });
-    }
-
-    void select(std::size_t row)
-    {
-        if (!state_->presenter) {
-            return;
-        }
-        (void)state_->presenter->select_game(row);
-        publish();
-    }
-
-    void move_selection(int delta)
-    {
-        if (!state_->presenter) {
-            return;
-        }
-        (void)state_->presenter->move_selection(delta);
-        publish();
-    }
-
-    void activate()
-    {
-        if (!state_->presenter) {
-            return;
-        }
-        run_activation(state_, state_->presenter->prepare_activation(), state_->epoch);
-    }
-
-    // Activates an arbitrary game by id at a specific ply (e.g. a search
-    // match row). Reuses this runner's existing single-read activation
-    // pipeline -- busy gating, worker thread, lifetime token,
-    // generation-guarded completion -- rather than opening a second
-    // concurrent database read, and does not touch browser row selection.
-    void activate_by_id(motif::db::game_id game_id, std::size_t ply)
-    {
-        if (!state_->presenter) {
-            return;
-        }
-        if (state_->busy.load(std::memory_order_acquire)) {
-            state_->pending_external_activation = pending_external_activation {.game_id = game_id, .ply = ply, .epoch = state_->epoch};
-            return;
-        }
-        run_external_activation(state_, state_->presenter->prepare_external_activation(game_id), ply, state_->epoch);
-    }
-
-    void resize_column(std::size_t column, std::int32_t width)
-    {
-        if (!state_->presenter) {
-            return;
-        }
-        (void)state_->presenter->resize_column(column, width);
-        publish();
-    }
-
-    void dismiss_error()
-    {
-        if (state_->presenter) {
-            state_->presenter->dismiss_error();
-            if (auto locked = state_->window.lock()) {
-                publish_browser(**locked, state_->presenter->state());
-            }
-        }
-    }
-
-  private:
-    struct pending_external_activation
-    {
-        motif::db::game_id game_id;
-        std::size_t ply;
-        std::uint64_t epoch;
-    };
-
-    struct state
-    {
-        explicit state(slint::ComponentWeakHandle<WorkspaceWindow> window_value)
-            : window(std::move(window_value))
-        {
-        }
-
-        slint::ComponentWeakHandle<WorkspaceWindow> window;
-        std::shared_ptr<motif::slint_app::game_browser_presenter> presenter;
-        std::mutex worker_mutex;
-        std::thread worker;
-        std::atomic<bool> busy {false};
-        std::optional<browser_query_result> pending_query;
-        std::optional<activation_result> pending_activation;
-        std::optional<pending_external_activation> pending_external_activation;
-        std::uint64_t epoch {};
-        std::shared_ptr<std::atomic<std::uint64_t>> lifetime {std::make_shared<std::atomic<std::uint64_t>>(0)};
-        activation_success_handler activation_succeeded;
-        activation_failure_handler activation_failed;
-        external_activation_success_handler external_activation_succeeded;
-        activation_failure_handler external_activation_failed;
-    };
-
-    std::shared_ptr<state> state_;
-
-    template<typename Prepare>
-    void prepare_query(Prepare prepare)
-    {
-        if (!state_->presenter) {
-            return;
-        }
-        run_query(state_, prepare(*state_->presenter), state_->epoch);
-    }
-
-    void publish()
-    {
-        if (state_->presenter) {
-            if (auto locked = state_->window.lock()) {
-                publish_browser(**locked, state_->presenter->state());
-            }
-        }
-    }
-
-    static void dispatch_pending(std::shared_ptr<state> const& shared)
-    {
-        if (shared->pending_query) {
-            auto query = std::move(*shared->pending_query);
-            shared->pending_query.reset();
-            run_query(shared, std::move(query), shared->epoch);
-            return;
-        }
-        if (shared->pending_activation) {
-            auto request = std::move(*shared->pending_activation);
-            shared->pending_activation.reset();
-            run_activation(shared, std::move(request), shared->epoch);
-            return;
-        }
-        if (shared->pending_external_activation && shared->presenter) {
-            auto request = *shared->pending_external_activation;
-            shared->pending_external_activation.reset();
-            run_external_activation(shared, shared->presenter->prepare_external_activation(request.game_id), request.ply, request.epoch);
-        }
-    }
-
-    struct completion_key
-    {
-        std::uint64_t epoch;
-        std::uint64_t generation;
-    };
-
-    static void complete_query(std::shared_ptr<state> const& shared, completion_key const key, browser_page_result result)
-    {
-        if (shared->epoch == key.epoch && shared->presenter) {
-            if (result) {
-                (void)shared->presenter->apply_query(std::move(*result));
-            } else {
-                (void)shared->presenter->apply_query_error(key.generation, result.error());
-            }
-            if (auto locked = shared->window.lock()) {
-                publish_browser(**locked, shared->presenter->state());
-            }
-        }
-        shared->busy.store(false, std::memory_order_release);
-        if (auto locked = shared->window.lock()) {
-            (*locked)->set_browser_busy(false);
-        }
-        dispatch_pending(shared);
-    }
-
-    static void run_query(std::shared_ptr<state> const& shared, browser_query_result query, std::uint64_t epoch)
-    {
-        if (!query) {
-            if (shared->presenter) {
-                if (auto locked = shared->window.lock()) {
-                    publish_browser(**locked, shared->presenter->state());
-                }
-            }
-            return;
-        }
-        if (shared->busy.exchange(true, std::memory_order_acq_rel)) {
-            shared->pending_query = std::move(query);
-            shared->pending_activation.reset();
-            shared->pending_external_activation.reset();
-            return;
-        }
-        if (auto locked = shared->window.lock()) {
-            (*locked)->set_browser_busy(true);
-        }
-        auto presenter = shared->presenter;
-        auto const lifetime = shared->lifetime;
-        auto const lifetime_token = lifetime->load(std::memory_order_acquire);
-        auto const window = shared->window;
-        std::scoped_lock const lock {shared->worker_mutex};
-        if (shared->worker.joinable()) {
-            shared->worker.join();
-        }
-        shared->worker = std::thread(
-            [shared, presenter = std::move(presenter), query = std::move(*query), epoch, lifetime, lifetime_token, window]() mutable -> void
-            {
-                auto result = presenter->execute_query(query);
-                slint::invoke_from_event_loop(
-                    [shared, epoch, generation = query.generation, result = std::move(result), lifetime, lifetime_token, window]() mutable
-                        -> void
-                    {
-                        if (!component_matches(window, lifetime, lifetime_token)) {
-                            return;
-                        }
-                        complete_query(shared, completion_key {.epoch = epoch, .generation = generation}, std::move(result));
-                    });
-            });
-    }
-
-    static void complete_activation(std::shared_ptr<state> const& shared, completion_key const key, loaded_game_result result)
-    {
-        if (shared->epoch == key.epoch && shared->presenter) {
-            if (result) {
-                auto applied = shared->presenter->apply_activation(std::move(*result));
-                auto const& presenter_state = shared->presenter->state();
-                if (applied && *applied && shared->activation_succeeded && presenter_state.active_game) {
-                    shared->activation_succeeded(presenter_state.active_game_id, *presenter_state.active_game);
-                } else if (!applied && shared->activation_failed) {
-                    shared->activation_failed();
-                }
-            } else {
-                auto applied = shared->presenter->apply_activation_error(key.generation, result.error());
-                if (applied && *applied && shared->activation_failed) {
-                    shared->activation_failed();
-                }
-            }
-            if (auto locked = shared->window.lock()) {
-                publish_browser(**locked, shared->presenter->state());
-            }
-        }
-        shared->busy.store(false, std::memory_order_release);
-        if (auto locked = shared->window.lock()) {
-            (*locked)->set_browser_busy(false);
-        }
-        dispatch_pending(shared);
-    }
-
-    static void run_activation(std::shared_ptr<state> const& shared, activation_result request, std::uint64_t epoch)
-    {
-        if (!request) {
-            if (shared->presenter) {
-                if (auto locked = shared->window.lock()) {
-                    publish_browser(**locked, shared->presenter->state());
-                }
-            }
-            return;
-        }
-        if (shared->busy.exchange(true, std::memory_order_acq_rel)) {
-            shared->pending_activation = std::move(request);
-            shared->pending_external_activation.reset();
-            return;
-        }
-        if (auto locked = shared->window.lock()) {
-            (*locked)->set_browser_busy(true);
-        }
-        auto presenter = shared->presenter;
-        auto const lifetime = shared->lifetime;
-        auto const lifetime_token = lifetime->load(std::memory_order_acquire);
-        auto const window = shared->window;
-        std::scoped_lock const lock {shared->worker_mutex};
-        if (shared->worker.joinable()) {
-            shared->worker.join();
-        }
-        shared->worker = std::thread(
-            [shared, presenter = std::move(presenter), request = *request, epoch, lifetime, lifetime_token, window]() mutable -> void
-            {
-                auto result = presenter->execute_activation(request);
-                slint::invoke_from_event_loop(
-                    [shared, epoch, generation = request.generation, result = std::move(result), lifetime, lifetime_token, window]() mutable
-                        -> void
-                    {
-                        if (!component_matches(window, lifetime, lifetime_token)) {
-                            return;
-                        }
-                        complete_activation(shared, completion_key {.epoch = epoch, .generation = generation}, std::move(result));
-                    });
-            });
-    }
-
-    static void complete_external_activation(std::shared_ptr<state> const& shared,
-                                             completion_key const key,
-                                             loaded_game_result result,
-                                             std::size_t const ply)
-    {
-        if (shared->epoch == key.epoch && shared->presenter) {
-            if (result) {
-                auto applied = shared->presenter->apply_external_activation(std::move(*result));
-                auto const& presenter_state = shared->presenter->state();
-                if (applied && *applied && shared->external_activation_succeeded && presenter_state.active_game) {
-                    shared->external_activation_succeeded(presenter_state.active_game_id, *presenter_state.active_game, ply);
-                } else if (!applied && shared->external_activation_failed) {
-                    shared->external_activation_failed();
-                }
-            } else {
-                auto applied = shared->presenter->apply_activation_error(key.generation, result.error());
-                if (applied && *applied && shared->external_activation_failed) {
-                    shared->external_activation_failed();
-                }
-            }
-            if (auto locked = shared->window.lock()) {
-                publish_browser(**locked, shared->presenter->state());
-            }
-        }
-        shared->busy.store(false, std::memory_order_release);
-        if (auto locked = shared->window.lock()) {
-            (*locked)->set_browser_busy(false);
-        }
-        dispatch_pending(shared);
-    }
-
-    static void run_external_activation(std::shared_ptr<state> const& shared,
-                                        activation_result request,
-                                        std::size_t ply,
-                                        std::uint64_t epoch)
-    {
-        if (!request) {
-            if (shared->presenter) {
-                if (auto locked = shared->window.lock()) {
-                    publish_browser(**locked, shared->presenter->state());
-                }
-            }
-            return;
-        }
-        if (shared->busy.exchange(true, std::memory_order_acq_rel)) {
-            shared->pending_external_activation = pending_external_activation {.game_id = request->game_id, .ply = ply, .epoch = epoch};
-            return;
-        }
-        if (auto locked = shared->window.lock()) {
-            (*locked)->set_browser_busy(true);
-        }
-        auto presenter = shared->presenter;
-        auto const lifetime = shared->lifetime;
-        auto const lifetime_token = lifetime->load(std::memory_order_acquire);
-        auto const window = shared->window;
-        std::scoped_lock const lock {shared->worker_mutex};
-        if (shared->worker.joinable()) {
-            shared->worker.join();
-        }
-        shared->worker = std::thread(
-            [shared, presenter = std::move(presenter), request = *request, ply, epoch, lifetime, lifetime_token, window]() mutable -> void
-            {
-                auto result = presenter->execute_activation(request);
-                slint::invoke_from_event_loop(
-                    [shared,
-                     epoch,
-                     generation = request.generation,
-                     result = std::move(result),
-                     ply,
-                     lifetime,
-                     lifetime_token,
-                     window]() mutable -> void
-                    {
-                        if (!component_matches(window, lifetime, lifetime_token)) {
-                            return;
-                        }
-                        complete_external_activation(
-                            shared, completion_key {.epoch = epoch, .generation = generation}, std::move(result), ply);
-                    });
-            });
-    }
-};
 
 // Off-event-loop adapter around the toolkit-neutral search presenter,
 // mirroring async_browser_runner's worker-thread + invoke_from_event_loop +
@@ -1422,83 +906,6 @@ void register_workspace_callbacks(WorkspaceWindow& window,
         });
 }
 
-void register_browser_callbacks(WorkspaceWindow& window,
-                                async_browser_runner& browser,
-                                motif::slint_app::import_service const& importer,
-                                async_workspace_runner const& runner,
-                                async_board_runner& board,
-                                async_search_runner& search,
-                                replace_confirmation& confirmation)
-{
-    window.on_game_filters_changed(
-        [&](slint::SharedString const& player, slint::SharedString const& result) -> void
-        {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
-            }
-            browser.set_filters(std::string {player}, std::string {result});
-            // Filter refresh follows the auto-search preference: with
-            // auto-search off, only a manual Search re-queries.
-            search.refresh_if_auto(board.current_hash(), browser.active_filter());
-        });
-    window.on_game_page_requested(
-        [&](std::int32_t page) -> void
-        {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || page < 0) {
-                return;
-            }
-            browser.set_page(static_cast<std::size_t>(page));
-        });
-    window.on_game_selected(
-        [&](std::int32_t row) -> void
-        {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || row < 0) {
-                return;
-            }
-            browser.select(static_cast<std::size_t>(row));
-        });
-    window.on_game_move_selection(
-        [&](std::int32_t delta) -> void
-        {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
-            }
-            browser.move_selection(delta);
-        });
-    window.on_game_activate_requested(
-        [&]() -> void
-        {
-            (void)motif::slint_app::run_when_idle(current_activity(importer, runner, browser, board, search),
-                                                  [&]() -> void
-                                                  {
-                                                      confirmation.request(
-                                                          "Load game",
-                                                          [&]() -> void
-                                                          {
-                                                              (void)motif::slint_app::run_when_idle(
-                                                                  current_activity(importer, runner, browser, board, search),
-                                                                  [&]() -> void { browser.activate(); });
-                                                          });
-                                                  });
-        });
-    window.on_game_sort_requested(
-        [&](std::int32_t column, bool ascending) -> void
-        {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || column < 0) {
-                return;
-            }
-            browser.sort(static_cast<std::size_t>(column), ascending);
-        });
-    window.on_game_column_resized(
-        [&](std::int32_t column, std::int32_t width) -> void
-        {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || column < 0) {
-                return;
-            }
-            browser.resize_column(static_cast<std::size_t>(column), width);
-        });
-}
-
 void register_search_callbacks(WorkspaceWindow& window,
                                async_search_runner& search,
                                async_browser_runner& browser,
@@ -1675,7 +1082,7 @@ auto main(int const argc, char** const argv) -> int
     auto service = motif::slint_app::workspace_service {motif::slint_app::config_path()};
     auto importer = motif::slint_app::import_service {};
     auto window = WorkspaceWindow::create();
-    auto browser = async_browser_runner {window};
+    auto browser = async_browser_runner {window, motif::slint_app::make_event_loop_environment()};
     auto board = async_board_runner {window};
     auto search = async_search_runner {window};
     auto analysis = motif::slint_app::async_analysis_runner {
@@ -1683,12 +1090,13 @@ auto main(int const argc, char** const argv) -> int
     auto activation = motif::slint_app::make_board_activation_handlers(slint::ComponentWeakHandle<WorkspaceWindow> {window}, board);
     browser.set_activation_handlers(activation.loaded, activation.failed);
     browser.set_external_activation_handlers(activation.loaded_at, activation.failed_at);
-    board.set_position_changed_handler([&search, &browser, &analysis](motif::db::zobrist_hash const hash) -> void
+    board.add_position_changed_handler([&search, &browser, &analysis](motif::db::zobrist_hash const hash) -> void
                                        {
                                            search.note_board_position(hash);
                                            search.search_if_hash_changed(hash, browser.active_filter());
                                            analysis.position_changed();
                                        });
+    board.add_position_changed_handler([&browser](motif::db::zobrist_hash const hash) -> void { browser.position_changed(hash); });
     auto runner = async_workspace_runner {service, window, browser, board, search, analysis};
     search.set_retry_on_database_failure([&importer]() -> bool { return importer.active(); });
     auto import_timer = slint::Timer {};
@@ -1700,7 +1108,7 @@ auto main(int const argc, char** const argv) -> int
     auto const activity = motif::slint_app::activity_probe {[&]() -> motif::slint_app::workspace_activity
                                                             { return current_activity(importer, runner, browser, board, search); }};
 
-    clear_browser(*window);
+    motif::slint_app::clear_browser(*window);
     motif::slint_app::clear_board(*window);
     clear_search(*window);
     publish_workspace(*window, service);
@@ -1709,7 +1117,16 @@ auto main(int const argc, char** const argv) -> int
     register_database_open_callbacks(*window, importer, runner, browser, board, search, confirmation);
     register_database_exit_callbacks(*window, service, importer, runner, browser, board, search, analysis, confirmation);
     motif::slint_app::register_analysis_callbacks(*window, analysis, activity);
-    register_browser_callbacks(*window, browser, importer, runner, board, search, confirmation);
+    motif::slint_app::register_browser_callbacks(
+        *window,
+        browser,
+        activity,
+        confirmation,
+        motif::slint_app::browser_hooks {
+            .filters_changed = [&search, &board, &browser]() -> void
+            { search.refresh_if_auto(board.current_hash(), browser.active_filter()); },
+            .board_position = [&board]() -> std::optional<motif::db::zobrist_hash> { return board.current_hash(); },
+        });
     motif::slint_app::register_board_callbacks(*window, board, activity);
     motif::slint_app::register_play_callbacks(*window, board, activity, confirmation);
     register_search_callbacks(*window, search, browser, importer, runner, board, confirmation);
