@@ -5,6 +5,8 @@ find_package(glaze REQUIRED)
 find_package(tl-expected REQUIRED)
 
 add_library(motif_slint_app_service STATIC
+    analysis_presenter.cpp
+    analysis_service.cpp
     board_presenter.cpp
     config.cpp
     explorer_table.cpp
@@ -19,6 +21,7 @@ add_library(motif_slint_app_service STATIC
 target_link_libraries(motif_slint_app_service PUBLIC
     motif_chess
     motif_db
+    motif_engine
     motif_game_navigator
     motif_import
     motif_search
@@ -31,7 +34,7 @@ target_include_directories(motif_slint_app_service PUBLIC
 )
 target_compile_features(motif_slint_app_service PUBLIC cxx_std_23)
 
-add_executable(motif_slint_app main.cpp board_host.cpp)
+add_executable(motif_slint_app main.cpp analysis_host.cpp board_host.cpp)
 # Pick a deliberate Qt-free desktop style instead of relying on native's linux fallback.
 set_property(GLOBAL PROPERTY SLINT_STYLE "cosmic")
 slint_target_sources(motif_slint_app ui/workspace.slint)

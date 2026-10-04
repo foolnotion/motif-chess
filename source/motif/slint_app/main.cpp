@@ -21,6 +21,7 @@
 #include <slint.h>
 
 #include "motif/slint_app/activity_gate.hpp"
+#include "motif/slint_app/analysis_host.hpp"
 #include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/board_presenter.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
@@ -1111,8 +1112,9 @@ class async_workspace_runner
                            slint::ComponentWeakHandle<WorkspaceWindow> window,
                            async_browser_runner& browser,
                            async_board_runner& board,
-                           async_search_runner& search)
-        : state_(std::make_shared<state>(service, std::move(window), browser, board, search))
+                           async_search_runner& search,
+                           motif::slint_app::async_analysis_runner& analysis)
+        : state_(std::make_shared<state>(service, std::move(window), browser, board, search, analysis))
     {
     }
 
@@ -1155,12 +1157,14 @@ class async_workspace_runner
               slint::ComponentWeakHandle<WorkspaceWindow> window_value,
               async_browser_runner& browser_value,
               async_board_runner& board_value,
-              async_search_runner& search_value)
+              async_search_runner& search_value,
+              motif::slint_app::async_analysis_runner& analysis_value)
             : service(service_value)
             , window(std::move(window_value))
             , browser(browser_value)
             , board(board_value)
             , search(search_value)
+            , analysis(analysis_value)
         {
         }
 
@@ -1169,6 +1173,7 @@ class async_workspace_runner
         async_browser_runner& browser;
         async_board_runner& board;
         async_search_runner& search;
+        motif::slint_app::async_analysis_runner& analysis;
         std::thread worker;
         std::atomic<bool> busy {false};
         std::shared_ptr<std::atomic<std::uint64_t>> lifetime {std::make_shared<std::atomic<std::uint64_t>>(0)};
@@ -1205,6 +1210,8 @@ class async_workspace_runner
                             workspace_window.set_busy(false);
                             if (result) {
                                 if (auto* database = shared->service.active_database(); database != nullptr) {
+                                    // The analysis belongs to the workspace it was started in.
+                                    shared->analysis.workspace_changed();
                                     shared->browser.attach(*database);
                                     shared->browser.load_initial();
                                     shared->search.attach(*database);
@@ -1325,6 +1332,7 @@ void register_database_exit_callbacks(WorkspaceWindow& window,
                                       async_browser_runner& browser,
                                       async_board_runner& board,
                                       async_search_runner& search,
+                                      motif::slint_app::async_analysis_runner& analysis,
                                       replace_confirmation& confirmation)
 {
     window.on_scratch_requested(
@@ -1351,6 +1359,7 @@ void register_database_exit_callbacks(WorkspaceWindow& window,
             confirmation.request("Close database",
                                  [&]() -> void
                                  {
+                                     analysis.workspace_changed();
                                      browser.detach();
                                      board.detach();
                                      search.detach();
@@ -1669,15 +1678,18 @@ auto main(int const argc, char** const argv) -> int
     auto browser = async_browser_runner {window};
     auto board = async_board_runner {window};
     auto search = async_search_runner {window};
+    auto analysis = motif::slint_app::async_analysis_runner {
+        window, service, motif::slint_app::make_event_loop_environment(), [&board]() -> std::optional<std::string> { return board.current_fen(); }};
     auto activation = motif::slint_app::make_board_activation_handlers(slint::ComponentWeakHandle<WorkspaceWindow> {window}, board);
     browser.set_activation_handlers(activation.loaded, activation.failed);
     browser.set_external_activation_handlers(activation.loaded_at, activation.failed_at);
-    board.set_position_changed_handler([&search, &browser](motif::db::zobrist_hash const hash) -> void
+    board.set_position_changed_handler([&search, &browser, &analysis](motif::db::zobrist_hash const hash) -> void
                                        {
                                            search.note_board_position(hash);
                                            search.search_if_hash_changed(hash, browser.active_filter());
+                                           analysis.position_changed();
                                        });
-    auto runner = async_workspace_runner {service, window, browser, board, search};
+    auto runner = async_workspace_runner {service, window, browser, board, search, analysis};
     search.set_retry_on_database_failure([&importer]() -> bool { return importer.active(); });
     auto import_timer = slint::Timer {};
     auto launch_arguments_list = launch_arguments(std::span<char* const> {argv, static_cast<std::size_t>(argc)});
@@ -1692,9 +1704,11 @@ auto main(int const argc, char** const argv) -> int
     motif::slint_app::clear_board(*window);
     clear_search(*window);
     publish_workspace(*window, service);
+    analysis.load();
     register_workspace_callbacks(*window, service, runner, browser, board, search);
     register_database_open_callbacks(*window, importer, runner, browser, board, search, confirmation);
-    register_database_exit_callbacks(*window, service, importer, runner, browser, board, search, confirmation);
+    register_database_exit_callbacks(*window, service, importer, runner, browser, board, search, analysis, confirmation);
+    motif::slint_app::register_analysis_callbacks(*window, analysis, activity);
     register_browser_callbacks(*window, browser, importer, runner, board, search, confirmation);
     motif::slint_app::register_board_callbacks(*window, board, activity);
     motif::slint_app::register_play_callbacks(*window, board, activity, confirmation);
@@ -1726,5 +1740,7 @@ auto main(int const argc, char** const argv) -> int
     motif::slint_app::install_close_guard(*window, board, confirmation);
 
     window->run();
+    // The window is closed: stop and release the engine before anything else is torn down.
+    analysis.shutdown();
     return 0;
 }

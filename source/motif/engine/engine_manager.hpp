@@ -98,6 +98,16 @@ class engine_manager
     // Returns analysis_already_terminal if the session is already done.
     auto stop_analysis(std::string const& analysis_id) -> result<void>;
 
+    // Forget a session and shut its engine process down, whether the session is
+    // running, finished or crashed. Blocks until the engine has quit and its
+    // reader thread has joined; once it returns no callback of the session runs.
+    // Never call it from inside one of the session's own callbacks (that is the
+    // reader thread) and keep it off any thread that must stay responsive.
+    // Returns analysis_not_found if the analysis_id is unknown, including when
+    // it was already released. A later subscribe() or stop_analysis() on a
+    // released id reports analysis_not_found.
+    auto release_analysis(std::string const& analysis_id) -> result<void>;
+
     // Register callbacks for SSE event forwarding.
     // Returns analysis_not_found if the analysis_id is unknown.
     auto subscribe(std::string const& analysis_id,

@@ -144,6 +144,22 @@ auto workspace_preset_from_string(std::string_view const name) noexcept -> works
     return workspace_preset_kind::review;
 }
 
+auto to_string(analysis_limit_kind const kind) noexcept -> std::string_view
+{
+    switch (kind) {
+        case analysis_limit_kind::depth:
+            return "depth";
+        case analysis_limit_kind::movetime:
+            return "movetime";
+    }
+    return "depth";
+}
+
+auto analysis_limit_from_string(std::string_view const name) noexcept -> analysis_limit_kind
+{
+    return name == "movetime" ? analysis_limit_kind::movetime : analysis_limit_kind::depth;
+}
+
 void push_recent(workspace_config& config, std::string const& name, std::string const& path)
 {
     auto& recent = config.recent_databases;

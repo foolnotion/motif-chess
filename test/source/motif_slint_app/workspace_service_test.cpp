@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "motif/slint_app/workspace_service.hpp"
 
@@ -294,6 +296,196 @@ TEST_CASE("workspace_service: a preset that cannot be saved is not adopted", "[m
     auto const result = service.set_preset(workspace_preset_kind::analysis);
     REQUIRE_FALSE(result.has_value());
     REQUIRE(service.preset() == workspace_preset_kind::review);
+}
+
+namespace
+{
+
+// Makes every later save of `config_path` fail: its directory becomes a file.
+void break_config_saves(std::filesystem::path const& config_path)
+{
+    std::filesystem::remove_all(config_path.parent_path());
+    auto file = std::ofstream {config_path.parent_path()};
+    file << "blocking file";
+}
+
+}  // namespace
+
+TEST_CASE("workspace_service: engines default to none with MultiPV 3 and depth 20", "[motif-slint-app]")
+{
+    motif::slint_app::workspace_service const service;
+
+    auto const engines = service.engines();
+    CHECK(engines.paths.empty());
+    CHECK(engines.selected.empty());
+    CHECK(engines.multipv == 3);
+    CHECK(engines.limit == motif::slint_app::analysis_limit_kind::depth);
+    CHECK(engines.depth == 20);
+    CHECK(engines.movetime_ms == 1000);
+}
+
+TEST_CASE("workspace_service: add_engine appends, selects and persists the path", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"engine_add"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto service = motif::slint_app::workspace_service {config_path};
+
+    REQUIRE(service.add_engine("/opt/engines/stockfish").has_value());
+    REQUIRE(service.add_engine("  /opt/engines/lc0\t\n").has_value());
+
+    auto const engines = service.engines();
+    CHECK(engines.paths == std::vector<std::string> {"/opt/engines/stockfish", "/opt/engines/lc0"});
+    CHECK(engines.selected == "/opt/engines/lc0");
+    auto const restored = motif::slint_app::workspace_service {config_path}.engines();
+    CHECK(restored.paths == engines.paths);
+    CHECK(restored.selected == "/opt/engines/lc0");
+}
+
+TEST_CASE("workspace_service: add_engine ignores an empty or duplicate path and says why", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"engine_add_rejected"};
+    auto service = motif::slint_app::workspace_service {tmp_config {tmp.path}.path};
+    REQUIRE(service.add_engine("/opt/engines/stockfish").has_value());
+    REQUIRE(service.add_engine("/opt/engines/lc0").has_value());
+
+    auto const empty = service.add_engine("   ");
+    REQUIRE_FALSE(empty.has_value());
+    CHECK(empty.error() == motif::slint_app::error_code::invalid_argument);
+    CHECK_FALSE(service.error_message().empty());
+
+    auto const duplicate = service.add_engine(" /opt/engines/stockfish ");
+    REQUIRE_FALSE(duplicate.has_value());
+    CHECK(duplicate.error() == motif::slint_app::error_code::invalid_argument);
+    CHECK(service.error_message().find("already") != std::string_view::npos);
+
+    auto const engines = service.engines();
+    CHECK(engines.paths.size() == 2);
+    // A rejected path does not steal the selection.
+    CHECK(engines.selected == "/opt/engines/lc0");
+}
+
+TEST_CASE("workspace_service: remove_engine moves the selection to the first remaining engine", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"engine_remove"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto service = motif::slint_app::workspace_service {config_path};
+    for (auto const* path : {"/e/one", "/e/two", "/e/three"}) {
+        REQUIRE(service.add_engine(path).has_value());
+    }
+    REQUIRE(service.select_engine("/e/two").has_value());
+
+    REQUIRE(service.remove_engine("/e/two").has_value());
+    CHECK(service.engines().paths == std::vector<std::string> {"/e/one", "/e/three"});
+    CHECK(service.engines().selected == "/e/one");
+
+    // Removing an engine that is not selected keeps the selection.
+    REQUIRE(service.select_engine("/e/three").has_value());
+    REQUIRE(service.remove_engine("/e/one").has_value());
+    CHECK(service.engines().selected == "/e/three");
+
+    REQUIRE(service.remove_engine("/e/three").has_value());
+    CHECK(service.engines().paths.empty());
+    CHECK(service.engines().selected.empty());
+    CHECK(motif::slint_app::workspace_service {config_path}.engines().paths.empty());
+
+    auto const missing = service.remove_engine("/e/three");
+    REQUIRE_FALSE(missing.has_value());
+    CHECK(missing.error() == motif::slint_app::error_code::invalid_argument);
+}
+
+TEST_CASE("workspace_service: a stored selection that is no longer listed falls back to the first engine", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"engine_selection_fallback"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    std::filesystem::create_directories(config_path.parent_path());
+    {
+        auto file = std::ofstream {config_path};
+        file << R"({"engine_paths":["/e/one","/e/two"],"ui_preferences":{"engine_selected":"/e/gone"}})";
+    }
+
+    auto const service = motif::slint_app::workspace_service {config_path};
+
+    CHECK(service.engines().selected == "/e/one");
+}
+
+TEST_CASE("workspace_service: select_engine rejects an engine that is not listed", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"engine_select_unknown"};
+    auto service = motif::slint_app::workspace_service {tmp_config {tmp.path}.path};
+    REQUIRE(service.add_engine("/e/one").has_value());
+
+    auto const result = service.select_engine("/e/two");
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(service.engines().selected == "/e/one");
+}
+
+TEST_CASE("workspace_service: engine options persist, and out-of-range values are clamped", "[motif-slint-app]")
+{
+    using motif::slint_app::analysis_limit_kind;
+    tmp_dir const tmp {"engine_options"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto service = motif::slint_app::workspace_service {config_path};
+
+    REQUIRE(service.set_engine_options(4, analysis_limit_kind::movetime, 30, 5000).has_value());
+    auto const restored = motif::slint_app::workspace_service {config_path}.engines();
+    CHECK(restored.multipv == 4);
+    CHECK(restored.limit == analysis_limit_kind::movetime);
+    CHECK(restored.depth == 30);
+    CHECK(restored.movetime_ms == 5000);
+
+    REQUIRE(service.set_engine_options(0, analysis_limit_kind::depth, 500, 5).has_value());
+    auto const low = service.engines();
+    CHECK(low.multipv == 1);
+    CHECK(low.depth == 99);
+    CHECK(low.movetime_ms == 100);
+
+    REQUIRE(service.set_engine_options(50, analysis_limit_kind::movetime, 0, 9'000'000).has_value());
+    auto const high = service.engines();
+    CHECK(high.multipv == 5);
+    CHECK(high.depth == 1);
+    CHECK(high.movetime_ms == 600'000);
+}
+
+TEST_CASE("workspace_service: hand-edited engine options outside their ranges load clamped", "[motif-slint-app]")
+{
+    tmp_dir const tmp {"engine_options_hand_edited"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    std::filesystem::create_directories(config_path.parent_path());
+    {
+        auto file = std::ofstream {config_path};
+        file << R"({"ui_preferences":{"engine_multipv":42,"engine_limit":"forever","engine_depth":-3,"engine_movetime_ms":1}})";
+    }
+
+    auto const engines = motif::slint_app::workspace_service {config_path}.engines();
+
+    CHECK(engines.multipv == 5);
+    CHECK(engines.limit == motif::slint_app::analysis_limit_kind::depth);
+    CHECK(engines.depth == 1);
+    CHECK(engines.movetime_ms == 100);
+}
+
+TEST_CASE("workspace_service: engine changes that cannot be saved are rolled back", "[motif-slint-app]")
+{
+    using motif::slint_app::analysis_limit_kind;
+    tmp_dir const tmp {"engine_save_failure"};
+    auto const config_path = tmp_config {tmp.path}.path;
+    auto service = motif::slint_app::workspace_service {config_path};
+    REQUIRE(service.add_engine("/e/one").has_value());
+    REQUIRE(service.add_engine("/e/two").has_value());
+    break_config_saves(config_path);
+
+    CHECK_FALSE(service.add_engine("/e/three").has_value());
+    CHECK_FALSE(service.remove_engine("/e/two").has_value());
+    CHECK_FALSE(service.select_engine("/e/one").has_value());
+    CHECK_FALSE(service.set_engine_options(5, analysis_limit_kind::movetime, 10, 2000).has_value());
+
+    auto const engines = service.engines();
+    CHECK(engines.paths == std::vector<std::string> {"/e/one", "/e/two"});
+    CHECK(engines.selected == "/e/two");
+    CHECK(engines.multipv == 3);
+    CHECK(engines.limit == analysis_limit_kind::depth);
+    CHECK_FALSE(service.error_message().empty());
 }
 
 TEST_CASE("workspace_config: malformed input remains untouched", "[motif-slint-app]")

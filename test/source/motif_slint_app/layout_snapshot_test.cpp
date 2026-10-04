@@ -1620,4 +1620,266 @@ TEST_CASE("workspace layout: rows searched for another position are dimmed, unse
     }
 }
 
+
+namespace
+{
+
+struct analysis_size
+{
+    std::uint32_t width;
+    std::uint32_t height;
+};
+
+constexpr auto narrow_analysis = analysis_size {.width = 960, .height = 560};
+constexpr auto wide_analysis = analysis_size {.width = 1280, .height = 800};
+
+// Writes the frame as a PPM when MOTIF_LAYOUT_SNAPSHOT_DIR is set, at its real size.
+void dump_frame(snapshot_state const& state, std::string const& name, analysis_size const size)
+{
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): the test binary is serial and only reads a caller-supplied path.
+    char const* const output = std::getenv("MOTIF_LAYOUT_SNAPSHOT_DIR");
+    if (output == nullptr || *output == '\0') {
+        return;
+    }
+    std::filesystem::create_directories(output);
+    auto image = std::ofstream {std::filesystem::path {output} / (name + ".ppm"), std::ios::binary | std::ios::trunc};
+    image << "P6\n" << size.width << ' ' << size.height << "\n255\n";
+    for (auto const pixel : state.window_adapter->pixels()) {
+        image.put(static_cast<char>(pixel.r));
+        image.put(static_cast<char>(pixel.g));
+        image.put(static_cast<char>(pixel.b));
+    }
+}
+
+// Where two frames differ in the right half of the window, the sidebar column.
+// One pixel of the board pane differs between otherwise equal frames.
+auto sidebar_difference_bounds(std::span<slint::Rgb8Pixel const> const lhs, std::span<slint::Rgb8Pixel const> const rhs, std::uint32_t const width)
+    -> pixel_bounds
+{
+    auto left = std::vector<slint::Rgb8Pixel> {lhs.begin(), lhs.end()};
+    auto right = std::vector<slint::Rgb8Pixel> {rhs.begin(), rhs.end()};
+    for (auto index = std::size_t {0}; index < left.size(); ++index) {
+        if (index % width < width / 2) {
+            left[index] = right[index] = slint::Rgb8Pixel {};
+        }
+    }
+    return difference_bounds(left, right, width);
+}
+
+auto make_analysis_lines(int const count) -> std::shared_ptr<slint::VectorModel<AnalysisLine>>
+{
+    auto lines = std::vector<AnalysisLine> {};
+    for (auto rank = 1; rank <= count; ++rank) {
+        lines.push_back(AnalysisLine {
+            .rank = rank,
+            .depth = 24,
+            .score = slint::SharedString {"+0.35"},
+            .moves = slint::SharedString {"1.e4 e5 2.Nf3 Nc6 3.Bb5 a6 4.Ba4 Nf6 5.O-O Be7 6.Re1 b5 7.Bb3 d6"},
+            .accessible_label = slint::SharedString {"Line"},
+        });
+    }
+    return std::make_shared<slint::VectorModel<AnalysisLine>>(std::move(lines));
+}
+
+// An Analysis-preset window with one engine configured, ready to start. A first
+// frame is rendered so the window's short-height mode is known before a test
+// compares frames.
+auto make_analysis_workspace(snapshot_state const& state) -> slint::ComponentHandle<WorkspaceWindow>
+{
+    auto window = make_loaded_workspace({});
+    window->set_board_loaded(true);
+    window->set_workspace_preset(WorkspacePreset::Analysis);
+    window->set_analysis_engine_names(std::make_shared<slint::VectorModel<slint::SharedString>>(
+        std::vector<slint::SharedString> {slint::SharedString {"stockfish"}}));
+    window->set_analysis_selected_engine(0);
+    window->set_analysis_can_start(true);
+    window->set_analysis_status_text("Ready");
+    window->set_analysis_lines(make_analysis_lines(0));
+    state.window_adapter->render();
+    return window;
+}
+
+}  // namespace
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the engine panel fits its controls and a PV line without clipping at narrow and wide sizes",
+          "[motif-slint-app][layout][analysis]")
+{
+    constexpr auto margin = 8;
+    constexpr auto min_text_height = 8;
+
+    for (auto const size : {narrow_analysis, wide_analysis}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto window = make_analysis_workspace(*state);
+        // The first frame lays out before the window's short-height mode is known.
+        static_cast<void>(render_at_size(*state, size.width));
+        auto const empty = render_at_size(*state, size.width);
+        dump_frame(*state, "analysis-ready-" + std::to_string(size.width), size);
+
+        // Start becomes Stop when analysis is on: that difference is the button.
+        window->set_analysis_active(true);
+        window->set_analysis_status_text("Analysing");
+        auto const active = render_at_size(*state, size.width);
+        auto const control_bounds = sidebar_difference_bounds(empty, active, size.width);
+        REQUIRE(control_bounds.found);
+        CHECK(std::cmp_less(control_bounds.right, size.width - margin));
+        CHECK(std::cmp_less(control_bounds.bottom, size.height - margin));
+
+        // One PV line must be visible in full, below the controls.
+        window->set_analysis_lines(make_analysis_lines(1));
+        auto const one_line = render_at_size(*state, size.width);
+        dump_frame(*state, "analysis-one-line-" + std::to_string(size.width), size);
+        auto const line_bounds = sidebar_difference_bounds(active, one_line, size.width);
+        REQUIRE(line_bounds.found);
+        CHECK(line_bounds.height() >= min_text_height);
+        CHECK(line_bounds.top > control_bounds.bottom);
+        CHECK(std::cmp_less(line_bounds.right, size.width - margin));
+        CHECK(std::cmp_less(line_bounds.bottom, size.height - margin));
+
+        // Nothing below the panel was pushed out of the window: the import row still draws.
+        window->set_import_path_text("x");
+        auto const typed = render_at_size(*state, size.width);
+        auto const import_bounds = sidebar_difference_bounds(one_line, typed, size.width);
+        REQUIRE(import_bounds.found);
+        CHECK(import_bounds.top > line_bounds.bottom);
+        CHECK(std::cmp_less(import_bounds.bottom, size.height - margin));
+
+        // The right margin stays plain background.
+        auto const reference = typed[size.width - 1];
+        auto clipped = 0;
+        for (auto row = 0U; row < size.height; ++row) {
+            for (auto col = size.width - margin; col < size.width; ++col) {
+                auto const pixel = typed[(static_cast<std::size_t>(row) * size.width) + col];
+                clipped += (pixel.r != reference.r || pixel.g != reference.g || pixel.b != reference.b) ? 1 : 0;
+            }
+        }
+        CHECK(clipped == 0);
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: extra engine lines scroll inside the panel and leave the rest of the window alone",
+          "[motif-slint-app][layout][analysis]")
+{
+    constexpr auto margin = 8;
+    for (auto const size : {narrow_analysis, wide_analysis}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto window = make_analysis_workspace(*state);
+        window->set_analysis_lines(make_analysis_lines(1));
+        window->set_import_path_text("x");
+        auto const one_line = render_at_size(*state, size.width);
+
+        window->set_analysis_lines(make_analysis_lines(5));
+        auto const five_lines = render_at_size(*state, size.width);
+        dump_frame(*state, "analysis-five-lines-" + std::to_string(size.width), size);
+
+        // Five lines draw more than one, yet the import row below is where it was.
+        auto const added = sidebar_difference_bounds(one_line, five_lines, size.width);
+        REQUIRE(added.found);
+        window->set_import_path_text("");
+        auto const without_import_text = render_at_size(*state, size.width);
+        auto const import_bounds = sidebar_difference_bounds(five_lines, without_import_text, size.width);
+        REQUIRE(import_bounds.found);
+        CHECK(added.bottom < import_bounds.top);
+        CHECK(std::cmp_less(added.right, size.width - margin));
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: lines of a stopped session are dimmed", "[motif-slint-app][layout][analysis]")
+{
+    auto const state = use_snapshot_platform(wide_analysis.width, wide_analysis.height);
+    auto window = make_analysis_workspace(*state);
+    window->set_analysis_lines(make_analysis_lines(2));
+    auto const live = render_at_size(*state, wide_analysis.width);
+
+    window->set_analysis_lines_stale(true);
+    auto const stale = render_at_size(*state, wide_analysis.width);
+
+    CHECK(differs(live, stale));
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the engine panel is reachable by Tab in order and Start and Stop answer Enter and Space",
+          "[motif-slint-app][layout][analysis]")
+{
+    for (auto const size : {narrow_analysis, wide_analysis}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto window = make_analysis_workspace(*state);
+        window->set_analysis_engine_path_text("/opt/engines/lc0");
+        auto activations = std::vector<std::string> {};
+        window->on_analysis_engine_removed([&activations]() -> void { activations.emplace_back("remove"); });
+        window->on_analysis_engine_added([&activations](slint::SharedString const&) -> void { activations.emplace_back("add"); });
+        window->on_analysis_start_requested([&activations]() -> void { activations.emplace_back("start"); });
+        window->on_analysis_stop_requested([&activations]() -> void { activations.emplace_back("stop"); });
+        state->window_adapter->render();
+
+        // Activate every tab stop in turn (Escape closes a combo box's popup).
+        constexpr auto max_tab_stops = 60;
+        for (auto stop = 0; stop < max_tab_stops && !std::ranges::contains(activations, "start"); ++stop) {
+            press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+            press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+            press_key_and_render(*state, *window, slint::platform::key_codes::Escape);
+        }
+        REQUIRE(std::ranges::contains(activations, "start"));
+        // Declaration order: engine list, Remove, path field (Enter adds), Add, options, Start.
+        CHECK(activations == std::vector<std::string> {"remove", "add", "add", "start"});
+
+        // The host answers Start with the running state; the same button now stops.
+        window->set_analysis_active(true);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        CHECK(activations.back() == "stop");
+        window->set_analysis_active(false);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Space);
+        CHECK(activations.back() == "start");
+        window->set_analysis_active(true);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Space);
+        CHECK(activations == std::vector<std::string> {"remove", "add", "add", "start", "stop", "start", "stop"});
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: the engine panel locks its engine and option controls while analysis is on, and Start needs an engine",
+          "[motif-slint-app][layout][analysis]")
+{
+    auto const state = use_snapshot_platform(wide_analysis.width, wide_analysis.height);
+    auto window = make_analysis_workspace(*state);
+    auto removed = 0;
+    window->on_analysis_engine_removed([&removed]() -> void { ++removed; });
+    window->on_analysis_start_requested([&removed]() -> void { ++removed; });
+    window->set_analysis_active(true);
+    state->window_adapter->render();
+
+    // While on, the only enabled stop of the panel is the Stop button.
+    constexpr auto max_tab_stops = 60;
+    auto stops_that_acted = 0;
+    for (auto stop = 0; stop < max_tab_stops; ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        auto const before = removed;
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+        stops_that_acted += removed != before ? 1 : 0;
+    }
+    CHECK(stops_that_acted == 0);
+
+    // No engine: Start is disabled.
+    window->set_analysis_active(false);
+    window->set_analysis_can_start(false);
+    window->set_analysis_selected_engine(-1);
+    window->set_analysis_engine_names(std::make_shared<slint::VectorModel<slint::SharedString>>());
+    state->window_adapter->render();
+    for (auto stop = 0; stop < max_tab_stops; ++stop) {
+        press_key_and_render(*state, *window, slint::platform::key_codes::Tab);
+        press_key_and_render(*state, *window, slint::platform::key_codes::Return);
+    }
+    CHECK(removed == 0);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

@@ -63,7 +63,7 @@ Engine analysis flow:
 ## Known Limitations
 
 - SQLite mutations invalidate derived indexes before changing canonical data; queries fail closed until rebuild
-- the Slint shell covers workspace lifecycle, game browsing, board/notation navigation, PGN import, and
-  position search/opening-explorer parity; the engine analysis panel from the historical Qt spec has not
-  yet been ported
+- the Slint shell covers workspace lifecycle, game browsing, board/notation navigation, PGN import,
+  position search/opening-explorer parity, and live UCI engine analysis (the Analysis preset's engine
+  panel: engines are added by typed path, a native file picker is planned for Story 13.6)
 - Windows release readiness remains blocked until an approved Slint package is available through vcpkg

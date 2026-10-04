@@ -75,6 +75,17 @@ class async_board_runner
         return state_->presenter ? state_->presenter->state().current_hash : std::nullopt;
     }
 
+    // FEN of the position on the board, whatever is on it: a stored game at its
+    // cursor, an unsaved game, or the starting position of an empty board. Empty
+    // if no board is attached.
+    [[nodiscard]] auto current_fen() const -> std::optional<std::string>
+    {
+        if (!state_->presenter || state_->presenter->state().fen.empty()) {
+            return std::nullopt;
+        }
+        return state_->presenter->state().fen;
+    }
+
     void advance()
     {
         act([](auto& presenter) -> auto { presenter.advance(); });
