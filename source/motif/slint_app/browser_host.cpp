@@ -87,6 +87,7 @@ void clear_browser(WorkspaceWindow& window)
     window.set_game_refreshing(false);
     window.set_game_progress_visible(false);
     window.set_game_status_text("");
+    window.set_browser_error_text("");
     window.set_browser_busy(false);
 }
 
@@ -745,9 +746,13 @@ void register_browser_callbacks(WorkspaceWindow& window,
                 browser.republish();
             }
         });
+    // Mounting the browser catches the list up with the board, unless the workspace is
+    // busy (an import, say, leaves the position index unusable until it ends).
     window.on_game_browser_shown(
-        [&browser, board_position = std::move(hooks.board_position)]() -> void
-        { browser.shown(board_position ? board_position() : std::nullopt); });
+        [&browser, activity, board_position = std::move(hooks.board_position)]() -> void
+        {
+            (void)run_when_idle(activity(), [&]() -> void { browser.shown(board_position ? board_position() : std::nullopt); });
+        });
 }
 
 }  // namespace motif::slint_app
