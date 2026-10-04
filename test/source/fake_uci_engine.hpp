@@ -38,16 +38,19 @@ class fake_engine
         : path_ {std::filesystem::temp_directory_path() / fmt::format("motif_fake_uci_engine_{}.sh", unique_stamp())}
         , log_ {path_.string() + ".log"}
     {
+        // The script appends to the log only while it exists, so a process that
+        // outlives this object (its owner quits it later) cannot recreate it.
+        std::ofstream {log_}.close();
         auto script = std::ofstream {path_};
         script << "#!/usr/bin/env sh\n"
                   "LOG='"
                << log_.string()
                << "'\n"
                   "while IFS= read -r line; do\n"
-                  "  printf '%s\\n' \"$line\" >> \"$LOG\"\n"
+                  "  [ -e \"$LOG\" ] && printf '%s\\n' \"$line\" >> \"$LOG\"\n"
                   "  case \"$line\" in\n"
                   "    uci)\n"
-                  "      printf '%s\\n' \"pid $$\" >> \"$LOG\"\n"
+                  "      [ -e \"$LOG\" ] && printf '%s\\n' \"pid $$\" >> \"$LOG\"\n"
                   "      printf '%s\\n' 'id name MotifFake'\n"
                   "      printf '%s\\n' 'uciok'\n"
                   "      ;;\n"
@@ -145,14 +148,26 @@ inline auto crash_body() -> std::string
     return "      exit 1\n";
 }
 
-// Reports one line after another, forever, without sleeping long: a burst.
-inline auto burst_body() -> std::string
+// Reports 400 numbered lines (score cp 1..400, rank 1 and, for two ranks, rank 2
+// with cp 1001..1400) back to back: a burst. It then searches until told to stop.
+inline auto burst_body(int const ranks = 1) -> std::string
 {
-    return "      n=1\n"
-           "      while [ \"$n\" -le 400 ]; do\n"
-           "        printf '%s\\n' \"info depth $((n % 40 + 1)) multipv 1 score cp $n pv e2e4 e7e5\"\n"
-           "        n=$((n + 1))\n"
-           "      done\n";
+    auto body = std::string {
+        "      n=1\n"
+        "      while [ \"$n\" -le 400 ]; do\n"
+        "        printf '%s\\n' \"info depth $((n % 40 + 1)) multipv 1 score cp $n pv e2e4 e7e5\"\n"};
+    if (ranks > 1) {
+        body += "        printf '%s\\n' \"info depth $((n % 40 + 1)) multipv 2 score cp $((n + 1000)) pv d2d4 d7d5\"\n";
+    }
+    body += "        n=$((n + 1))\n"
+            "      done\n";
+    return body;
+}
+
+// The same burst, ending with a bestmove.
+inline auto burst_complete_body() -> std::string
+{
+    return burst_body() + "      printf '%s\\n' 'bestmove e2e4'\n";
 }
 
 inline auto process_alive(pid_t const process) -> bool

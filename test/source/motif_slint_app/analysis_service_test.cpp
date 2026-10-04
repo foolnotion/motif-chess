@@ -2,6 +2,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -276,4 +278,79 @@ TEST_CASE("analysis service: a burst of engine output is delivered in full and i
             last = info->score.value;
         }
     }
+}
+
+namespace
+{
+
+// An executable that never answers `uci`: it ignores its input and sleeps.
+class silent_engine
+{
+  public:
+    silent_engine()
+        : path_ {std::filesystem::temp_directory_path() / ("motif_silent_engine_" + fake_uci::unique_stamp() + ".sh")}
+    {
+        {
+            auto script = std::ofstream {path_};
+            script << "#!/usr/bin/env sh\nexec sleep 60\n";
+        }
+        std::filesystem::permissions(
+            path_, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    }
+
+    ~silent_engine()
+    {
+        std::error_code ignored;
+        std::filesystem::remove(path_, ignored);
+    }
+
+    silent_engine(silent_engine const&) = delete;
+    auto operator=(silent_engine const&) -> silent_engine& = delete;
+    silent_engine(silent_engine&&) = delete;
+    auto operator=(silent_engine&&) -> silent_engine& = delete;
+
+    [[nodiscard]] auto request(std::uint64_t const generation) const -> analysis_request
+    {
+        return analysis_request {
+            .epoch = 1, .generation = generation, .engine_name = "silent", .engine_path = path_.string(), .fen = start_fen, .multipv = 1, .depth = 5};
+    }
+
+  private:
+    std::filesystem::path path_;
+};
+
+}  // namespace
+
+// The UCI handshake gives up after ten seconds, so these two cases take that long.
+TEST_CASE("analysis service: an executable that never answers uci ends in a start failure after the handshake timeout",
+          "[motif-slint-app][analysis][slow]")
+{
+    auto const engine = silent_engine {};
+    auto events = recorder {};
+    auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
+    auto const begin = std::chrono::steady_clock::now();
+
+    service.start(engine.request(3));
+
+    REQUIRE(fake_uci::wait_for([&]() -> bool { return events.count<analysis_start_failure>(3) == 1; }, std::chrono::seconds {25}));
+    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds {20});
+    service.wait_until_idle();
+    CHECK(events.events().size() == 1);
+    service.shutdown();
+}
+
+TEST_CASE("analysis service: shutdown during a hung handshake returns within the handshake timeout", "[motif-slint-app][analysis][slow]")
+{
+    auto const engine = silent_engine {};
+    auto events = recorder {};
+    auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
+    service.start(engine.request(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds {300});
+    auto const begin = std::chrono::steady_clock::now();
+
+    service.shutdown();
+
+    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds {20});
+    // The superseded start never reports: shutdown silenced its generation.
+    CHECK(events.events().empty());
 }

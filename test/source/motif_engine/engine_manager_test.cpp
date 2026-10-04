@@ -1,4 +1,6 @@
 #include <atomic>
+#include <cstddef>
+#include <mutex>
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -517,6 +519,54 @@ TEST_CASE("engine_manager: destroying the manager ends every live engine process
 
     CHECK(process_gone(first_process));
     CHECK(process_gone(second_process));
+}
+
+TEST_CASE("engine_manager: a subscriber attached to a fast session sees each line once, in order, then the completion last", "[motif-engine]")
+{
+    // The fake engine prints 400 numbered lines at once, so the subscription lands
+    // in the middle of them in some iterations: replayed lines must come first and
+    // the live ones must continue without a gap, an overlap or a reversal.
+    auto const fake_engine = fake_uci::fake_engine {fake_uci::burst_complete_body()};
+    motif::engine::engine_manager manager;
+    REQUIRE(manager.configure_engine(motif::engine::engine_config {.name = "burst", .path = fake_engine.path()}).has_value());
+
+    for (auto round = 0; round < 25; ++round) {
+        auto const analysis_id = manager.start_analysis(motif::engine::analysis_params {
+            .fen = startpos_fen, .engine = "burst", .multipv = 1, .depth = default_depth, .movetime_ms = std::nullopt});
+        REQUIRE(analysis_id.has_value());
+
+        std::mutex mutex;
+        std::vector<int> scores;
+        auto complete_after = std::optional<std::size_t> {};
+        REQUIRE(manager
+                    .subscribe(
+                        *analysis_id,
+                        [&](motif::engine::info_event const& event) -> void
+                        {
+                            std::scoped_lock const lock {mutex};
+                            scores.push_back(event.score.value);
+                        },
+                        [&](motif::engine::complete_event const&) -> void
+                        {
+                            std::scoped_lock const lock {mutex};
+                            complete_after = scores.size();
+                        },
+                        [](motif::engine::error_event const&) -> void {})
+                    .has_value());
+
+        REQUIRE(fake_uci::wait_for(
+            [&]() -> bool
+            {
+                std::scoped_lock const lock {mutex};
+                return complete_after.has_value();
+            }));
+        std::scoped_lock const lock {mutex};
+        REQUIRE(scores.size() == 400);
+        CHECK(*complete_after == 400);
+        for (auto index = std::size_t {0}; index < scores.size(); ++index) {
+            REQUIRE(scores[index] == static_cast<int>(index) + 1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -482,23 +482,29 @@ void register_analysis_callbacks(WorkspaceWindow& window, async_analysis_runner&
     window.on_analysis_multipv_changed(
         [&analysis, activity](std::int32_t const value) -> void
         {
-            if (!activity().workspace_busy) {
-                analysis.set_multipv(value);
+            if (activity().workspace_busy) {
+                analysis.notify("Wait for the workspace to finish before changing engines.");
+                return;
             }
+            analysis.set_multipv(value);
         });
     window.on_analysis_limit_kind_changed(
         [&analysis, activity](std::int32_t const kind) -> void
         {
-            if (!activity().workspace_busy) {
-                analysis.set_limit_kind(kind);
+            if (activity().workspace_busy) {
+                analysis.notify("Wait for the workspace to finish before changing engines.");
+                return;
             }
+            analysis.set_limit_kind(kind);
         });
     window.on_analysis_limit_value_changed(
         [&analysis, activity](std::int32_t const value) -> void
         {
-            if (!activity().workspace_busy) {
-                analysis.set_limit_value(value);
+            if (activity().workspace_busy) {
+                analysis.notify("Wait for the workspace to finish before changing engines.");
+                return;
             }
+            analysis.set_limit_value(value);
         });
 }
 

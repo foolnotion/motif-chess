@@ -108,6 +108,11 @@ class engine_manager
     // released id reports analysis_not_found.
     auto release_analysis(std::string const& analysis_id) -> result<void>;
 
+    // Replayed events (history, then completion or crash) are delivered on the
+    // calling thread before any live event: the session's callback lock is held
+    // for the whole replay, so the engine's reader thread waits and live events
+    // follow in order. The callbacks therefore run under the manager lock and must
+    // be cheap and must not call back into this manager.
     // Register callbacks for SSE event forwarding.
     // Returns analysis_not_found if the analysis_id is unknown.
     auto subscribe(std::string const& analysis_id,
