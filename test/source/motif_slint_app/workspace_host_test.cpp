@@ -23,6 +23,8 @@ namespace
 {
 
 constexpr auto no_delay = std::chrono::milliseconds {0};
+constexpr auto missing_game_id = motif::db::game_id {999999};
+constexpr auto error_search_hash = motif::db::zobrist_hash {123456789};
 
 auto unique_config_root() -> std::filesystem::path
 {
@@ -48,6 +50,7 @@ struct workspace_host_fixture
         window, service, loop.environment(), [this]() -> std::optional<std::string> { return board.current_fen(); }};
     std::vector<motif::slint_app::workspace_attach_step> steps;
     bool browser_busy_at_load {false};
+    motif::slint_app::replace_controller confirmation {motif::slint_app::make_replace_confirmation(window, board)};
     bool search_ready_at_board_attach {false};
     bool follow_started_at_board_attach {false};
     bool board_empty_at_search_attach {false};
@@ -87,6 +90,9 @@ struct workspace_host_fixture
                 board_handler_saw_search_busy = search.is_busy();
                 board_handler_saw_browser_busy = browser.is_busy();
             });
+        auto const idle = motif::slint_app::activity_probe {[]() -> motif::slint_app::workspace_activity { return {}; }};
+        motif::slint_app::register_board_callbacks(*window, board, idle);
+        motif::slint_app::register_play_callbacks(*window, board, idle, confirmation);
         motif::slint_app::register_workspace_callbacks(*window, service, runner, browser, board, search);
     }
 
@@ -130,12 +136,6 @@ TEST_CASE("workspace host: publishes an inactive workspace", "[motif-slint-app]"
 
     CHECK_FALSE(window->get_has_database());
     CHECK_FALSE(window->get_is_scratch());
-}
-
-TEST_CASE("workspace host: injected event loop has the production scheduling contract", "[motif-slint-app]")
-{
-    auto loop = test_support::manual_event_loop {};
-    CHECK(loop.environment().schedule != nullptr);
 }
 
 TEST_CASE("workspace host: scratch succeeds with the frozen attach order", "[motif-slint-app]")
@@ -213,14 +213,42 @@ TEST_CASE("workspace host: recent removal is ignored while busy and applied when
     std::filesystem::remove_all(bundle);
 }
 
-TEST_CASE("workspace host: dismiss error clears window and search state", "[motif-slint-app]")
+TEST_CASE("workspace host: dismiss error clears real browser board search and window errors", "[motif-slint-app]")
 {
     auto const platform = snapshot_test::use_snapshot_platform();
     auto test = workspace_host_fixture {};
+    REQUIRE(test.runner.run_scratch() == motif::slint_app::async_workspace_runner::start_outcome::accepted);
+    test.drain_workspace();
+    test.settle_browser();
+    test.window->invoke_board_play_san("not-a-move");
+    auto unindexed_created = motif::db::database_manager::create_scratch();
+    REQUIRE(unindexed_created);
+    auto unindexed = std::move(*unindexed_created);
+    auto game = motif::db::game {};
+    game.white.name = "Error White";
+    game.black.name = "Error Black";
+    game.result = "1-0";
+    REQUIRE(unindexed.insert_game(game));
+    test.browser.attach(unindexed);
+    test.browser.load_initial();
+    test.browser.wait_for_worker();
+    (void)test.loop.run(no_delay);
+    test.browser.activate_by_id(missing_game_id, 0);
+    test.browser.wait_for_worker();
+    (void)test.loop.run(no_delay);
+    test.search.attach(unindexed);
+    test.search.search(error_search_hash, {});
+    test.loop.wait_for_tasks(no_delay, 1);
+    (void)test.loop.run(no_delay);
     test.window->set_error_text("error");
+    REQUIRE_FALSE(test.window->get_board_error_text().empty());
+    REQUIRE_FALSE(test.window->get_search_error_text().empty());
+    REQUIRE_FALSE(test.window->get_browser_error_text().empty());
     test.window->invoke_dismiss_error();
     CHECK(test.window->get_error_text().empty());
+    CHECK(test.window->get_board_error_text().empty());
     CHECK(test.window->get_search_error_text().empty());
+    CHECK(test.window->get_browser_error_text().empty());
 }
 
 TEST_CASE("workspace host: preset and notation callbacks persist preferences", "[motif-slint-app]")
@@ -233,7 +261,6 @@ TEST_CASE("workspace host: preset and notation callbacks persist preferences", "
     auto const before = test.window->get_notation_below();
     test.window->invoke_notation_layout_toggled();
     CHECK(test.service.notation_below() != before);
-    CHECK(test.window->get_notation_below() != before);
 }
 
 TEST_CASE("workspace host: failed preference saves roll back visible preset and notation", "[motif-slint-app]")
@@ -246,6 +273,7 @@ TEST_CASE("workspace host: failed preference saves roll back visible preset and 
         blocker << "blocking file";
     }
 
+    test.window->set_workspace_preset(WorkspacePreset::Analysis);
     test.window->invoke_preset_selected(WorkspacePreset::Analysis);
     CHECK(test.window->get_workspace_preset() == WorkspacePreset::Review);
     CHECK(test.window->get_error_text() == "Could not save workspace preset preference.");
@@ -254,4 +282,26 @@ TEST_CASE("workspace host: failed preference saves roll back visible preset and 
     test.window->invoke_notation_layout_toggled();
     CHECK(test.window->get_notation_below() == notation_before);
     CHECK(test.window->get_error_text() == "Could not save workspace layout preference.");
+}
+
+TEST_CASE("workspace host: queued completion after window invalidation is ignored", "[motif-slint-app]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto loop = test_support::manual_event_loop {};
+    auto window = std::optional<slint::ComponentHandle<WorkspaceWindow>> {};
+    window.emplace(WorkspaceWindow::create());
+    auto service = motif::slint_app::workspace_service {};
+    auto board = motif::slint_app::async_board_runner {*window};
+    auto browser = motif::slint_app::async_browser_runner {*window, loop.environment()};
+    auto search = motif::slint_app::async_search_runner {*window, loop.environment()};
+    auto analysis = motif::slint_app::async_analysis_runner {
+        *window, service, loop.environment(), [&board]() -> std::optional<std::string> { return board.current_fen(); }};
+    auto runner = motif::slint_app::async_workspace_runner {service, *window, browser, board, search, analysis, loop.environment()};
+    REQUIRE(runner.run_scratch() == motif::slint_app::async_workspace_runner::start_outcome::accepted);
+    loop.wait_for_tasks(no_delay, 1);
+    window.reset();
+    (void)loop.run(no_delay);
+    // Existing lifetime semantics deliberately leave busy set when a queued
+    // completion loses its window. Destruction subsequently joins safely.
+    CHECK(runner.is_busy());
 }

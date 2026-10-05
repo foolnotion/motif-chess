@@ -61,8 +61,9 @@ class async_workspace_runner
     [[nodiscard]] auto run_scratch() -> start_outcome;
     [[nodiscard]] auto is_busy() const noexcept -> bool;
 
+  private:
     struct state;
-    std::shared_ptr<state> state_;  // NOLINT(readability-identifier-naming)
+    std::shared_ptr<state> state_;
     static void notify_attach(state& shared, workspace_attach_step step);
     static void attach_hosts(state& shared);
     [[nodiscard]] auto start(std::function<result<void>()> operation) -> start_outcome;
