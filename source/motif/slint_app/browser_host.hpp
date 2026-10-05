@@ -13,7 +13,6 @@
 #include "motif/db/database_manager.hpp"
 #include "motif/db/types.hpp"
 #include "motif/slint_app/activity_gate.hpp"
-#include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/event_loop.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/replace_controller.hpp"

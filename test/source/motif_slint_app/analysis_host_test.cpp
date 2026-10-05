@@ -944,7 +944,6 @@ TEST_CASE("analysis host: engine list changes wait for a workspace operation, bu
     // Every other busy condition leaves them alone too.
     for (auto const& busy : {workspace_activity {.import_active = true},
                              workspace_activity {.browser_busy = true},
-                             workspace_activity {.board_busy = true},
                              workspace_activity {.search_busy = true},
                              workspace_activity {.workspace_busy = true}})
     {

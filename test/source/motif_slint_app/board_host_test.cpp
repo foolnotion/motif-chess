@@ -31,7 +31,6 @@ constexpr auto busy_conditions = std::array {
     workspace_activity {.import_active = true},
     workspace_activity {.workspace_busy = true},
     workspace_activity {.browser_busy = true},
-    workspace_activity {.board_busy = true},
     workspace_activity {.search_busy = true},
 };
 

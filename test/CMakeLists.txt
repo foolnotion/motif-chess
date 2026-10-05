@@ -120,6 +120,7 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/pgn_launch_queue_test.cpp
         source/motif_slint_app/board_host_test.cpp
         source/motif_slint_app/browser_host_test.cpp
+        source/motif_slint_app/database_host_test.cpp
         source/motif_slint_app/replace_gate_test.cpp
         source/motif_slint_app/replace_controller_test.cpp
         source/motif_slint_app/activity_gate_test.cpp
@@ -144,6 +145,7 @@ if(motif_ENABLE_SLINT_APP)
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/analysis_host.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/board_host.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/browser_host.cpp"
+        "${CMAKE_SOURCE_DIR}/source/motif/slint_app/database_host.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/event_loop.cpp"
     )
     set_source_files_properties(

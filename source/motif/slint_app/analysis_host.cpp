@@ -20,7 +20,6 @@
 #include "motif/engine/engine_manager.hpp"
 #include "motif/slint_app/analysis_presenter.hpp"
 #include "motif/slint_app/analysis_service.hpp"
-#include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/config.hpp"
 #include "motif/slint_app/workspace_service.hpp"
 #include "workspace.h"

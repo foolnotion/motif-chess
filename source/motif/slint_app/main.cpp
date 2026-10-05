@@ -25,6 +25,7 @@
 #include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/board_presenter.hpp"
 #include "motif/slint_app/browser_host.hpp"
+#include "motif/slint_app/database_host.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/import_service.hpp"
 #include "motif/slint_app/pgn_launch_queue.hpp"
@@ -39,6 +40,7 @@ namespace
 
 using motif::slint_app::async_board_runner;
 using motif::slint_app::async_browser_runner;
+using motif::slint_app::trim_whitespace;
 using replace_confirmation = motif::slint_app::replace_controller;
 using workspace_result = motif::slint_app::result<void>;
 using search_query_result = motif::slint_app::search_result<motif::slint_app::search_query>;
@@ -47,16 +49,6 @@ using search_page_result = motif::slint_app::search_result<motif::slint_app::sea
 auto shared_string(std::string_view value) -> slint::SharedString
 {
     return slint::SharedString {value};
-}
-
-auto trim_whitespace(std::string_view value) -> std::string_view
-{
-    constexpr auto whitespace = " \t\n\r\f\v";
-    auto const begin = value.find_first_not_of(whitespace);
-    if (begin == std::string_view::npos) {
-        return {};
-    }
-    return value.substr(begin, value.find_last_not_of(whitespace) - begin + 1);
 }
 
 auto to_ui_count(std::size_t count) -> int
@@ -716,134 +708,6 @@ void publish_import_start_error(WorkspaceWindow& window, motif::slint_app::impor
     std::unreachable();
 }
 
-// What the workspace is busy with right now: import, workspace change, game
-// load, board action or search. Every board, play, New Game and replace
-// callback decides on this one snapshot through run_when_idle.
-auto current_activity(motif::slint_app::import_service const& importer,
-                      async_workspace_runner const& runner,
-                      async_browser_runner const& browser,
-                      async_board_runner const& board,
-                      async_search_runner const& search) -> motif::slint_app::workspace_activity
-{
-    return motif::slint_app::workspace_activity {.import_active = importer.active(),
-                                                 .workspace_busy = runner.is_busy(),
-                                                 .browser_busy = browser.is_busy(),
-                                                 .board_busy = board.is_busy(),
-                                                 .search_busy = search.is_busy()};
-}
-
-// Every way of leaving the current database or opening another. Each waits for
-// the replace confirmation when an edited or unsaved game is on the board.
-void register_database_open_callbacks(WorkspaceWindow& window,
-                                      motif::slint_app::import_service const& importer,
-                                      async_workspace_runner& runner,
-                                      async_browser_runner& browser,
-                                      async_board_runner& board,
-                                      async_search_runner& search,
-                                      replace_confirmation& confirmation)
-{
-    window.on_create_requested(
-        [&](slint::SharedString const& dir_path, slint::SharedString const& name) -> void
-        {
-            if (importer.active() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
-            }
-            confirmation.request("Create database",
-                                 [&, dir_path, name]() -> void
-                                 {
-                                     window.set_error_text("");
-                                     auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
-                                     auto const trimmed_name = trim_whitespace(std::string_view {name.data(), name.size()});
-                                     window.set_create_path_text(shared_string(trimmed_path));
-                                     window.set_create_name_text(shared_string(trimmed_name));
-                                     if (runner.run_create(std::string {trimmed_path}, std::string {trimmed_name})
-                                         == async_workspace_runner::start_outcome::accepted)
-                                     {
-                                         window.set_busy(true);
-                                     }
-                                 });
-        });
-    window.on_open_requested(
-        [&](slint::SharedString const& dir_path) -> void
-        {
-            if (importer.active() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
-            }
-            confirmation.request("Open database",
-                                 [&, dir_path]() -> void
-                                 {
-                                     window.set_error_text("");
-                                     auto const trimmed_path = trim_whitespace(std::string_view {dir_path.data(), dir_path.size()});
-                                     window.set_open_path_text(shared_string(trimmed_path));
-                                     if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
-                                         window.set_busy(true);
-                                     }
-                                 });
-        });
-    window.on_recent_activated(
-        [&](slint::SharedString const& path) -> void
-        {
-            if (importer.active() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
-            }
-            confirmation.request("Open database",
-                                 [&, path]() -> void
-                                 {
-                                     window.set_error_text("");
-                                     auto const trimmed_path = trim_whitespace(std::string_view {path.data(), path.size()});
-                                     if (runner.run_open(std::string {trimmed_path}) == async_workspace_runner::start_outcome::accepted) {
-                                         window.set_busy(true);
-                                     }
-                                 });
-        });
-}
-
-// Scratch and close: the other ways of leaving the current database.
-void register_database_exit_callbacks(WorkspaceWindow& window,
-                                      motif::slint_app::workspace_service& service,
-                                      motif::slint_app::import_service const& importer,
-                                      async_workspace_runner& runner,
-                                      async_browser_runner& browser,
-                                      async_board_runner& board,
-                                      async_search_runner& search,
-                                      motif::slint_app::async_analysis_runner& analysis,
-                                      replace_confirmation& confirmation)
-{
-    window.on_scratch_requested(
-        [&]() -> void
-        {
-            if (runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || importer.active()) {
-                return;
-            }
-            confirmation.request("Open scratch database",
-                                 [&]() -> void
-                                 {
-                                     window.set_error_text("");
-                                     if (runner.run_scratch() == async_workspace_runner::start_outcome::accepted) {
-                                         window.set_busy(true);
-                                     }
-                                 });
-        });
-    window.on_close_requested(
-        [&]() -> void
-        {
-            if (runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || importer.active()) {
-                return;
-            }
-            confirmation.request("Close database",
-                                 [&]() -> void
-                                 {
-                                     analysis.workspace_changed();
-                                     browser.detach();
-                                     board.detach();
-                                     search.detach();
-                                     service.close_active();
-                                     window.set_error_text("");
-                                     publish_workspace(window, service);
-                                 });
-        });
-}
-
 void register_workspace_callbacks(WorkspaceWindow& window,
                                   motif::slint_app::workspace_service& service,
                                   async_workspace_runner const& runner,
@@ -854,7 +718,8 @@ void register_workspace_callbacks(WorkspaceWindow& window,
     window.on_recent_removed(
         [&](slint::SharedString const& path) -> void
         {
-            // The worker thread mutates the same config; wait until it is done.
+            // Deliberately narrower than the activity gate: the only hazard is the
+            // workspace worker thread mutating this same config.
             if (runner.is_busy()) {
                 return;
             }
@@ -899,62 +764,60 @@ void register_workspace_callbacks(WorkspaceWindow& window,
 void register_search_callbacks(WorkspaceWindow& window,
                                async_search_runner& search,
                                async_browser_runner& browser,
-                               motif::slint_app::import_service const& importer,
-                               async_workspace_runner const& runner,
                                async_board_runner const& board,
+                               motif::slint_app::activity_probe const& activity,
                                replace_confirmation& confirmation)
 {
     window.on_search_requested(
-        [&]() -> void
+        [&, activity]() -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
-            }
-            search.search(board.current_hash(), browser.active_filter());
+            (void)motif::slint_app::run_when_idle(activity(),
+                                                  [&]() -> void { search.search(board.current_hash(), browser.active_filter()); });
         });
     window.on_search_auto_search_toggled(
-        [&](bool enabled) -> void
+        [&, activity](bool enabled) -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                // Republish so the checkbox snaps back to the stored
-                // preference instead of visually desyncing until the next
-                // unrelated publish.
+            // Republish when busy so the checkbox snaps back to the stored
+            // preference instead of visually desyncing until the next
+            // unrelated publish.
+            if (!motif::slint_app::run_when_idle(activity(),
+                                                 [&]() -> void
+                                                 {
+                                                     search.set_auto_search(enabled);
+                                                     if (enabled) {
+                                                         search.search_if_hash_changed(board.current_hash(), browser.active_filter());
+                                                     }
+                                                 }))
+            {
                 search.publish_auto_search();
-                return;
-            }
-            search.set_auto_search(enabled);
-            if (enabled) {
-                search.search_if_hash_changed(board.current_hash(), browser.active_filter());
             }
         });
     window.on_search_page_requested(
-        [&](std::int32_t page) -> void
+        [&, activity](std::int32_t page) -> void
         {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy() || page < 0) {
-                return;
+            if (page >= 0) {
+                (void)motif::slint_app::run_when_idle(activity(), [&]() -> void { search.set_page(static_cast<std::size_t>(page)); });
             }
-            search.set_page(static_cast<std::size_t>(page));
         });
     window.on_search_match_activated(
-        [&](std::int32_t row) -> void
+        [&, activity](std::int32_t row) -> void
         {
             if (row < 0) {
                 return;
             }
-            (void)motif::slint_app::run_when_idle(current_activity(importer, runner, browser, board, search),
-                                                  [&]() -> void
-                                                  {
-                                                      if (auto const match = search.match_at(static_cast<std::size_t>(row))) {
-                                                          confirmation.request(
-                                                              "Load game",
-                                                              [&, match = *match]() -> void
-                                                              {
-                                                                  (void)motif::slint_app::run_when_idle(
-                                                                      current_activity(importer, runner, browser, board, search),
-                                                                      [&]() -> void { browser.activate_by_id(match.first, match.second); });
-                                                              });
-                                                      }
-                                                  });
+            (void)motif::slint_app::run_when_idle(
+                activity(),
+                [&]() -> void
+                {
+                    if (auto const match = search.match_at(static_cast<std::size_t>(row))) {
+                        confirmation.request("Load game",
+                                             [&, activity, match = *match]() -> void
+                                             {
+                                                 (void)motif::slint_app::run_when_idle(
+                                                     activity(), [&]() -> void { browser.activate_by_id(match.first, match.second); });
+                                             });
+                    }
+                });
         });
 }
 
@@ -966,12 +829,13 @@ struct import_context
     WorkspaceWindow& window;
     motif::slint_app::workspace_service& service;
     motif::slint_app::import_service& importer;
-    async_workspace_runner const& runner;
     async_browser_runner& browser;
     async_board_runner const& board;
     async_search_runner& search;
     motif::slint_app::pgn_launch_queue& launch_queue;
     slint::Timer& poll_timer;
+    motif::slint_app::activity_probe const& activity;
+    replace_confirmation const& confirmation;
 };
 
 // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
@@ -1026,16 +890,20 @@ auto begin_import(import_context& context, std::string_view const path) -> bool
 }
 
 // Runs on a repeating timer while launch paths are pending: waits until a
-// database is open and every background task is idle, then starts the next
-// import. This is the same state the Import PGN button requires.
+// database is open, every background task is idle and no replace confirmation
+// is open (it may be about to close or replace that database), then starts the
+// next import.
 void pump_launch_queue(import_context& context, slint::Timer& launch_timer)
 {
     if (context.launch_queue.empty()) {
         launch_timer.stop();
         return;
     }
-    if (context.runner.is_busy() || context.browser.is_busy() || context.board.is_busy() || context.search.is_busy()
-        || context.importer.active() || context.poll_timer.running() || !context.service.has_active())
+    if (!motif::slint_app::may_start_launch_import(
+            motif::slint_app::launch_import_state {.activity = context.activity(),
+                                                   .completion_pending = context.poll_timer.running(),
+                                                   .confirmation_pending = context.confirmation.pending(),
+                                                   .database_open = context.service.has_active()}))
     {
         return;
     }
@@ -1052,7 +920,12 @@ void register_import_callbacks(import_context& context)
     window.on_import_requested(
         [&context](slint::SharedString const& path) -> void
         {
-            if (context.runner.is_busy() || context.browser.is_busy() || context.board.is_busy() || context.search.is_busy()) {
+            // A running import is deliberately not gated here: begin_import
+            // answers it with "An import is already running." instead of
+            // ignoring the click. Every other activity waits.
+            auto activity = context.activity();
+            activity.import_active = false;
+            if (!activity.idle()) {
                 return;
             }
             context.window.set_error_text("");
@@ -1100,21 +973,22 @@ auto main(int const argc, char** const argv) -> int
     auto import_timer = slint::Timer {};
     auto launch_arguments_list = launch_arguments(std::span<char* const> {argv, static_cast<std::size_t>(argc)});
     auto launch_queue = motif::slint_app::pgn_launch_queue::from_arguments(launch_arguments_list);
+    auto confirmation = motif::slint_app::make_replace_confirmation(window, board);
+    auto const activity = motif::slint_app::activity_probe {
+        [&]() -> motif::slint_app::workspace_activity { return motif::slint_app::current_activity(importer, runner, browser, search); }};
     auto import_context_value = import_context {
         .window = *window,
         .service = service,
         .importer = importer,
-        .runner = runner,
         .browser = browser,
         .board = board,
         .search = search,
         .launch_queue = launch_queue,
         .poll_timer = import_timer,
+        .activity = activity,
+        .confirmation = confirmation,
     };
     auto launch_timer = slint::Timer {};
-    auto confirmation = motif::slint_app::make_replace_confirmation(window, board);
-    auto const activity = motif::slint_app::activity_probe {[&]() -> motif::slint_app::workspace_activity
-                                                            { return current_activity(importer, runner, browser, board, search); }};
 
     motif::slint_app::clear_browser(*window);
     motif::slint_app::clear_board(*window);
@@ -1122,8 +996,27 @@ auto main(int const argc, char** const argv) -> int
     publish_workspace(*window, service);
     analysis.load();
     register_workspace_callbacks(*window, service, runner, browser, board, search);
-    register_database_open_callbacks(*window, importer, runner, browser, board, search, confirmation);
-    register_database_exit_callbacks(*window, service, importer, runner, browser, board, search, analysis, confirmation);
+    motif::slint_app::register_database_callbacks(
+        *window,
+        activity,
+        confirmation,
+        motif::slint_app::database_actions {
+            .create = [&runner](std::string const& dir_path, std::string const& name) -> bool
+            { return runner.run_create(dir_path, name) == async_workspace_runner::start_outcome::accepted; },
+            .open = [&runner](std::string const& path) -> bool
+            { return runner.run_open(path) == async_workspace_runner::start_outcome::accepted; },
+            .scratch = [&runner]() -> bool { return runner.run_scratch() == async_workspace_runner::start_outcome::accepted; },
+            .close = [&]() -> void
+            {
+                analysis.workspace_changed();
+                browser.detach();
+                board.detach();
+                search.detach();
+                service.close_active();
+                window->set_error_text("");
+                publish_workspace(*window, service);
+            },
+        });
     motif::slint_app::register_analysis_callbacks(*window, analysis, activity);
     motif::slint_app::register_browser_callbacks(
         *window,
@@ -1137,7 +1030,7 @@ auto main(int const argc, char** const argv) -> int
         });
     motif::slint_app::register_board_callbacks(*window, board, activity);
     motif::slint_app::register_play_callbacks(*window, board, activity, confirmation);
-    register_search_callbacks(*window, search, browser, importer, runner, board, confirmation);
+    register_search_callbacks(*window, search, browser, board, activity, confirmation);
     motif::slint_app::register_explorer_callbacks(*window,
                                                   board,
                                                   activity,

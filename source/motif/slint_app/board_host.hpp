@@ -69,8 +69,6 @@ class async_board_runner
     // Handlers run in the order they were added, each with the same hash.
     void add_position_changed_handler(position_changed_handler handler) { state_->position_changed.push_back(std::move(handler)); }
 
-    [[nodiscard]] auto is_busy() const noexcept -> bool { return state_->busy; }
-
     // Empty if no board is attached or its move list cannot be replayed.
     [[nodiscard]] auto current_hash() const -> std::optional<motif::db::zobrist_hash>
     {
@@ -207,7 +205,6 @@ class async_board_runner
 
         slint::ComponentWeakHandle<WorkspaceWindow> window;
         std::shared_ptr<motif::slint_app::board_presenter> presenter;
-        bool busy {false};
         std::vector<position_changed_handler> position_changed;
     };
 
@@ -239,10 +236,6 @@ class async_board_runner
         }
     }
 };
-
-// Reports the workspace's current activity. Built once in main(); every board,
-// play, New Game and replace callback decides through run_when_idle on it.
-using activity_probe = std::function<workspace_activity()>;
 
 // In-window confirmation before something replaces an edited or unsaved game.
 auto make_replace_confirmation(slint::ComponentHandle<WorkspaceWindow> const& window, async_board_runner const& board)

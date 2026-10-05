@@ -10,8 +10,8 @@
 
 #include <slint.h>
 
+#include "motif/slint_app/activity_gate.hpp"
 #include "motif/slint_app/analysis_presenter.hpp"
-#include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/event_loop.hpp"
 #include "motif/slint_app/workspace_service.hpp"
 #include "workspace.h"
