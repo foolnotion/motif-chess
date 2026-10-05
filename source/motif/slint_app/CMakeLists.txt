@@ -44,6 +44,8 @@ add_executable(motif_slint_app
     browser_host.cpp
     database_host.cpp
     event_loop.cpp
+    search_host.cpp
+    workspace_host.cpp
     nfd_file_picker.cpp
     picker_host.cpp
 )
