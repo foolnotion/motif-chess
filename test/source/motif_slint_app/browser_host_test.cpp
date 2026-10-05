@@ -20,6 +20,7 @@
 
 #include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
+#include "motif/db/query_connection.hpp"
 #include "motif/db/types.hpp"
 #include "motif/slint_app/activity_gate.hpp"
 #include "motif/slint_app/board_host.hpp"
@@ -451,6 +452,29 @@ TEST_CASE("browser host: a result that arrives after the runner is gone is dropp
     }
 
     CHECK(loop.run(no_delay) == 1);
+    CHECK(window->get_game_rows()->row_count() == 0);
+}
+
+TEST_CASE("browser host: detach interrupts a blocked dedicated SQLite query", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto blocker = std::make_shared<motif::db::query_connection_blocker>();
+    motif::db::set_query_connection_blocker_for_tests(blocker);
+    auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+    browser.attach(database);
+    browser.load_initial();
+    blocker->wait_until_entered();
+
+    auto const started = std::chrono::steady_clock::now();
+    browser.detach();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    motif::db::set_query_connection_blocker_for_tests({});
+
+    CHECK(elapsed <= std::chrono::seconds {1});
+    CHECK_FALSE(browser.is_busy());
     CHECK(window->get_game_rows()->row_count() == 0);
 }
 

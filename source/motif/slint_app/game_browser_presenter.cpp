@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <string>
@@ -65,6 +66,11 @@ game_browser_presenter::game_browser_presenter(motif::db::database_manager& data
 {
 }
 
+auto game_browser_presenter::database_dir() const -> std::filesystem::path const&
+{
+    return database_->dir();
+}
+
 auto game_browser_presenter::prepare_initial_load() -> browser_result<browser_query>
 {
     return make_query(0);
@@ -123,6 +129,56 @@ auto game_browser_presenter::execute_query(browser_query const& query) const -> 
         if (!result) {
             return tl::unexpected {from_database_error(result.error())};
         }
+        return browser_page {.generation = query.generation,
+                             .games = std::move(result->games),
+                             .total_count = result->total_count,
+                             .page_index = page_index,
+                             .plies = {},
+                             .restricted = false,
+                             .drop_missing_selection = query.drop_missing_selection};
+    }
+    auto result = database_->find_games(query.filter);
+    if (!result) {
+        return tl::unexpected {from_database_error(result.error())};
+    }
+    auto game_ids = std::vector<motif::db::game_id> {};
+    game_ids.reserve(result->games.size());
+    for (auto const& game : result->games) {
+        game_ids.push_back(game.id);
+    }
+    auto matches = database_->query_position_first_matches(*query.filter.position, game_ids);
+    if (!matches) {
+        return tl::unexpected {from_database_error(matches.error())};
+    }
+    std::ranges::sort(*matches, {}, &motif::db::position_match::game_id);
+    auto plies = std::vector<std::uint16_t> {};
+    plies.reserve(result->games.size());
+    for (auto const& game : result->games) {
+        auto const found = std::ranges::lower_bound(*matches, game.id, {}, &motif::db::position_match::game_id);
+        if (found == matches->end() || found->game_id != game.id) {
+            return tl::unexpected {browser_error {.code = error_code::database_failure,
+                                                  .message = "Position results changed while the game list was loaded."}};
+        }
+        plies.push_back(found->ply);
+    }
+    return browser_page {.generation = query.generation,
+                         .games = std::move(result->games),
+                         .total_count = result->total_count,
+                         .page_index = page_index,
+                         .plies = std::move(plies),
+                         .restricted = true,
+                         .drop_missing_selection = query.drop_missing_selection};
+}
+
+auto game_browser_presenter::execute_query(browser_query const& query, motif::db::query_connection const& connection) const
+    -> browser_result<browser_page>
+{
+    auto const page_index = query.filter.offset / browser_page_size;
+    if (!query.filter.position) {
+        auto result = connection.store().find_games(query.filter);
+        if (!result) {
+            return tl::unexpected {from_database_error(result.error())};
+        }
         return browser_page {
             .generation = query.generation,
             .games = std::move(result->games),
@@ -135,7 +191,7 @@ auto game_browser_presenter::execute_query(browser_query const& query) const -> 
     }
 
     // Only the database manager matches positions; the game store ignores them.
-    auto result = database_->find_games(query.filter);
+    auto result = database_->find_games(query.filter, connection.store());
     if (!result) {
         return tl::unexpected {from_database_error(result.error())};
     }
@@ -146,7 +202,7 @@ auto game_browser_presenter::execute_query(browser_query const& query) const -> 
         for (auto const& game : result->games) {
             game_ids.push_back(game.id);
         }
-        auto matches = database_->query_position_first_matches(*query.filter.position, game_ids);
+        auto matches = database_->query_position_first_matches(*query.filter.position, game_ids, connection.store());
         if (!matches) {
             return tl::unexpected {from_database_error(matches.error())};
         }
@@ -329,6 +385,16 @@ auto game_browser_presenter::prepare_activation() -> browser_result<activation_r
 auto game_browser_presenter::execute_activation(activation_request const& request) const -> browser_result<loaded_game>
 {
     auto game = database_->store().get(request.game_id);
+    if (!game) {
+        return tl::unexpected {from_database_error(game.error())};
+    }
+    return loaded_game {.generation = request.generation, .game_id = request.game_id, .game = std::move(*game)};
+}
+
+auto game_browser_presenter::execute_activation(activation_request const& request, motif::db::query_connection const& connection)
+    -> browser_result<loaded_game>
+{
+    auto game = connection.store().get(request.game_id);
     if (!game) {
         return tl::unexpected {from_database_error(game.error())};
     }

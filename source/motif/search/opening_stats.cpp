@@ -66,7 +66,7 @@ auto resolve_eco(motif::db::opening_stat_agg_row const& row, context_map const& 
 namespace
 {
 
-auto build_stats(motif::db::database_manager const& database,
+auto build_stats(motif::db::game_store const& metadata_store,
                  motif::db::zobrist_hash const hash,
                  std::vector<motif::db::opening_stat_agg_row> const& rows,
                  std::uint32_t const total_games) -> motif::search::result<motif::search::opening_stats::stats>
@@ -90,7 +90,7 @@ auto build_stats(motif::db::database_manager const& database,
     auto const tail = std::ranges::unique(candidate_ids);
     candidate_ids.erase(tail.begin(), tail.end());
 
-    auto contexts_res = database.store().get_game_contexts(candidate_ids);
+    auto contexts_res = metadata_store.get_game_contexts(candidate_ids);
     if (!contexts_res) {
         return tl::unexpected {motif::search::error_code::io_failure};
     }
@@ -209,7 +209,7 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
                    std::chrono::duration_cast<std::chrono::microseconds>(aggregated_at - counted_at).count());
     }
 
-    return build_stats(database, hash, *rows_res, total_games);
+    return build_stats(database.store(), hash, *rows_res, total_games);
 }
 
 auto query_elo_distribution(motif::db::database_manager const& database,
@@ -265,7 +265,42 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
         return tl::unexpected {error_code::io_failure};
     }
 
-    return build_stats(database, hash, *rows_res, static_cast<std::uint32_t>(filtered_ids.size()));
+    return build_stats(database.store(), hash, *rows_res, static_cast<std::uint32_t>(filtered_ids.size()));
+}
+
+auto query(motif::db::database_manager const& database,
+           motif::db::zobrist_hash const hash,
+           motif::db::search_filter const& filter,
+           motif::db::game_store const& metadata_store) -> result<stats>
+{
+    bool const has_metadata = filter.player_name.has_value() || filter.min_elo.has_value() || filter.max_elo.has_value()
+        || filter.result.has_value() || filter.eco_prefix.has_value();
+    if (!has_metadata) {
+        auto rows = database.query_unfiltered_opening_stats(hash, metadata_store);
+        if (!rows) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        auto ids = database.position_game_ids(hash, metadata_store);
+        if (!ids) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        return build_stats(metadata_store, hash, *rows, static_cast<std::uint32_t>(ids->size()));
+    }
+    auto ids = database.position_game_ids(hash, metadata_store);
+    if (!ids) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto metadata_filter = filter;
+    metadata_filter.position.reset();
+    auto filtered_ids = metadata_store.find_game_ids_with_filter(*ids, metadata_filter);
+    if (!filtered_ids) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto rows = database.query_filtered_opening_stats(hash, *filtered_ids, metadata_store);
+    if (!rows) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return build_stats(metadata_store, hash, *rows, static_cast<std::uint32_t>(filtered_ids->size()));
 }
 
 }  // namespace motif::search::opening_stats

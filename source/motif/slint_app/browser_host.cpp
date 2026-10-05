@@ -18,6 +18,7 @@
 
 #include <slint.h>
 
+#include "motif/db/query_connection.hpp"
 #include "motif/slint_app/activity_gate.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/replace_controller.hpp"
@@ -160,7 +161,9 @@ struct async_browser_runner::impl
     event_loop_environment environment;
     std::shared_ptr<game_browser_presenter> presenter;
     std::mutex worker_mutex;
+    std::mutex connection_mutex;
     std::thread worker;
+    std::shared_ptr<motif::db::query_connection> active_connection;
     std::atomic<bool> busy {false};
     std::optional<browser_query_result> pending_query;
     std::optional<activation_result> pending_activation;
@@ -181,6 +184,14 @@ struct async_browser_runner::impl
     activation_failure_handler activation_failed;
     external_activation_success_handler external_activation_succeeded;
     activation_failure_handler external_activation_failed;
+
+    void interrupt_worker() noexcept
+    {
+        std::scoped_lock const lock {connection_mutex};
+        if (active_connection) {
+            active_connection->interrupt();
+        }
+    }
 
     void publish() const
     {
@@ -322,7 +333,27 @@ struct async_browser_runner::impl
         launch(shared,
                [shared, presenter = std::move(presenter), query = std::move(*query), epoch, lifetime, lifetime_token]() mutable -> void
                {
-                   auto result = presenter->execute_query(query);
+                   auto connection_result = motif::db::query_connection::open(presenter->database_dir());
+                   if (!connection_result) {
+                       auto result = browser_page_result {tl::unexpected {
+                           browser_error {.code = error_code::database_failure, .message = "Could not open game metadata"}}};
+                       post(shared,
+                            lifetime,
+                            lifetime_token,
+                            [shared, epoch, generation = query.generation, result = std::move(result)]() mutable -> void
+                            { complete_query(shared, completion_key {.epoch = epoch, .generation = generation}, std::move(result)); });
+                       return;
+                   }
+                   auto connection = std::make_shared<motif::db::query_connection>(std::move(*connection_result));
+                   {
+                       std::scoped_lock const lock {shared->connection_mutex};
+                       shared->active_connection = connection;
+                   }
+                   auto result = presenter->execute_query(query, *connection);
+                   {
+                       std::scoped_lock const lock {shared->connection_mutex};
+                       shared->active_connection.reset();
+                   }
                    post(shared,
                         lifetime,
                         lifetime_token,
@@ -370,7 +401,27 @@ struct async_browser_runner::impl
         launch(shared,
                [shared, presenter = std::move(presenter), request = *request, epoch, lifetime, lifetime_token]() mutable -> void
                {
-                   auto result = presenter->execute_activation(request);
+                   auto connection_result = motif::db::query_connection::open(presenter->database_dir());
+                   if (!connection_result) {
+                       auto result = loaded_game_result {tl::unexpected {
+                           browser_error {.code = error_code::database_failure, .message = "Could not open game metadata"}}};
+                       post(shared,
+                            lifetime,
+                            lifetime_token,
+                            [shared, epoch, generation = request.generation, result = std::move(result)]() mutable -> void
+                            { complete_activation(shared, completion_key {.epoch = epoch, .generation = generation}, std::move(result)); });
+                       return;
+                   }
+                   auto connection = std::make_shared<motif::db::query_connection>(std::move(*connection_result));
+                   {
+                       std::scoped_lock const lock {shared->connection_mutex};
+                       shared->active_connection = connection;
+                   }
+                   auto result = game_browser_presenter::execute_activation(request, *connection);
+                   {
+                       std::scoped_lock const lock {shared->connection_mutex};
+                       shared->active_connection.reset();
+                   }
                    post(shared,
                         lifetime,
                         lifetime_token,
@@ -423,7 +474,30 @@ struct async_browser_runner::impl
         launch(shared,
                [shared, presenter = std::move(presenter), request = *request, ply, epoch, lifetime, lifetime_token]() mutable -> void
                {
-                   auto result = presenter->execute_activation(request);
+                   auto connection_result = motif::db::query_connection::open(presenter->database_dir());
+                   if (!connection_result) {
+                       auto result = loaded_game_result {tl::unexpected {
+                           browser_error {.code = error_code::database_failure, .message = "Could not open game metadata"}}};
+                       post(shared,
+                            lifetime,
+                            lifetime_token,
+                            [shared, epoch, generation = request.generation, result = std::move(result), ply]() mutable -> void
+                            {
+                                complete_external_activation(
+                                    shared, completion_key {.epoch = epoch, .generation = generation}, std::move(result), ply);
+                            });
+                       return;
+                   }
+                   auto connection = std::make_shared<motif::db::query_connection>(std::move(*connection_result));
+                   {
+                       std::scoped_lock const lock {shared->connection_mutex};
+                       shared->active_connection = connection;
+                   }
+                   auto result = game_browser_presenter::execute_activation(request, *connection);
+                   {
+                       std::scoped_lock const lock {shared->connection_mutex};
+                       shared->active_connection.reset();
+                   }
                    post(shared,
                         lifetime,
                         lifetime_token,
@@ -453,6 +527,7 @@ async_browser_runner::async_browser_runner(slint::ComponentWeakHandle<WorkspaceW
 async_browser_runner::~async_browser_runner()
 {
     impl_->lifetime->fetch_add(1, std::memory_order_acq_rel);
+    impl_->interrupt_worker();
     wait_for_worker();
 }
 
@@ -478,6 +553,11 @@ void async_browser_runner::attach(motif::db::database_manager& database)
 void async_browser_runner::detach()
 {
     ++impl_->epoch;
+    impl_->lifetime->fetch_add(1, std::memory_order_acq_rel);
+    impl_->interrupt_worker();
+    wait_for_worker();
+    impl_->busy.store(false, std::memory_order_release);
+    impl_->set_busy(/*value=*/false);
     impl_->retire_presenter();
     impl_->reload_pending = false;
     impl_->pending_query.reset();

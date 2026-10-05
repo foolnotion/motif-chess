@@ -12,6 +12,7 @@
 
 #include <fmt/format.h>
 
+#include "motif/db/query_connection.hpp"
 #include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/browser_host.hpp"
 #include "motif/slint_app/explorer_table.hpp"
@@ -116,7 +117,9 @@ struct async_search_runner::state
     event_loop_environment environment;
     std::shared_ptr<search_presenter> presenter;
     std::mutex worker_mutex;
+    std::mutex connection_mutex;
     std::thread worker;
+    std::shared_ptr<motif::db::query_connection> active_connection;
     std::atomic<bool> busy {false};
     std::optional<search_query_result> pending_query;
     explorer_rows_tracker rows;
@@ -139,6 +142,12 @@ async_search_runner::async_search_runner(slint::ComponentWeakHandle<WorkspaceWin
 async_search_runner::~async_search_runner()
 {
     state_->lifetime->fetch_add(1, std::memory_order_acq_rel);
+    {
+        std::scoped_lock const lock {state_->connection_mutex};
+        if (state_->active_connection) {
+            state_->active_connection->interrupt();
+        }
+    }
     std::scoped_lock const lock {state_->worker_mutex};
     if (state_->worker.joinable()) {
         state_->worker.join();
@@ -162,6 +171,12 @@ void async_search_runner::attach(motif::db::database_manager& database)
 void async_search_runner::detach()
 {
     state_->lifetime->fetch_add(1, std::memory_order_acq_rel);
+    {
+        std::scoped_lock const lock {state_->connection_mutex};
+        if (state_->active_connection) {
+            state_->active_connection->interrupt();
+        }
+    }
     ++state_->epoch;
     state_->pending_query.reset();
     {
@@ -382,11 +397,31 @@ void async_search_runner::run_query(std::shared_ptr<state> const& shared, search
          window,
          environment]() mutable -> void
         {
-            auto result = presenter->execute_query(query);
-            if (!result && result.error().code == error_code::database_failure && shared->retry_on_database_failure
-                && shared->retry_on_database_failure())
+            auto connection_result = motif::db::query_connection::open(presenter->database_dir());
+            if (!connection_result) {
+                auto result = search_page_result {
+                    tl::unexpected {search_error {.code = error_code::database_failure, .message = "Could not open search metadata"}}};
+                environment.schedule(
+                    std::chrono::milliseconds {0},
+                    [shared, epoch, generation = query.generation, result = std::move(result), lifetime, lifetime_token, window]() mutable
+                        -> void
+                    {
+                        if (component_matches(window, lifetime, lifetime_token)) {
+                            async_search_runner::complete_query(
+                                shared, completion_key {.epoch = epoch, .generation = generation}, std::move(result));
+                        }
+                    });
+                return;
+            }
+            auto connection = std::make_shared<motif::db::query_connection>(std::move(*connection_result));
             {
-                result = presenter->execute_query(query);
+                std::scoped_lock const connection_lock {shared->connection_mutex};
+                shared->active_connection = connection;
+            }
+            auto result = presenter->execute_query(query, *connection);
+            {
+                std::scoped_lock const connection_lock {shared->connection_mutex};
+                shared->active_connection.reset();
             }
             environment.schedule(
                 std::chrono::milliseconds {0},

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,6 +33,11 @@ search_presenter::search_presenter(motif::db::database_manager& database)
     : database_(&database)
     , starting_position_hash_ {motif::db::zobrist_hash {motif::chess::board {}.hash()}}
 {
+}
+
+auto search_presenter::database_dir() const -> std::filesystem::path const&
+{
+    return database_->dir();
 }
 
 auto search_presenter::search(motif::db::zobrist_hash const hash, motif::db::search_filter filter)
@@ -72,7 +78,6 @@ auto search_presenter::execute_query(search_query const& query) const -> search_
     if (!games_result) {
         return tl::unexpected {from_database_error(games_result.error())};
     }
-
     auto const game_ids = [&games = games_result->games]() -> std::vector<motif::db::game_id>
     {
         auto ids = std::vector<motif::db::game_id> {};
@@ -83,6 +88,54 @@ auto search_presenter::execute_query(search_query const& query) const -> search_
         return ids;
     }();
     auto matches_result = database_->query_position_first_matches(query.hash, game_ids);
+    if (!matches_result) {
+        return tl::unexpected {from_database_error(matches_result.error())};
+    }
+    if (matches_result->size() != games_result->games.size()) {
+        return tl::unexpected {
+            search_error {.code = error_code::database_failure, .message = "Position results changed while search metadata was loaded."}};
+    }
+    std::ranges::sort(*matches_result, {}, &motif::db::position_match::game_id);
+    auto matches = std::vector<search_match> {};
+    matches.reserve(games_result->games.size());
+    for (auto& entry : games_result->games) {
+        auto const found = std::ranges::lower_bound(*matches_result, entry.id, {}, &motif::db::position_match::game_id);
+        if (found == matches_result->end() || found->game_id != entry.id) {
+            return tl::unexpected {search_error {.code = error_code::database_failure,
+                                                 .message = "Position results changed while search metadata was loaded."}};
+        }
+        matches.push_back(search_match {.game = std::move(entry), .ply = found->ply});
+    }
+    auto stats_result = motif::search::opening_stats::query(*database_, query.hash, query.filter);
+    if (!stats_result) {
+        return tl::unexpected {from_search_error(stats_result.error())};
+    }
+    return search_page {.generation = query.generation,
+                        .hash = query.hash,
+                        .matches = std::move(matches),
+                        .total_matches = games_result->total_count,
+                        .continuations = std::move(*stats_result),
+                        .filter = query.filter};
+}
+
+auto search_presenter::execute_query(search_query const& query, motif::db::query_connection const& connection) const
+    -> search_result<search_page>
+{
+    auto games_result = database_->find_games(query.filter, connection.store());
+    if (!games_result) {
+        return tl::unexpected {from_database_error(games_result.error())};
+    }
+
+    auto const game_ids = [&games = games_result->games]() -> std::vector<motif::db::game_id>
+    {
+        auto ids = std::vector<motif::db::game_id> {};
+        ids.reserve(games.size());
+        for (auto const& game : games) {
+            ids.push_back(game.id);
+        }
+        return ids;
+    }();
+    auto matches_result = database_->query_position_first_matches(query.hash, game_ids, connection.store());
     if (!matches_result) {
         return tl::unexpected {from_database_error(matches_result.error())};
     }
@@ -103,7 +156,7 @@ auto search_presenter::execute_query(search_query const& query) const -> search_
         matches.push_back(search_match {.game = std::move(entry), .ply = found->ply});
     }
 
-    auto stats_result = motif::search::opening_stats::query(*database_, query.hash, query.filter);
+    auto stats_result = motif::search::opening_stats::query(*database_, query.hash, query.filter, connection.store());
     if (!stats_result) {
         return tl::unexpected {from_search_error(stats_result.error())};
     }
