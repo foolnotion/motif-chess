@@ -220,7 +220,7 @@ TEST_CASE("database host: accepting after the workspace became busy does nothing
             CHECK_FALSE(test.window->get_confirm_visible());
             CHECK_FALSE(test.confirmation.pending());
             CHECK_FALSE(test.window->get_busy());
-            CHECK_FALSE(test.error().empty());
+            CHECK(test.error().contains("became busy"));
             CHECK(test.window->get_board_edited());
 
             // Nothing is left half-armed: once idle again the same request works.
