@@ -41,6 +41,15 @@ auto make_match_game() -> motif::db::game
     return game;
 }
 
+auto make_starting_game() -> motif::db::game
+{
+    auto game = make_match_game();
+    game.white.name = "Starting White";
+    game.black.name = "Starting Black";
+    game.moves.clear();
+    return game;
+}
+
 struct search_host_fixture
 {
     test_support::manual_event_loop loop;
@@ -59,6 +68,7 @@ struct search_host_fixture
         REQUIRE(created);
         database = std::move(*created);
         REQUIRE(database->insert_game(make_match_game()));
+        REQUIRE(database->insert_game(make_starting_game()));
         if (index) {
             REQUIRE(database->rebuild_position_postings());
         }
@@ -146,7 +156,7 @@ TEST_CASE("search host: every busy source rejects every registered action and re
 
     test.window->invoke_search_requested();
     test.drain_search();
-    REQUIRE(test.window->get_search_matches()->row_count() == 1);
+    REQUIRE(test.window->get_search_matches()->row_count() == 2);
     for (auto const& busy : busy_cases) {
         test.activity = busy;
         auto const persisted = test.window->get_search_auto_search();
@@ -199,7 +209,7 @@ TEST_CASE("search host: match activation rechecks activity after confirmation", 
 
     test.window->invoke_search_requested();
     test.drain_search();
-    REQUIRE(test.window->get_search_matches()->row_count() == 1);
+    REQUIRE(test.window->get_search_matches()->row_count() == 2);
 
     test.window->invoke_board_play_san("e4");
     REQUIRE(test.board.edited());
@@ -209,7 +219,11 @@ TEST_CASE("search host: match activation rechecks activity after confirmation", 
     CHECK(test.window->get_confirm_visible());
     test.activity.import_active = true;
     test.window->invoke_confirm_accepted();
+    CHECK_FALSE(test.browser.is_busy());
+    test.browser.wait_for_worker();
+    (void)test.loop.run(no_delay);
     CHECK(test.board.current_fen() == board_before);
+    CHECK(test.board.edited());
     test.activity.import_active = false;
 
     test.window->invoke_search_match_activated(-1);
@@ -228,12 +242,14 @@ TEST_CASE("search host: same hash does not re-query and board notifications use 
     motif::slint_app::follow_board_position(test.search, test.browser, hash);
     test.drain_search();
     REQUIRE(motif::slint_app::explorer_rows_current(test.board, test.search));
+    auto const starting_total = test.window->get_search_total_matches();
     motif::slint_app::follow_board_position(test.search, test.browser, hash);
     CHECK(test.loop.pending(no_delay) == 0);
 
     test.window->invoke_board_play_san("e4");
     test.drain_search();
-    CHECK_FALSE(test.window->get_search_rows_stale());
+    CHECK(motif::slint_app::explorer_rows_current(test.board, test.search));
+    CHECK(test.window->get_search_total_matches() != starting_total);
 }
 
 TEST_CASE("search host: accepted confirmation activates the selected browser game", "[motif-slint-app]")
@@ -243,7 +259,7 @@ TEST_CASE("search host: accepted confirmation activates the selected browser gam
 
     test.window->invoke_search_requested();
     test.drain_search();
-    REQUIRE(test.window->get_search_matches()->row_count() == 1);
+    REQUIRE(test.window->get_search_matches()->row_count() == 2);
     test.window->invoke_board_play_san("e4");
     REQUIRE(test.board.edited());
     test.drain_search();
@@ -289,9 +305,10 @@ TEST_CASE("search host: replaced and detached presenters ignore stale worker com
     REQUIRE(test.search.is_busy());
     test.loop.wait_for_tasks(no_delay, 1);
     test.search.attach(replacement);
+    test.window->set_search_total_matches(stale_total_sentinel);
     (void)test.loop.run(no_delay);
     CHECK_FALSE(test.search.is_busy());
-    CHECK(test.window->get_search_total_matches() == 0);
+    CHECK(test.window->get_search_total_matches() == stale_total_sentinel);
 
     REQUIRE(test.database);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -327,4 +344,24 @@ TEST_CASE("search host: queued completion after window invalidation is ignored",
     CHECK(search->is_busy());
     search->detach();
     CHECK_FALSE(search->is_busy());
+}
+
+TEST_CASE("search host: destroyed runner ignores queued completion with window alive", "[motif-slint-app]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto loop = test_support::manual_event_loop {};
+    auto window = WorkspaceWindow::create();
+    auto created = motif::db::database_manager::create_scratch();
+    REQUIRE(created);
+    auto database = std::move(*created);
+    {
+        auto search = std::make_unique<motif::slint_app::async_search_runner>(window, loop.environment());
+        search->attach(database);
+        search->search(first_stale_hash, {});
+        REQUIRE(search->is_busy());
+        loop.wait_for_tasks(no_delay, 1);
+    }
+    window->set_search_total_matches(stale_total_sentinel);
+    (void)loop.run(no_delay);
+    CHECK(window->get_search_total_matches() == stale_total_sentinel);
 }

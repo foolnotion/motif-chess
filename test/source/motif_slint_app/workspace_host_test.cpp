@@ -260,7 +260,8 @@ TEST_CASE("workspace host: preset and notation callbacks persist preferences", "
 
     auto const before = test.window->get_notation_below();
     test.window->invoke_notation_layout_toggled();
-    CHECK(test.service.notation_below() != before);
+    CHECK(test.window->get_notation_below() != before);
+    CHECK(test.service.notation_below() == test.window->get_notation_below());
 }
 
 TEST_CASE("workspace host: failed preference saves roll back visible preset and notation", "[motif-slint-app]")
@@ -304,4 +305,39 @@ TEST_CASE("workspace host: queued completion after window invalidation is ignore
     // Existing lifetime semantics deliberately leave busy set when a queued
     // completion loses its window. Destruction subsequently joins safely.
     CHECK(runner.is_busy());
+}
+
+TEST_CASE("workspace host: destroyed runner ignores queued completion with window alive", "[motif-slint-app]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto loop = test_support::manual_event_loop {};
+    auto window = WorkspaceWindow::create();
+    auto service = motif::slint_app::workspace_service {};
+    auto board = motif::slint_app::async_board_runner {window};
+    auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+    auto search = motif::slint_app::async_search_runner {window, loop.environment()};
+    auto analysis = motif::slint_app::async_analysis_runner {
+        window, service, loop.environment(), [&board]() -> std::optional<std::string> { return board.current_fen(); }};
+    auto const display_before = window->get_display_name();
+    auto steps = std::size_t {0};
+    {
+        auto runner =
+            motif::slint_app::async_workspace_runner {service,
+                                                      window,
+                                                      browser,
+                                                      board,
+                                                      search,
+                                                      analysis,
+                                                      loop.environment(),
+                                                      [&steps](motif::slint_app::workspace_attach_step const) -> void { ++steps; }};
+        REQUIRE(runner.run_scratch() == motif::slint_app::async_workspace_runner::start_outcome::accepted);
+        loop.wait_for_tasks(no_delay, 1);
+    }
+    (void)loop.run(no_delay);
+    // The service operation already activated scratch on its worker; the queued
+    // host completion must not attach collaborators or republish the window.
+    CHECK(service.has_active());
+    CHECK(steps == 0);
+    CHECK(window->get_display_name() == display_before);
+    CHECK_FALSE(window->get_has_database());
 }
