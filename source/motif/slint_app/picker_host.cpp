@@ -80,11 +80,12 @@ auto field_text(WorkspaceWindow& window, BrowseTarget const target) -> std::stri
 
 auto picker_failure_text(std::string_view message) -> std::string
 {
-    constexpr auto trailing = std::string_view {" \t\r\n."};
-    if (auto const last = message.find_last_not_of(trailing); last == std::string_view::npos) {
+    constexpr auto whitespace = std::string_view {" \t\r\n"};
+    // Only the whitespace around the toolkit's text goes; the text itself stays as it is.
+    if (auto const first = message.find_first_not_of(whitespace); first == std::string_view::npos) {
         message = {};
     } else {
-        message = message.substr(0, last + 1);
+        message = message.substr(first, message.find_last_not_of(whitespace) - first + 1);
     }
     if (message.empty()) {
         return "The file dialog is not available. Type the path instead.";

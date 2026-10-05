@@ -322,12 +322,17 @@ TEST_CASE("picker host: a dialog that cannot open shows the reason and leaves th
     CHECK(test.picker->requests().size() == 2);
 }
 
-TEST_CASE("picker failure text names the reason and the fallback", "[motif-slint-app][picker]")
+TEST_CASE("picker failure text carries the toolkit's text verbatim, trimmed of surrounding whitespace only", "[motif-slint-app][picker]")
 {
     CHECK(picker_failure_text("The name org.freedesktop.portal.Desktop was not provided")
           == "The file dialog is not available: The name org.freedesktop.portal.Desktop was not provided. Type the path instead.");
-    CHECK(picker_failure_text("No portal.\n") == "The file dialog is not available: No portal. Type the path instead.");
+    // Whitespace around the text goes; every character of the text stays, a final full stop included.
+    CHECK(picker_failure_text("  No portal \t\r\n") == "The file dialog is not available: No portal. Type the path instead.");
+    CHECK(picker_failure_text("No portal.\n") == "The file dialog is not available: No portal.. Type the path instead.");
+    CHECK(picker_failure_text("foo..") == "The file dialog is not available: foo... Type the path instead.");
+    CHECK(picker_failure_text("a. b") == "The file dialog is not available: a. b. Type the path instead.");
     CHECK(picker_failure_text("") == "The file dialog is not available. Type the path instead.");
+    CHECK(picker_failure_text(" \t\r\n") == "The file dialog is not available. Type the path instead.");
 }
 
 TEST_CASE("picker host: a request while a dialog is open is ignored", "[motif-slint-app][picker]")
@@ -399,6 +404,33 @@ TEST_CASE("picker host: board actions and the workspace gate are unaffected by a
     // The dialog is not an activity: the gate that board actions consult says idle.
     CHECK(probe().idle());
     CHECK(test.window->get_picker_open());
+}
+
+TEST_CASE("picker host: an answer is stored after the workspace was closed and its panels were replaced", "[motif-slint-app][picker]")
+{
+    auto test = host {hang_script(/*abortable=*/true)};
+    test.window->set_has_database(true);
+    test.window->set_workspace_preset(WorkspacePreset::Analysis);
+    test.open_dialog(BrowseTarget::Engine);
+    REQUIRE(test.window->get_picker_open());
+
+    // The Analysis panel goes away with its preset, then the database closes and the setup screen shows.
+    test.window->set_workspace_preset(WorkspacePreset::Review);
+    test.window->set_has_database(false);
+    CHECK(test.window->get_picker_open());
+
+    test.picker->finish(picker_outcome::chosen("/opt/engines/lc0"));
+    REQUIRE(test.loop.run_when_posted() == 1);
+
+    CHECK(text_of(test.window->get_analysis_engine_path_text()) == "/opt/engines/lc0");
+    CHECK_FALSE(test.window->get_picker_open());
+    CHECK_FALSE(test.runner->open());
+    CHECK(test.submitted.empty());
+    CHECK(test.error().empty());
+
+    // The next dialog opens as usual from the setup screen.
+    test.window->invoke_browse_requested(BrowseTarget::DatabaseOpen);
+    CHECK(test.picker->wait_for_calls(2, patience));
 }
 
 TEST_CASE("picker host: shutdown aborts an abortable dialog and delivers nothing afterwards", "[motif-slint-app][picker]")
