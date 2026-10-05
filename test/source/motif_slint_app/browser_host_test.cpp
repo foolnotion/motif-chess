@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -47,6 +49,69 @@ constexpr auto busy_conditions = std::array {
 };
 
 constexpr auto no_delay = std::chrono::milliseconds {0};
+constexpr auto manager_probe_game_id = motif::db::game_id {1};
+constexpr auto shutdown_total_sentinel = 73;
+
+struct query_blocker_scope
+{
+    query_blocker_scope()
+        : blocker {std::make_shared<motif::db::query_connection_blocker>()}
+    {
+        motif::db::set_query_connection_blocker_for_tests(blocker);
+    }
+
+    query_blocker_scope(query_blocker_scope const&) = delete;
+    auto operator=(query_blocker_scope const&) -> query_blocker_scope& = delete;
+    query_blocker_scope(query_blocker_scope&&) = delete;
+    auto operator=(query_blocker_scope&&) -> query_blocker_scope& = delete;
+
+    ~query_blocker_scope() { motif::db::set_query_connection_blocker_for_tests({}); }
+
+    std::shared_ptr<motif::db::query_connection_blocker> blocker;
+};
+
+struct query_open_gate_scope
+{
+    query_open_gate_scope()
+        : gate {std::make_shared<motif::db::query_connection_open_gate>()}
+    {
+        motif::db::set_query_connection_open_gate_for_tests(gate);
+    }
+
+    query_open_gate_scope(query_open_gate_scope const&) = delete;
+    auto operator=(query_open_gate_scope const&) -> query_open_gate_scope& = delete;
+    query_open_gate_scope(query_open_gate_scope&&) = delete;
+    auto operator=(query_open_gate_scope&&) -> query_open_gate_scope& = delete;
+
+    ~query_open_gate_scope() { motif::db::set_query_connection_open_gate_for_tests({}); }
+
+    std::shared_ptr<motif::db::query_connection_open_gate> gate;
+};
+
+template<typename Close>
+auto close_within_one_second(Close close, query_blocker_scope const& blocker) -> bool
+{
+    auto mutex = std::mutex {};
+    auto condition = std::condition_variable {};
+    auto complete = false;
+    auto watchdog = std::thread {[&]() -> void
+                                 {
+                                     auto lock = std::unique_lock {mutex};
+                                     if (!condition.wait_for(lock, std::chrono::seconds {1}, [&]() -> bool { return complete; })) {
+                                         blocker.blocker->release();
+                                     }
+                                 }};
+    auto const started = std::chrono::steady_clock::now();
+    close();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    {
+        std::scoped_lock const lock {mutex};
+        complete = true;
+    }
+    condition.notify_one();
+    watchdog.join();
+    return elapsed <= std::chrono::seconds {1};
+}
 
 // The event loop of these tests: tasks the runner schedules wait here until a
 // test runs them, which stands in for the loop turning. Tasks are run on the
@@ -461,21 +526,79 @@ TEST_CASE("browser host: detach interrupts a blocked dedicated SQLite query", "[
     auto database = make_numbered_database(12);
     auto loop = manual_loop {};
     auto window = WorkspaceWindow::create();
-    auto blocker = std::make_shared<motif::db::query_connection_blocker>();
-    motif::db::set_query_connection_blocker_for_tests(blocker);
+    auto blocker = query_blocker_scope {};
     auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
     browser.attach(database);
     browser.load_initial();
-    blocker->wait_until_entered();
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_within_one_second([&]() -> void { browser.detach(); }, blocker));
+    window->set_game_total_count(shutdown_total_sentinel);
+    (void)loop.run(no_delay);
+    CHECK_FALSE(browser.is_busy());
+    CHECK(window->get_game_total_count() == shutdown_total_sentinel);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
+}
+
+TEST_CASE("browser host: destruction interrupts a blocked dedicated SQLite query", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto blocker = query_blocker_scope {};
+    auto browser = std::make_unique<motif::slint_app::async_browser_runner>(window, loop.environment());
+    browser->attach(database);
+    browser->load_initial();
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_within_one_second([&]() -> void { browser.reset(); }, blocker));
+    window->set_game_total_count(shutdown_total_sentinel);
+    (void)loop.run(no_delay);
+    CHECK(window->get_game_total_count() == shutdown_total_sentinel);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
+}
+
+TEST_CASE("browser host: worker cancellation does not interrupt manager metadata", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto blocker = query_blocker_scope {};
+    auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+    browser.attach(database);
+    browser.load_initial();
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    browser.detach();
+    auto manager_game = database.store().get(manager_probe_game_id);
+    REQUIRE(manager_game);
+    window->set_game_total_count(shutdown_total_sentinel);
+    (void)loop.run(no_delay);
+    CHECK(window->get_game_total_count() == shutdown_total_sentinel);
+}
+
+TEST_CASE("browser host: detach cancels before connection publication", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto gate = query_open_gate_scope {};
+    auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+    browser.attach(database);
+    browser.load_initial();
+    REQUIRE(gate.gate->wait_until_entered_for(std::chrono::seconds {1}));
 
     auto const started = std::chrono::steady_clock::now();
     browser.detach();
     auto const elapsed = std::chrono::steady_clock::now() - started;
-    motif::db::set_query_connection_blocker_for_tests({});
-
+    window->set_game_total_count(shutdown_total_sentinel);
+    (void)loop.run(no_delay);
     CHECK(elapsed <= std::chrono::seconds {1});
     CHECK_FALSE(browser.is_busy());
-    CHECK(window->get_game_rows()->row_count() == 0);
+    CHECK(window->get_game_total_count() == shutdown_total_sentinel);
 }
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.

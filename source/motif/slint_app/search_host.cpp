@@ -120,12 +120,48 @@ struct async_search_runner::state
     std::mutex connection_mutex;
     std::thread worker;
     std::shared_ptr<motif::db::query_connection> active_connection;
+    std::shared_ptr<std::atomic<bool>> active_cancellation;
     std::atomic<bool> busy {false};
     std::optional<search_query_result> pending_query;
     explorer_rows_tracker rows;
     std::uint64_t epoch {};
     std::shared_ptr<std::atomic<std::uint64_t>> lifetime {std::make_shared<std::atomic<std::uint64_t>>(0)};
     std::function<bool()> retry_on_database_failure;
+
+    void cancel_worker() noexcept
+    {
+        std::scoped_lock const lock {connection_mutex};
+        if (active_cancellation) {
+            active_cancellation->store(true, std::memory_order_release);
+        }
+        if (active_connection) {
+            active_connection->interrupt();
+        }
+        motif::db::notify_query_connection_open_gate_cancellation_for_tests();
+    }
+
+    static auto publish_connection(std::shared_ptr<state> const& shared,
+                                   std::shared_ptr<std::atomic<bool>> const& cancellation,
+                                   std::shared_ptr<motif::db::query_connection> const& connection) -> bool
+    {
+        std::scoped_lock const lock {shared->connection_mutex};
+        shared->active_cancellation = cancellation;
+        shared->active_connection = connection;
+        if (cancellation->load(std::memory_order_acquire)) {
+            connection->interrupt();
+            return false;
+        }
+        return true;
+    }
+
+    static void clear_connection(std::shared_ptr<state> const& shared, std::shared_ptr<std::atomic<bool>> const& cancellation)
+    {
+        std::scoped_lock const lock {shared->connection_mutex};
+        if (shared->active_cancellation == cancellation) {
+            shared->active_connection.reset();
+            shared->active_cancellation.reset();
+        }
+    }
 };
 
 struct async_search_runner::completion_key
@@ -142,12 +178,7 @@ async_search_runner::async_search_runner(slint::ComponentWeakHandle<WorkspaceWin
 async_search_runner::~async_search_runner()
 {
     state_->lifetime->fetch_add(1, std::memory_order_acq_rel);
-    {
-        std::scoped_lock const lock {state_->connection_mutex};
-        if (state_->active_connection) {
-            state_->active_connection->interrupt();
-        }
-    }
+    state_->cancel_worker();
     std::scoped_lock const lock {state_->worker_mutex};
     if (state_->worker.joinable()) {
         state_->worker.join();
@@ -171,12 +202,7 @@ void async_search_runner::attach(motif::db::database_manager& database)
 void async_search_runner::detach()
 {
     state_->lifetime->fetch_add(1, std::memory_order_acq_rel);
-    {
-        std::scoped_lock const lock {state_->connection_mutex};
-        if (state_->active_connection) {
-            state_->active_connection->interrupt();
-        }
-    }
+    state_->cancel_worker();
     ++state_->epoch;
     state_->pending_query.reset();
     {
@@ -383,6 +409,11 @@ void async_search_runner::run_query(std::shared_ptr<state> const& shared, search
     auto const lifetime_token = lifetime->load(std::memory_order_acquire);
     auto const window = shared->window;
     auto const environment = shared->environment;
+    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+    {
+        std::scoped_lock const connection_lock {shared->connection_mutex};
+        shared->active_cancellation = cancellation;
+    }
     std::scoped_lock const lock {shared->worker_mutex};
     if (shared->worker.joinable()) {
         shared->worker.join();
@@ -395,12 +426,14 @@ void async_search_runner::run_query(std::shared_ptr<state> const& shared, search
          lifetime,
          lifetime_token,
          window,
-         environment]() mutable -> void
+         environment,
+         cancellation]() mutable -> void
         {
-            auto connection_result = motif::db::query_connection::open(presenter->database_dir());
+            auto connection_result = motif::db::query_connection::open(presenter->database_dir(), cancellation);
             if (!connection_result) {
                 auto result = search_page_result {
                     tl::unexpected {search_error {.code = error_code::database_failure, .message = "Could not open search metadata"}}};
+                state::clear_connection(shared, cancellation);
                 environment.schedule(
                     std::chrono::milliseconds {0},
                     [shared, epoch, generation = query.generation, result = std::move(result), lifetime, lifetime_token, window]() mutable
@@ -414,15 +447,17 @@ void async_search_runner::run_query(std::shared_ptr<state> const& shared, search
                 return;
             }
             auto connection = std::make_shared<motif::db::query_connection>(std::move(*connection_result));
-            {
-                std::scoped_lock const connection_lock {shared->connection_mutex};
-                shared->active_connection = connection;
+            if (!state::publish_connection(shared, cancellation, connection)) {
+                state::clear_connection(shared, cancellation);
+                return;
             }
             auto result = presenter->execute_query(query, *connection);
+            if (!connection->cancelled() && !result && result.error().code == error_code::database_failure
+                && shared->retry_on_database_failure && shared->retry_on_database_failure())
             {
-                std::scoped_lock const connection_lock {shared->connection_mutex};
-                shared->active_connection.reset();
+                result = presenter->execute_query(query, *connection);
             }
+            state::clear_connection(shared, cancellation);
             environment.schedule(
                 std::chrono::milliseconds {0},
                 [shared, epoch, generation = query.generation, result = std::move(result), lifetime, lifetime_token, window]() mutable
