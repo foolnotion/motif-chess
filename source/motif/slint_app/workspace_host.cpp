@@ -110,6 +110,7 @@ struct async_workspace_runner::state
     async_search_runner& search;
     async_analysis_runner& analysis;
     event_loop_environment environment;
+    attach_observer observer;
     std::thread worker;
     std::atomic<bool> busy {false};
     std::shared_ptr<std::atomic<std::uint64_t>> lifetime {std::make_shared<std::atomic<std::uint64_t>>(0)};
@@ -121,9 +122,11 @@ async_workspace_runner::async_workspace_runner(workspace_service& service,
                                                async_board_runner& board,
                                                async_search_runner& search,
                                                async_analysis_runner& analysis,
-                                               event_loop_environment environment)
+                                               event_loop_environment environment,
+                                               attach_observer observer)
     : state_(std::make_shared<state>(service, std::move(window), browser, board, search, analysis, std::move(environment)))
 {
+    state_->observer = std::move(observer);
 }
 
 async_workspace_runner::~async_workspace_runner()
@@ -156,6 +159,31 @@ auto async_workspace_runner::is_busy() const noexcept -> bool
     return state_->busy.load(std::memory_order_acquire);
 }
 
+void async_workspace_runner::notify_attach(state& shared, workspace_attach_step const step)
+{
+    if (shared.observer) {
+        shared.observer(step);
+    }
+}
+
+void async_workspace_runner::attach_hosts(state& shared)
+{
+    auto* database = shared.service.active_database();
+    if (database == nullptr) {
+        return;
+    }
+    shared.analysis.workspace_changed();
+    notify_attach(shared, workspace_attach_step::analysis_changed);
+    shared.browser.attach(*database);
+    notify_attach(shared, workspace_attach_step::browser_attached);
+    shared.browser.load_initial();
+    notify_attach(shared, workspace_attach_step::browser_loaded);
+    shared.search.attach(*database);
+    notify_attach(shared, workspace_attach_step::search_attached);
+    shared.board.attach();
+    notify_attach(shared, workspace_attach_step::board_attached);
+}
+
 auto async_workspace_runner::start(std::function<result<void>()> operation) -> start_outcome
 {
     if (state_->busy.exchange(true, std::memory_order_acq_rel)) {
@@ -185,13 +213,7 @@ auto async_workspace_runner::start(std::function<result<void>()> operation) -> s
                         publish_workspace(workspace_window, shared->service);
                         workspace_window.set_busy(false);
                         if (result) {
-                            if (auto* database = shared->service.active_database(); database != nullptr) {
-                                shared->analysis.workspace_changed();
-                                shared->browser.attach(*database);
-                                shared->browser.load_initial();
-                                shared->search.attach(*database);
-                                shared->board.attach();
-                            }
+                            attach_hosts(*shared);
                         }
                     }
                     shared->busy.store(false, std::memory_order_release);
