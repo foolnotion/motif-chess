@@ -25,6 +25,7 @@ class query_connection_blocker
     [[nodiscard]] auto observed_sqlite_interrupt() const noexcept -> bool;
 
   private:
+    friend class database_manager;
     friend class query_connection;
 
     void bind(sqlite3* connection, std::atomic<bool>* cancellation) noexcept;
@@ -87,6 +88,13 @@ class query_connection
     [[nodiscard]] auto cancelled() const noexcept -> bool;
 
   private:
+    struct progress_context
+    {
+        std::shared_ptr<std::atomic<bool>> cancellation;
+        std::shared_ptr<query_connection_blocker> blocker;
+    };
+
+    static auto progress_callback(void* context) noexcept -> int;
     explicit query_connection(sqlite3* connection,
                               std::shared_ptr<query_connection_blocker> blocker,
                               std::shared_ptr<std::atomic<bool>> cancellation) noexcept;
@@ -95,5 +103,6 @@ class query_connection
     std::optional<game_store> store_;
     std::shared_ptr<query_connection_blocker> blocker_;
     std::shared_ptr<std::atomic<bool>> cancellation_;
+    progress_context progress_;
 };
 }  // namespace motif::db

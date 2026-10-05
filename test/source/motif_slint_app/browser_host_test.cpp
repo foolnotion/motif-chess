@@ -604,6 +604,43 @@ TEST_CASE("browser host: worker cancellation does not interrupt manager metadata
     CHECK(window->get_game_total_count() == shutdown_total_sentinel);
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: cancellation leaves an in-flight manager read alone", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto worker_blocker = query_blocker_scope {};
+    auto manager_blocker = std::make_shared<motif::db::query_connection_blocker>();
+    database.set_manager_query_blocker_for_tests(manager_blocker);
+    auto manager_result = std::optional<motif::db::result<motif::db::game>> {};
+    auto manager_finished = std::atomic<bool> {false};
+    auto manager = std::thread {[&]() -> void
+                                {
+                                    manager_result = database.store().get(manager_probe_game_id);
+                                    manager_finished.store(true, std::memory_order_release);
+                                }};
+    REQUIRE(manager_blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+    browser.attach(database);
+    browser.load_initial();
+    REQUIRE(worker_blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+    CHECK(close_within_one_second([&]() -> void { browser.detach(); }, worker_blocker));
+    CHECK_FALSE(manager_finished.load(std::memory_order_acquire));
+
+    manager_blocker->release();
+    manager.join();
+    database.set_manager_query_blocker_for_tests({});
+    REQUIRE(manager_result);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const& result = *manager_result;
+    CHECK(result);
+    CHECK(worker_blocker.blocker->observed_sqlite_interrupt());
+}
+
 TEST_CASE("browser host: detach cancels before connection publication", "[motif-slint-app][browser][shutdown]")
 {
     auto const platform = snapshot_test::use_snapshot_platform();

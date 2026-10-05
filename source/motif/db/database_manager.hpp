@@ -40,6 +40,7 @@ namespace motif::db
 // rebuild_position_postings()).
 //
 class bundle_lock;
+class query_connection_blocker;
 
 // Obtain instances via the create() or open() factory methods.
 class database_manager
@@ -111,6 +112,10 @@ class database_manager
 
     // Directory containing the database bundle files.
     [[nodiscard]] auto dir() const noexcept -> std::filesystem::path const&;
+
+    // Test-only deterministic blocker for the manager's shared SQLite connection.
+    // Production query workers must never install or interrupt this handler.
+    void set_manager_query_blocker_for_tests(std::shared_ptr<query_connection_blocker> blocker);
 
     // Set provenance on a just-inserted game. This does not affect derived
     // indexes because provenance is absent from their persisted records.
@@ -211,6 +216,7 @@ class database_manager
     // True when create() also created dir_ itself (it did not exist before).
     bool created_dir_ {false};
     std::unique_ptr<bundle_lock> bundle_lock_;
+    std::shared_ptr<query_connection_blocker> manager_query_blocker_;
     mutable std::recursive_mutex generation_mutex_;
     auto mark_derived_indexes_stale() -> result<void>;
     auto publish_derived_index(std::string const& filename, bool is_postings, std::uint64_t next_build_seq) -> manifest_write_result;

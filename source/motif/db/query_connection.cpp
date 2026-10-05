@@ -36,12 +36,16 @@ auto test_state() -> blocker_test_state&
     return state.open_gate;
 }
 
-auto progress_callback(void* const context) noexcept -> int
-{
-    return static_cast<query_connection_blocker*>(context)->progress();
-}
-
 }  // namespace
+
+auto query_connection::progress_callback(void* const context) noexcept -> int
+{
+    auto const& progress = *static_cast<progress_context*>(context);
+    if (progress.cancellation->load(std::memory_order_acquire)) {
+        return 1;
+    }
+    return progress.blocker ? progress.blocker->progress() : 0;
+}
 
 auto query_connection_blocker::wait_until_entered_for(std::chrono::milliseconds const timeout) -> bool
 {
@@ -147,10 +151,9 @@ query_connection::query_connection(sqlite3* const connection,
     , store_ {connection}
     , blocker_ {std::move(blocker)}
     , cancellation_ {std::move(cancellation)}
+    , progress_ {.cancellation = cancellation_, .blocker = blocker_}
 {
-    if (blocker_) {
-        sqlite3_progress_handler(connection_, 1, progress_callback, blocker_.get());
-    }
+    sqlite3_progress_handler(connection_, 1, progress_callback, &progress_);
 }
 
 query_connection::~query_connection()
@@ -166,7 +169,11 @@ query_connection::query_connection(query_connection&& other) noexcept
     , store_ {std::move(other.store_)}
     , blocker_ {std::move(other.blocker_)}
     , cancellation_ {std::move(other.cancellation_)}
+    , progress_ {std::move(other.progress_)}
 {
+    if (connection_ != nullptr) {
+        sqlite3_progress_handler(connection_, 1, progress_callback, &progress_);
+    }
 }
 
 auto query_connection::operator=(query_connection&& other) noexcept -> query_connection&
@@ -180,6 +187,10 @@ auto query_connection::operator=(query_connection&& other) noexcept -> query_con
         store_ = std::move(other.store_);
         blocker_ = std::move(other.blocker_);
         cancellation_ = std::move(other.cancellation_);
+        progress_ = std::move(other.progress_);
+        if (connection_ != nullptr) {
+            sqlite3_progress_handler(connection_, 1, progress_callback, &progress_);
+        }
     }
     return *this;
 }
