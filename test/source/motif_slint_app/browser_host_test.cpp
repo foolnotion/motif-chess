@@ -192,6 +192,7 @@ struct host
 
     // The toggle's press, through the registered callback.
     void follow_on() { window->invoke_game_follow_toggled(/*arg_0=*/true); }
+
     void follow_off() { window->invoke_game_follow_toggled(/*arg_0=*/false); }
 
     // Plays moves on the board through the registered callback.
@@ -240,7 +241,6 @@ auto make_numbered_database(std::size_t const count) -> motif::db::database_mana
     REQUIRE(database.rebuild_position_postings().has_value());
     return database;
 }
-
 
 auto hash_of(std::vector<std::string> const& sans) -> motif::db::zobrist_hash
 {
@@ -453,7 +453,6 @@ TEST_CASE("browser host: a result that arrives after the runner is gone is dropp
     CHECK(window->get_game_rows()->row_count() == 0);
 }
 
-
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("browser host: Follow board lists the games that reach the board position and refreshes with every move",
@@ -512,7 +511,8 @@ TEST_CASE("browser host: Follow board lists the games that reach the board posit
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: filters and sort narrow a followed list and the position stays applied", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: filters and sort narrow a followed list and the position stays applied",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto database = make_opening_database();
@@ -572,7 +572,8 @@ TEST_CASE("browser host: the newest position wins and an older completion never 
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: a selected game stays selected across a position change or is deselected with it", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: a selected game stays selected across a position change or is deselected with it",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto database = make_opening_database();
@@ -609,7 +610,8 @@ TEST_CASE("browser host: a selected game stays selected across a position change
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: opening a followed row lands on the followed position and leaves the list alone", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: opening a followed row lands on the followed position and leaves the list alone",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto database = make_opening_database();
@@ -660,7 +662,8 @@ TEST_CASE("browser host: opening a followed row lands on the followed position a
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: Follow board is refused under each busy condition and the toggle snaps back", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: Follow board is refused under each busy condition and the toggle snaps back",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto database = make_opening_database();
@@ -723,7 +726,8 @@ TEST_CASE("browser host: Follow board is refused while the confirmation is shown
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: turning Follow board off returns to the page shown before and keeps the filters", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: turning Follow board off returns to the page shown before and keeps the filters",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto database = make_numbered_database(120);
@@ -815,7 +819,8 @@ TEST_CASE("browser host: the Explorer preset runs no follow queries and the list
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: a workspace change turns Follow board off and drops results still in flight", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: a workspace change turns Follow board off and drops results still in flight",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto first = make_opening_database();
@@ -829,7 +834,7 @@ TEST_CASE("browser host: a workspace change turns Follow board off and drops res
 
     test.browser.position_changed(hash_of({"e4"}));
     test.browser.wait_for_worker();  // the e4 list is computed but not yet applied
-    test.open(second);               // another database is opened in its place
+    test.open(second);  // another database is opened in its place
     CHECK_FALSE(test.window->get_game_following());
     test.settle();
 
@@ -943,7 +948,8 @@ TEST_CASE("browser host: the progress bar goes away when the query fails", "[mot
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: an import that finishes reloads the followed list for the board position", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: an import that finishes reloads the followed list for the board position",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto database = make_opening_database();
@@ -965,7 +971,8 @@ TEST_CASE("browser host: an import that finishes reloads the followed list for t
     CHECK(test.window->get_game_following());
 }
 
-TEST_CASE("browser host: a runner destroyed while refreshes are in flight or queued shuts down cleanly", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: a runner destroyed while refreshes are in flight or queued shuts down cleanly",
+          "[motif-slint-app][host][browser][follow]")
 {
     // Built for the sanitizer runs: toggling, position churn and shutdown with work still queued.
     auto const state = snapshot_test::use_snapshot_platform();
@@ -997,7 +1004,8 @@ TEST_CASE("browser host: a runner destroyed while refreshes are in flight or que
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("browser host: returning from the Explorer while a search runs still catches the list up", "[motif-slint-app][host][browser][follow]")
+TEST_CASE("browser host: returning from the Explorer while a search runs still catches the list up",
+          "[motif-slint-app][host][browser][follow]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto database = make_opening_database();

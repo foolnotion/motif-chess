@@ -313,8 +313,7 @@ struct async_browser_runner::impl
                                      [shared, serial = ++shared->progress_serial, lifetime, lifetime_token]() -> void
                                      {
                                          if (component_matches(shared->window, lifetime, lifetime_token) && shared->query_running
-                                             && shared->progress_serial == serial)
-                                         {
+                                             && shared->progress_serial == serial) {
                                              if (auto locked = shared->window.lock()) {
                                                  (*locked)->set_game_progress_visible(true);
                                              }
@@ -706,7 +705,8 @@ void register_browser_callbacks(WorkspaceWindow& window,
                                 browser_hooks hooks)
 {
     window.on_game_filters_changed(
-        [&browser, activity, filters_changed = hooks.filters_changed](slint::SharedString const& player, slint::SharedString const& result) -> void
+        [&browser, activity, filters_changed = hooks.filters_changed](slint::SharedString const& player,
+                                                                      slint::SharedString const& result) -> void
         {
             (void)run_when_idle(activity(),
                                 [&]() -> void

@@ -61,8 +61,8 @@ class recorder
 
     [[nodiscard]] auto count_other_than(std::uint64_t const generation) const -> std::size_t
     {
-        return static_cast<std::size_t>(std::ranges::count_if(
-            events(), [generation](analysis_event const& event) -> bool { return event.generation != generation; }));
+        return static_cast<std::size_t>(
+            std::ranges::count_if(events(), [generation](analysis_event const& event) -> bool { return event.generation != generation; }));
     }
 
   private:
@@ -70,7 +70,8 @@ class recorder
     std::vector<analysis_event> events_;
 };
 
-auto make_request(fake_uci::fake_engine const& engine, std::uint64_t const generation, std::string const& fen = start_fen) -> analysis_request
+auto make_request(fake_uci::fake_engine const& engine, std::uint64_t const generation, std::string const& fen = start_fen)
+    -> analysis_request
 {
     return analysis_request {
         .epoch = 7,
@@ -92,7 +93,8 @@ auto process_gone(pid_t const process) -> bool
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("analysis service: a session reports its lines and completion with the epoch and generation it was asked for", "[motif-slint-app][analysis]")
+TEST_CASE("analysis service: a session reports its lines and completion with the epoch and generation it was asked for",
+          "[motif-slint-app][analysis]")
 {
     auto const engine = fake_uci::fake_engine {fake_uci::fast_complete_body()};
     auto events = recorder {};
@@ -130,8 +132,13 @@ TEST_CASE("analysis service: an engine that cannot start is reported as a start 
 {
     auto events = recorder {};
     auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
-    auto request = analysis_request {
-        .epoch = 3, .generation = 9, .engine_name = "missing", .engine_path = "/nonexistent/engine", .fen = start_fen, .multipv = 1, .depth = 5};
+    auto request = analysis_request {.epoch = 3,
+                                     .generation = 9,
+                                     .engine_name = "missing",
+                                     .engine_path = "/nonexistent/engine",
+                                     .fen = start_fen,
+                                     .multipv = 1,
+                                     .depth = 5};
 
     service.start(std::move(request));
 
@@ -182,7 +189,8 @@ TEST_CASE("analysis service: stop releases the engine and silences its late even
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("analysis service: a new session replaces the old one, which is released before the next engine runs", "[motif-slint-app][analysis]")
+TEST_CASE("analysis service: a new session replaces the old one, which is released before the next engine runs",
+          "[motif-slint-app][analysis]")
 {
     auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body()};
     auto events = recorder {};
@@ -269,7 +277,8 @@ TEST_CASE("analysis service: destroying the service while analysing ends the eng
     CHECK(process_gone(process));
 }
 
-TEST_CASE("analysis service: a burst of engine output is delivered in full and in order for the live session", "[motif-slint-app][analysis]")
+TEST_CASE("analysis service: a burst of engine output is delivered in full and in order for the live session",
+          "[motif-slint-app][analysis]")
 {
     auto const engine = fake_uci::fake_engine {fake_uci::burst_body()};
     auto events = recorder {};
@@ -319,8 +328,13 @@ class silent_engine
 
     [[nodiscard]] auto request(std::uint64_t const generation) const -> analysis_request
     {
-        return analysis_request {
-            .epoch = 1, .generation = generation, .engine_name = "silent", .engine_path = path_.string(), .fen = start_fen, .multipv = 1, .depth = 5};
+        return analysis_request {.epoch = 1,
+                                 .generation = generation,
+                                 .engine_name = "silent",
+                                 .engine_path = path_.string(),
+                                 .fen = start_fen,
+                                 .multipv = 1,
+                                 .depth = 5};
     }
 
   private:

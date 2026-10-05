@@ -1278,8 +1278,7 @@ TEST_CASE("workspace layout: the replace confirmation overlay blocks the board a
 namespace
 {
 
-auto explorer_row(std::string_view const san, int const count, int const white, int const draw, int const black)
-    -> ContinuationRow
+auto explorer_row(std::string_view const san, int const count, int const white, int const draw, int const black) -> ContinuationRow
 {
     return ContinuationRow {
         .san = slint::SharedString {san},
@@ -1313,11 +1312,8 @@ auto make_explorer_workspace(std::size_t const rows, std::vector<std::string>& a
     window->set_board_loaded(true);
     window->set_workspace_preset(WorkspacePreset::Explorer);
     window->set_search_continuations(make_explorer_rows(rows));
-    window->set_search_continuation_total(ContinuationTotal {.count = 1200,
-                                                             .white_percent = 50,
-                                                             .draw_percent = 30,
-                                                             .black_percent = 20,
-                                                             .accessible_label = slint::SharedString {"Total"}});
+    window->set_search_continuation_total(ContinuationTotal {
+        .count = 1200, .white_percent = 50, .draw_percent = 30, .black_percent = 20, .accessible_label = slint::SharedString {"Total"}});
     window->set_search_total_games(1200);
     window->on_search_continuation_activated([&activated](slint::SharedString const& san) -> void
                                              { activated.emplace_back(std::string_view {san.data(), san.size()}); });
@@ -1358,7 +1354,8 @@ auto selection_fill(std::span<slint::Rgb8Pixel const> const lhs, std::span<slint
             ++counts[{rhs[index].r, rhs[index].g, rhs[index].b}];
         }
     }
-    auto const best = std::ranges::max_element(counts, [](auto const& left, auto const& right) -> bool { return left.second < right.second; });
+    auto const best =
+        std::ranges::max_element(counts, [](auto const& left, auto const& right) -> bool { return left.second < right.second; });
     if (best == counts.end()) {
         return slint::Rgb8Pixel {};
     }
@@ -1511,8 +1508,10 @@ namespace
 {
 
 // Clicks down the sidebar column and returns the SANs activated, top to bottom.
-auto click_down_sidebar(snapshot_state const& state, WorkspaceWindow& window, explorer_size const size, std::vector<std::string> const& activated)
-    -> std::vector<std::string>
+auto click_down_sidebar(snapshot_state const& state,
+                        WorkspaceWindow& window,
+                        explorer_size const size,
+                        std::vector<std::string> const& activated) -> std::vector<std::string>
 {
     constexpr auto step = 6;
     auto seen = std::vector<std::string> {};
@@ -1559,6 +1558,7 @@ TEST_CASE("workspace layout: clicking an explorer row plays it, except while the
         CHECK(activated.size() == before);
     }
 }
+
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("workspace layout: an empty explorer has no table to focus and a searching one says so", "[motif-slint-app][layout]")
@@ -1624,7 +1624,6 @@ TEST_CASE("workspace layout: rows searched for another position are dimmed, unse
     }
 }
 
-
 namespace
 {
 
@@ -1657,8 +1656,9 @@ void dump_frame(snapshot_state const& state, std::string const& name, analysis_s
 
 // Where two frames differ in the right half of the window, the sidebar column.
 // One pixel of the board pane differs between otherwise equal frames.
-auto sidebar_difference_bounds(std::span<slint::Rgb8Pixel const> const lhs, std::span<slint::Rgb8Pixel const> const rhs, std::uint32_t const width)
-    -> pixel_bounds
+auto sidebar_difference_bounds(std::span<slint::Rgb8Pixel const> const lhs,
+                               std::span<slint::Rgb8Pixel const> const rhs,
+                               std::uint32_t const width) -> pixel_bounds
 {
     auto left = std::vector<slint::Rgb8Pixel> {lhs.begin(), lhs.end()};
     auto right = std::vector<slint::Rgb8Pixel> {rhs.begin(), rhs.end()};
@@ -1693,8 +1693,8 @@ auto make_analysis_workspace(snapshot_state const& state) -> slint::ComponentHan
     auto window = make_loaded_workspace({});
     window->set_board_loaded(true);
     window->set_workspace_preset(WorkspacePreset::Analysis);
-    window->set_analysis_engine_names(std::make_shared<slint::VectorModel<slint::SharedString>>(
-        std::vector<slint::SharedString> {slint::SharedString {"stockfish"}}));
+    window->set_analysis_engine_names(
+        std::make_shared<slint::VectorModel<slint::SharedString>>(std::vector<slint::SharedString> {slint::SharedString {"stockfish"}}));
     window->set_analysis_selected_engine(0);
     window->set_analysis_can_start(true);
     window->set_analysis_status_text("Ready");
@@ -1914,7 +1914,6 @@ TEST_CASE("workspace layout: a scrolled engine line list keeps its position when
     CHECK_FALSE(sidebar_difference_bounds(scrolled, republished, narrow_analysis.width).found);
 }
 
-
 // ---------------------------------------------------------------------------
 // Follow board (Story 13.5)
 // ---------------------------------------------------------------------------
@@ -1993,12 +1992,14 @@ TEST_CASE("workspace layout: the Follow board toggle fits the sidebar with the f
             window->set_game_selected_row(-1);
             window->set_game_active_title("Averylongfirstname, Averylongsurname - Anotherlongname, X  0-1");
             auto const off = render_at_size(*state, size.width);
-            dump_frame(*state, "follow-off-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
+            dump_frame(
+                *state, "follow-off-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
 
             // The toggle: visible when on, inside the window, in the sidebar column.
             window->set_game_following(true);
             auto const checked_frame = render_at_size(*state, size.width);
-            dump_frame(*state, "follow-on-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
+            dump_frame(
+                *state, "follow-on-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
             auto const toggle = sidebar_difference_bounds(off, checked_frame, size.width);
             REQUIRE(toggle.found);
             CHECK(std::cmp_less(toggle.right, size.width - follow_margin));
@@ -2058,7 +2059,9 @@ TEST_CASE("workspace layout: Follow board is a tab stop operated by Space, Enter
             REQUIRE(requests == std::vector<bool> {true});
             CHECK(window->get_game_following());
             state->window_adapter->render();
-            dump_frame(*state, "follow-focus-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width), size);
+            dump_frame(*state,
+                       "follow-focus-" + std::to_string(preset == WorkspacePreset::Review ? 0 : 1) + "-" + std::to_string(size.width),
+                       size);
 
             // The refresh it started runs and lands: the toggle is still the focus.
             window->set_browser_busy(true);
@@ -2223,7 +2226,9 @@ TEST_CASE("workspace layout: a new result scrolls the table to the top and revea
     auto const state = use_snapshot_platform();
     auto window = make_follow_workspace(*state, WorkspacePreset::Review, game_count);
     window->on_game_selected([&window](int const row) -> void { window->set_game_selected_row(row); });
-    window->on_game_move_selection([&window](int const delta) -> void { window->set_game_selected_row(std::clamp(window->get_game_selected_row() + delta, 0, game_count - 1)); });
+    window->on_game_move_selection(
+        [&window](int const delta) -> void
+        { window->set_game_selected_row(std::clamp(window->get_game_selected_row() + delta, 0, game_count - 1)); });
 
     // Focus the table (its focus ring is part of every later frame), then show it from the top with nothing selected.
     constexpr auto max_tab_stops = 80;
@@ -2257,9 +2262,8 @@ TEST_CASE("workspace layout: a new result scrolls the table to the top and revea
     // The selected row's fill (dark teal) is on screen, as it is when the user scrolls there.
     auto const selection_pixels = [](std::span<slint::Rgb8Pixel const> const pixels) -> std::ptrdiff_t
     {
-        return std::ranges::count_if(pixels,
-                                     [](slint::Rgb8Pixel const pixel) -> bool
-                                     { return pixel.r < 40 && pixel.g > pixel.r + 30 && pixel.b > pixel.r + 30; });
+        return std::ranges::count_if(
+            pixels, [](slint::Rgb8Pixel const pixel) -> bool { return pixel.r < 40 && pixel.g > pixel.r + 30 && pixel.b > pixel.r + 30; });
     };
     CHECK(selection_pixels(top) < selection_pixels(revealed) - 1'000);
     CHECK(selection_pixels(revealed) > 1'000);

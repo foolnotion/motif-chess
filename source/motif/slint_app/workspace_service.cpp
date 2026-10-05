@@ -209,7 +209,8 @@ auto workspace_service::add_engine(std::string_view const path) -> result<void>
 {
     constexpr auto whitespace = " \t\n\r\f\v";
     auto const begin = path.find_first_not_of(whitespace);
-    auto const trimmed = begin == std::string_view::npos ? std::string_view {} : path.substr(begin, path.find_last_not_of(whitespace) - begin + 1);
+    auto const trimmed =
+        begin == std::string_view::npos ? std::string_view {} : path.substr(begin, path.find_last_not_of(whitespace) - begin + 1);
     if (trimmed.empty()) {
         error_message_ = "Enter the path of a UCI engine to add.";
         return tl::unexpected {error_code::invalid_argument};

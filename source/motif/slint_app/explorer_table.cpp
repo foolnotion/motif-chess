@@ -1,9 +1,9 @@
-#include "motif/slint_app/explorer_table.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <optional>
+
+#include "motif/slint_app/explorer_table.hpp"
 
 #include <fmt/format.h>
 
@@ -68,7 +68,8 @@ auto split_results(std::uint64_t const white, std::uint64_t const draw, std::uin
         assigned += floors.at(index);
     }
     auto order = std::array<std::size_t, 3> {0, 1, 2};
-    std::ranges::stable_sort(order, [&remainders](std::size_t const left, std::size_t const right) -> bool
+    std::ranges::stable_sort(order,
+                             [&remainders](std::size_t const left, std::size_t const right) -> bool
                              { return remainders.at(left) > remainders.at(right); });
     for (std::size_t slot = 0; assigned < percent_scale; ++slot, ++assigned) {
         ++floors.at(order.at(slot));
@@ -110,7 +111,8 @@ auto make_explorer_table(std::span<motif::search::opening_stats::continuation co
     }
     // The backend orders by transposition popularity; the table lists moves played
     // from here, most played first, ties in the backend's order.
-    std::ranges::stable_sort(table.rows, [](explorer_row const& left, explorer_row const& right) -> bool { return left.count > right.count; });
+    std::ranges::stable_sort(table.rows,
+                             [](explorer_row const& left, explorer_row const& right) -> bool { return left.count > right.count; });
     table.total.count = total_games;
     table.total.split = split_results(white_total, draw_total, black_total);
     table.total.accessible_label =

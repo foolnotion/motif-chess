@@ -336,10 +336,8 @@ class async_search_runner
     [[nodiscard]] auto shows_position(motif::db::zobrist_hash const hash) const -> bool
     {
         return state_->presenter
-            && motif::slint_app::rows_are_current(state_->presenter->state().searching,
-                                                  state_->presenter->state().current_hash,
-                                                  hash,
-                                                  state_->rows_outdated);
+            && motif::slint_app::rows_are_current(
+                   state_->presenter->state().searching, state_->presenter->state().current_hash, hash, state_->rows_outdated);
     }
 
     // Records the board's position and tells the table whether its rows still
@@ -487,10 +485,8 @@ class async_search_runner
     [[nodiscard]] static auto rows_stale(state const& shared) -> bool
     {
         return shared.presenter
-            && motif::slint_app::rows_are_stale(shared.presenter->state().searching,
-                                                shared.presenter->state().current_hash,
-                                                shared.board_hash,
-                                                shared.rows_outdated);
+            && motif::slint_app::rows_are_stale(
+                   shared.presenter->state().searching, shared.presenter->state().current_hash, shared.board_hash, shared.rows_outdated);
     }
 
     void publish()
@@ -1090,17 +1086,20 @@ auto main(int const argc, char** const argv) -> int
     auto browser = async_browser_runner {window, motif::slint_app::make_event_loop_environment()};
     auto board = async_board_runner {window};
     auto search = async_search_runner {window};
-    auto analysis = motif::slint_app::async_analysis_runner {
-        window, service, motif::slint_app::make_event_loop_environment(), [&board]() -> std::optional<std::string> { return board.current_fen(); }};
+    auto analysis = motif::slint_app::async_analysis_runner {window,
+                                                             service,
+                                                             motif::slint_app::make_event_loop_environment(),
+                                                             [&board]() -> std::optional<std::string> { return board.current_fen(); }};
     auto activation = motif::slint_app::make_board_activation_handlers(slint::ComponentWeakHandle<WorkspaceWindow> {window}, board);
     browser.set_activation_handlers(activation.loaded, activation.failed);
     browser.set_external_activation_handlers(activation.loaded_at, activation.failed_at);
-    board.add_position_changed_handler([&search, &browser, &analysis](motif::db::zobrist_hash const hash) -> void
-                                       {
-                                           search.note_board_position(hash);
-                                           search.search_if_hash_changed(hash, browser.active_filter());
-                                           analysis.position_changed();
-                                       });
+    board.add_position_changed_handler(
+        [&search, &browser, &analysis](motif::db::zobrist_hash const hash) -> void
+        {
+            search.note_board_position(hash);
+            search.search_if_hash_changed(hash, browser.active_filter());
+            analysis.position_changed();
+        });
     board.add_position_changed_handler([&browser](motif::db::zobrist_hash const hash) -> void { browser.position_changed(hash); });
     auto runner = async_workspace_runner {service, window, browser, board, search, analysis};
     search.set_retry_on_database_failure([&importer]() -> bool { return importer.active(); });

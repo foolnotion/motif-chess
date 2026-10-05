@@ -155,8 +155,8 @@ auto game_browser_presenter::execute_query(browser_query const& query) const -> 
         for (auto const& game : result->games) {
             auto const found = std::ranges::lower_bound(*matches, game.id, {}, &motif::db::position_match::game_id);
             if (found == matches->end() || found->game_id != game.id) {
-                return tl::unexpected {
-                    browser_error {.code = error_code::database_failure, .message = "Position results changed while the game list was loaded."}};
+                return tl::unexpected {browser_error {.code = error_code::database_failure,
+                                                      .message = "Position results changed while the game list was loaded."}};
             }
             plies.push_back(found->ply);
         }
