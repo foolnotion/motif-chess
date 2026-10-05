@@ -96,5 +96,4 @@ class query_connection
     std::shared_ptr<query_connection_blocker> blocker_;
     std::shared_ptr<std::atomic<bool>> cancellation_;
 };
-
 }  // namespace motif::db

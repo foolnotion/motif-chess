@@ -48,6 +48,24 @@ struct query_blocker_scope
     std::shared_ptr<motif::db::query_connection_blocker> blocker;
 };
 
+struct query_open_gate_scope
+{
+    query_open_gate_scope()
+        : gate {std::make_shared<motif::db::query_connection_open_gate>()}
+    {
+        motif::db::set_query_connection_open_gate_for_tests(gate);
+    }
+
+    query_open_gate_scope(query_open_gate_scope const&) = delete;
+    auto operator=(query_open_gate_scope const&) -> query_open_gate_scope& = delete;
+    query_open_gate_scope(query_open_gate_scope&&) = delete;
+    auto operator=(query_open_gate_scope&&) -> query_open_gate_scope& = delete;
+
+    ~query_open_gate_scope() { motif::db::set_query_connection_open_gate_for_tests({}); }
+
+    std::shared_ptr<motif::db::query_connection_open_gate> gate;
+};
+
 template<typename Close>
 auto close_within_one_second(Close close, query_blocker_scope const& blocker) -> bool
 {
@@ -59,6 +77,31 @@ auto close_within_one_second(Close close, query_blocker_scope const& blocker) ->
                                      auto lock = std::unique_lock {mutex};
                                      if (!condition.wait_for(lock, std::chrono::seconds {1}, [&]() -> bool { return complete; })) {
                                          blocker.blocker->release();
+                                     }
+                                 }};
+    auto const started = std::chrono::steady_clock::now();
+    close();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    {
+        std::scoped_lock const lock {mutex};
+        complete = true;
+    }
+    condition.notify_one();
+    watchdog.join();
+    return elapsed <= std::chrono::seconds {1};
+}
+
+template<typename Close>
+auto close_gate_within_one_second(Close close, query_open_gate_scope const& gate) -> bool
+{
+    auto mutex = std::mutex {};
+    auto condition = std::condition_variable {};
+    auto complete = false;
+    auto watchdog = std::thread {[&]() -> void
+                                 {
+                                     auto lock = std::unique_lock {mutex};
+                                     if (!condition.wait_for(lock, std::chrono::seconds {1}, [&]() -> bool { return complete; })) {
+                                         gate.gate->release();
                                      }
                                  }};
     auto const started = std::chrono::steady_clock::now();
@@ -449,4 +492,42 @@ TEST_CASE("search host: destruction interrupts a blocked dedicated SQLite query"
     (void)loop.run(no_delay);
     CHECK(window->get_search_total_matches() == stale_total_sentinel);
     CHECK(blocker.blocker->observed_sqlite_interrupt());
+}
+
+TEST_CASE("search host: detach cancels before connection publication", "[motif-slint-app][search][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto test = search_host_fixture {};
+    auto gate = query_open_gate_scope {};
+    auto blocker = query_blocker_scope {};
+    test.search.search(shutdown_hash, test.browser.active_filter());
+    REQUIRE(gate.gate->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_gate_within_one_second([&]() -> void { test.search.detach(); }, gate));
+    CHECK_FALSE(blocker.blocker->wait_until_entered_for(no_delay));
+    test.window->set_search_total_matches(stale_total_sentinel);
+    (void)test.loop.run(no_delay);
+    CHECK(test.window->get_search_total_matches() == stale_total_sentinel);
+}
+
+TEST_CASE("search host: destruction cancels before connection publication", "[motif-slint-app][search][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto loop = test_support::manual_event_loop {};
+    auto window = WorkspaceWindow::create();
+    auto created = motif::db::database_manager::create_scratch();
+    REQUIRE(created);
+    auto database = std::move(*created);
+    auto gate = query_open_gate_scope {};
+    auto blocker = query_blocker_scope {};
+    auto search = std::make_unique<motif::slint_app::async_search_runner>(window, loop.environment());
+    search->attach(database);
+    search->search(shutdown_hash, {});
+    REQUIRE(gate.gate->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_gate_within_one_second([&]() -> void { search.reset(); }, gate));
+    CHECK_FALSE(blocker.blocker->wait_until_entered_for(no_delay));
+    window->set_search_total_matches(stale_total_sentinel);
+    (void)loop.run(no_delay);
+    CHECK(window->get_search_total_matches() == stale_total_sentinel);
 }

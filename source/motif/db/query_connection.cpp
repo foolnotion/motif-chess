@@ -148,6 +148,9 @@ query_connection::query_connection(sqlite3* const connection,
     , blocker_ {std::move(blocker)}
     , cancellation_ {std::move(cancellation)}
 {
+    if (blocker_) {
+        sqlite3_progress_handler(connection_, 1, progress_callback, blocker_.get());
+    }
 }
 
 query_connection::~query_connection()
@@ -195,11 +198,11 @@ auto query_connection::open(std::filesystem::path const& bundle_dir, std::shared
     }
 
     auto blocker = current_test_blocker();
+    auto gate = current_open_gate();
     if (blocker) {
         blocker->bind(connection, cancellation.get());
-        sqlite3_progress_handler(connection, 1, progress_callback, blocker.get());
     }
-    if (auto gate = current_open_gate()) {
+    if (gate) {
         gate->wait(*cancellation);
     }
     return query_connection {connection, std::move(blocker), std::move(cancellation)};
