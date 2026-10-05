@@ -3,6 +3,8 @@ if(NOT TARGET Slint::slint-compiler)
 endif()
 find_package(glaze REQUIRED)
 find_package(tl-expected REQUIRED)
+# The native file dialog (Story 13.6). Linux builds the xdg-desktop-portal backend.
+find_package(nfd CONFIG REQUIRED)
 
 add_library(motif_slint_app_service STATIC
     analysis_presenter.cpp
@@ -10,6 +12,7 @@ add_library(motif_slint_app_service STATIC
     board_presenter.cpp
     config.cpp
     explorer_table.cpp
+    file_picker.cpp
     game_browser_presenter.cpp
     import_service.cpp
     pgn_launch_queue.cpp
@@ -34,7 +37,16 @@ target_include_directories(motif_slint_app_service PUBLIC
 )
 target_compile_features(motif_slint_app_service PUBLIC cxx_std_23)
 
-add_executable(motif_slint_app main.cpp analysis_host.cpp board_host.cpp browser_host.cpp database_host.cpp event_loop.cpp)
+add_executable(motif_slint_app
+    main.cpp
+    analysis_host.cpp
+    board_host.cpp
+    browser_host.cpp
+    database_host.cpp
+    event_loop.cpp
+    nfd_file_picker.cpp
+    picker_host.cpp
+)
 # Pick a deliberate Qt-free desktop style instead of relying on native's linux fallback.
 set_property(GLOBAL PROPERTY SLINT_STYLE "cosmic")
 slint_target_sources(motif_slint_app ui/workspace.slint)
@@ -59,6 +71,7 @@ endif()
 target_link_libraries(motif_slint_app PRIVATE
     motif_slint_app_service
     Slint::Slint
+    nfd::nfd
 )
 target_compile_features(motif_slint_app PRIVATE cxx_std_23)
 

@@ -1821,6 +1821,7 @@ TEST_CASE("workspace layout: the engine panel is reachable by Tab in order and S
         auto activations = std::vector<std::string> {};
         window->on_analysis_engine_removed([&activations]() -> void { activations.emplace_back("remove"); });
         window->on_analysis_engine_added([&activations](slint::SharedString const&) -> void { activations.emplace_back("add"); });
+        window->on_browse_requested([&activations](BrowseTarget const) -> void { activations.emplace_back("browse"); });
         window->on_analysis_start_requested([&activations]() -> void { activations.emplace_back("start"); });
         window->on_analysis_stop_requested([&activations]() -> void { activations.emplace_back("stop"); });
         state->window_adapter->render();
@@ -1833,8 +1834,8 @@ TEST_CASE("workspace layout: the engine panel is reachable by Tab in order and S
             press_key_and_render(*state, *window, slint::platform::key_codes::Escape);
         }
         REQUIRE(std::ranges::contains(activations, "start"));
-        // Declaration order: engine list, Remove, path field (Enter adds), Add, options, Start.
-        CHECK(activations == std::vector<std::string> {"remove", "add", "add", "start"});
+        // Declaration order: engine list, Remove, path field (Enter adds), Browse, Add, options, Start.
+        CHECK(activations == std::vector<std::string> {"remove", "add", "browse", "add", "start"});
 
         // The host answers Start with the running state; the same button now stops.
         window->set_analysis_active(true);
@@ -1845,7 +1846,7 @@ TEST_CASE("workspace layout: the engine panel is reachable by Tab in order and S
         CHECK(activations.back() == "start");
         window->set_analysis_active(true);
         press_key_and_render(*state, *window, slint::platform::key_codes::Space);
-        CHECK(activations == std::vector<std::string> {"remove", "add", "add", "start", "stop", "start", "stop"});
+        CHECK(activations == std::vector<std::string> {"remove", "add", "browse", "add", "start", "stop", "start", "stop"});
     }
 }
 

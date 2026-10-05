@@ -1,0 +1,26 @@
+import { Button } from "std-widgets.slint";
+
+// The Browse button beside a path field (Story 13.6). It only reports the press:
+// the host opens the file dialog and writes the answer into the field. Declared
+// directly after its field, so Tab reaches it from the field and before the
+// button that acts on the field.
+export component BrowseButton inherits HorizontalLayout {
+    // What the dialog chooses, as a phrase after "Browse for": "a PGN file to import".
+    in property <string> subject;
+    // The path field the button belongs to can be edited.
+    in property <bool> field-enabled: true;
+    // A file dialog is open. Only one can be, so every Browse button waits.
+    in property <bool> picker-open: false;
+    // Show "…" for the label where the row is too narrow for "Browse…".
+    in property <bool> compact: false;
+
+    callback clicked();
+
+    Button {
+        text: root.compact ? "…" : "Browse…";
+        enabled: root.field-enabled && !root.picker-open;
+        accessible-label: "Browse for " + root.subject;
+        accessible-description: "Opens the system file dialog and puts the chosen path in the field. Nothing is submitted.";
+        clicked => { root.clicked(); }
+    }
+}
