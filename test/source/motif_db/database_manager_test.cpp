@@ -6,6 +6,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,8 @@
 #include <chesslib/core/types.hpp>
 #include <fmt/format.h>
 #include <sqlite3.h>
+
+#include "motif/db/query_connection.hpp"
 #ifndef _WIN32
 #    include <sys/wait.h>
 #    include <unistd.h>
@@ -100,6 +103,50 @@ TEST_CASE("database_manager::create sets manifest name and schema_version", "[mo
     CHECK(manifest.schema_version == motif::db::schema::current_version);
     CHECK(manifest.game_count == 0);
     CHECK_FALSE(manifest.created_at.empty());
+}
+
+TEST_CASE("query_connection interrupts a statement begun after cancellation", "[motif-db][query_connection]")
+{
+    tmp_dir const tdir {"query_connection_cancel"};
+    auto database = motif::db::database_manager::create(tdir.path, "query_connection_cancel");
+    REQUIRE(database);
+    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+    auto query = motif::db::query_connection::open(database->dir(), cancellation);
+    REQUIRE(query);
+    REQUIRE(query->store().count_games());
+
+    query->interrupt();
+    auto interrupted = query->store().count_games();
+    REQUIRE_FALSE(interrupted);
+    CHECK(interrupted.error().code == motif::db::error_code::io_failure);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("query_connection blocker composes with cancellation handler", "[motif-db][query_connection]")
+{
+    tmp_dir const tdir {"query_connection_blocker"};
+    auto database = motif::db::database_manager::create(tdir.path, "query_connection_blocker");
+    REQUIRE(database);
+    auto blocker = std::make_shared<motif::db::query_connection_blocker>();
+    motif::db::set_query_connection_blocker_for_tests(blocker);
+    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+    auto query = motif::db::query_connection::open(database->dir(), cancellation);
+    REQUIRE(query);
+
+    auto count = std::optional<motif::db::result<std::int64_t>> {};
+    auto worker = std::thread {[&]() -> void { count = query->store().count_games(); }};
+    REQUIRE(blocker->wait_until_entered_for(std::chrono::seconds {1}));
+    query->interrupt();
+    worker.join();
+    motif::db::set_query_connection_blocker_for_tests({});
+
+    REQUIRE(count);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const& result = *count;
+    CHECK_FALSE(result);
+    CHECK(result.error().code == motif::db::error_code::io_failure);
+    CHECK(blocker->observed_sqlite_interrupt());
 }
 
 TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db][database_manager]")

@@ -494,6 +494,42 @@ TEST_CASE("search host: destruction interrupts a blocked dedicated SQLite query"
     CHECK(blocker.blocker->observed_sqlite_interrupt());
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("search host: cancellation leaves an in-flight manager read alone", "[motif-slint-app][search][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto test = search_host_fixture {};
+    REQUIRE(test.database);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto& database = *test.database;
+    auto worker_blocker = query_blocker_scope {};
+    auto manager_blocker = std::make_shared<motif::db::query_connection_blocker>();
+    database.set_manager_query_blocker_for_tests(manager_blocker);
+    auto manager_result = std::optional<motif::db::result<motif::db::game>> {};
+    auto manager_finished = std::atomic<bool> {false};
+    auto manager = std::thread {[&]() -> void
+                                {
+                                    manager_result = database.store().get(motif::db::game_id {1});
+                                    manager_finished.store(true, std::memory_order_release);
+                                }};
+    REQUIRE(manager_blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    test.search.search(shutdown_hash, test.browser.active_filter());
+    REQUIRE(worker_blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+    CHECK(close_within_one_second([&]() -> void { test.search.detach(); }, worker_blocker));
+    CHECK_FALSE(manager_finished.load(std::memory_order_acquire));
+
+    manager_blocker->release();
+    manager.join();
+    database.set_manager_query_blocker_for_tests({});
+    REQUIRE(manager_result);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const& result = *manager_result;
+    CHECK(result);
+    CHECK(worker_blocker.blocker->observed_sqlite_interrupt());
+}
+
 TEST_CASE("search host: detach cancels before connection publication", "[motif-slint-app][search][shutdown]")
 {
     auto const platform = snapshot_test::use_snapshot_platform();

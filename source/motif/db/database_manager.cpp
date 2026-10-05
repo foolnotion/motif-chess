@@ -40,6 +40,7 @@
 #include "motif/db/game_store.hpp"
 #include "motif/db/manifest.hpp"
 #include "motif/db/position_postings.hpp"
+#include "motif/db/query_connection.hpp"
 #include "motif/db/schema.hpp"
 #include "motif/db/types.hpp"
 
@@ -53,6 +54,11 @@ namespace
 {
 constexpr std::size_t checksum_buffer_bytes = 65'536;
 constexpr auto bundle_lock_permissions = mode_t {0600};
+
+auto manager_progress_callback(void* const context) noexcept -> int
+{
+    return static_cast<query_connection_blocker*>(context)->progress();
+}
 #ifndef _WIN32
 auto open_bundle_lock_file(std::filesystem::path const& path) noexcept -> int
 {
@@ -595,7 +601,12 @@ database_manager::database_manager(database_manager&& other) noexcept
     , created_bundle_ {std::exchange(other.created_bundle_, false)}
     , created_dir_ {std::exchange(other.created_dir_, false)}
     , bundle_lock_ {std::move(other.bundle_lock_)}
+    , manager_query_blocker_ {std::move(other.manager_query_blocker_)}
 {
+    if (conn_ != nullptr && manager_query_blocker_) {
+        manager_query_blocker_->bind(conn_, nullptr);
+        sqlite3_progress_handler(conn_, 1, manager_progress_callback, manager_query_blocker_.get());
+    }
     other.store_.reset();
     other.writer_.reset();
     other.position_postings_.reset();
@@ -617,6 +628,11 @@ auto database_manager::operator=(database_manager&& other) noexcept -> database_
         created_bundle_ = std::exchange(other.created_bundle_, false);
         created_dir_ = std::exchange(other.created_dir_, false);
         bundle_lock_ = std::move(other.bundle_lock_);
+        manager_query_blocker_ = std::move(other.manager_query_blocker_);
+        if (conn_ != nullptr && manager_query_blocker_) {
+            manager_query_blocker_->bind(conn_, nullptr);
+            sqlite3_progress_handler(conn_, 1, manager_progress_callback, manager_query_blocker_.get());
+        }
         other.store_.reset();
         other.writer_.reset();
         other.position_postings_.reset();
@@ -940,6 +956,17 @@ auto database_manager::manifest() const noexcept -> db_manifest const&
 auto database_manager::dir() const noexcept -> std::filesystem::path const&
 {
     return dir_;
+}
+
+void database_manager::set_manager_query_blocker_for_tests(std::shared_ptr<query_connection_blocker> blocker)
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    sqlite3_progress_handler(conn_, 0, nullptr, nullptr);
+    manager_query_blocker_ = std::move(blocker);
+    if (manager_query_blocker_) {
+        manager_query_blocker_->bind(conn_, nullptr);
+        sqlite3_progress_handler(conn_, 1, manager_progress_callback, manager_query_blocker_.get());
+    }
 }
 
 auto database_manager::has_valid_derived_index(derived_index_manifest_entry const& entry) const -> bool
