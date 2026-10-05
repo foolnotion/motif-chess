@@ -17,12 +17,12 @@
 namespace
 {
 
+using Catch::Matchers::ContainsSubstring;
 using motif::engine::info_event;
 using motif::slint_app::analysis_limit_kind;
 using motif::slint_app::analysis_presenter;
 using motif::slint_app::analysis_status;
 using motif::slint_app::engine_settings;
-using Catch::Matchers::ContainsSubstring;
 
 constexpr auto start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 constexpr auto black_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
@@ -199,7 +199,8 @@ TEST_CASE("analysis presenter: each MultiPV line shows rank, depth, White-relati
     CHECK(test.presenter.state().lines[0].moves == "1.e4 c5");
 }
 
-TEST_CASE("analysis presenter: a line for a black-to-move position is numbered with an ellipsis and scored for White", "[motif-slint-app][analysis]")
+TEST_CASE("analysis presenter: a line for a black-to-move position is numbered with an ellipsis and scored for White",
+          "[motif-slint-app][analysis]")
 {
     auto test = running {black_fen};
 
@@ -278,7 +279,8 @@ TEST_CASE("analysis presenter: Stop keeps the last lines, marked stale, and drop
     CHECK_FALSE(test.presenter.position_changed());
 }
 
-TEST_CASE("analysis presenter: an engine crash is visible with its message and Start becomes available again", "[motif-slint-app][analysis]")
+TEST_CASE("analysis presenter: an engine crash is visible with its message and Start becomes available again",
+          "[motif-slint-app][analysis]")
 {
     auto test = running {};
     REQUIRE(test.presenter.apply_info(test.request.generation, make_info(1, 8, 12, {"e4"})));

@@ -88,9 +88,7 @@ struct analysis_service::impl
         auto const fail = [this, &request]() -> void
         { emit(request.epoch, request.generation, analysis_start_failure {.code = motif::engine::error_code::engine_start_failed}); };
 
-        if (!manager
-                 .configure_engine(motif::engine::engine_config {.name = request.engine_name, .path = request.engine_path})
-                 .has_value())
+        if (!manager.configure_engine(motif::engine::engine_config {.name = request.engine_name, .path = request.engine_path}).has_value())
         {
             fail();
             return;

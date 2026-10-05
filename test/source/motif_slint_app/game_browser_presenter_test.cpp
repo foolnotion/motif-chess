@@ -465,7 +465,8 @@ auto names(motif::slint_app::game_browser_presenter const& presenter) -> std::ve
 }
 
 // Runs the query a follow call prepared, the way the runner's worker does.
-void land(motif::slint_app::game_browser_presenter& presenter, motif::slint_app::browser_result<motif::slint_app::browser_query> const& query)
+void land(motif::slint_app::game_browser_presenter& presenter,
+          motif::slint_app::browser_result<motif::slint_app::browser_query> const& query)
 {
     REQUIRE(query.has_value());
     REQUIRE(load(presenter, *query).value_or(false));
@@ -614,7 +615,8 @@ TEST_CASE("game_browser_presenter: a position no game reaches gives an empty lis
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("game_browser_presenter: turning follow off removes only the position and returns to the page shown before", "[motif-slint-app][follow]")
+TEST_CASE("game_browser_presenter: turning follow off removes only the position and returns to the page shown before",
+          "[motif-slint-app][follow]")
 {
     auto created = motif::db::database_manager::create_scratch();
     REQUIRE(created.has_value());
@@ -756,7 +758,8 @@ TEST_CASE("game_browser_presenter: an older follow result never replaces a newer
     CHECK_FALSE(presenter.state().loading);
 
     // An older failure is dropped as well.
-    auto stale = presenter.apply_query_error(value_of(*older).generation, {.code = motif::slint_app::error_code::database_failure, .message = "late"});
+    auto stale = presenter.apply_query_error(value_of(*older).generation,
+                                             {.code = motif::slint_app::error_code::database_failure, .message = "late"});
     REQUIRE(stale.has_value());
     CHECK_FALSE(*stale);
     CHECK(presenter.state().games.size() == 3);
@@ -785,7 +788,8 @@ TEST_CASE("game_browser_presenter: result_serial moves with landed results only"
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("game_browser_presenter: a failed follow refresh drops the rows, says so, and the next change retries", "[motif-slint-app][follow]")
+TEST_CASE("game_browser_presenter: a failed follow refresh drops the rows, says so, and the next change retries",
+          "[motif-slint-app][follow]")
 {
     // No position index: the database manager refuses a positioned query.
     auto created = motif::db::database_manager::create_scratch();

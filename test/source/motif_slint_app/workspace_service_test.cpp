@@ -430,7 +430,8 @@ TEST_CASE("workspace_service: engine options persist, and out-of-range values ar
     auto const config_path = tmp_config {tmp.path}.path;
     auto service = motif::slint_app::workspace_service {config_path};
 
-    REQUIRE(service.set_engine_options({.multipv = 4, .limit = analysis_limit_kind::movetime, .depth = 30, .movetime_ms = 5000}).has_value());
+    REQUIRE(
+        service.set_engine_options({.multipv = 4, .limit = analysis_limit_kind::movetime, .depth = 30, .movetime_ms = 5000}).has_value());
     auto const restored = motif::slint_app::workspace_service {config_path}.engines();
     CHECK(restored.multipv == 4);
     CHECK(restored.limit == analysis_limit_kind::movetime);
@@ -482,8 +483,8 @@ TEST_CASE("workspace_service: engine changes that cannot be saved are rolled bac
     CHECK_FALSE(service.add_engine("/e/three").has_value());
     CHECK_FALSE(service.remove_engine("/e/two").has_value());
     CHECK_FALSE(service.select_engine("/e/one").has_value());
-    CHECK_FALSE(service.set_engine_options({.multipv = 5, .limit = analysis_limit_kind::movetime, .depth = 10, .movetime_ms = 2000})
-                    .has_value());
+    CHECK_FALSE(
+        service.set_engine_options({.multipv = 5, .limit = analysis_limit_kind::movetime, .depth = 10, .movetime_ms = 2000}).has_value());
 
     auto const engines = service.engines();
     CHECK(engines.paths == std::vector<std::string> {"/e/one", "/e/two"});

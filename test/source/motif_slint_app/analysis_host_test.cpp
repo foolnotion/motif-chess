@@ -153,20 +153,14 @@ struct host
     workspace_activity activity;
     std::unique_ptr<motif::slint_app::async_analysis_runner> analysis;
 
-    host()
-    {
-        make_analysis();
-    }
+    host() { make_analysis(); }
 
     // main() builds the runner after the config exists; so does this.
     void make_analysis()
     {
         board.attach();
         analysis = std::make_unique<motif::slint_app::async_analysis_runner>(
-            window,
-            config,
-            loop.environment(),
-            [this]() -> std::optional<std::string> { return board.current_fen(); });
+            window, config, loop.environment(), [this]() -> std::optional<std::string> { return board.current_fen(); });
         board.add_position_changed_handler([this](motif::db::zobrist_hash) -> void { analysis->position_changed(); });
         auto const probe = motif::slint_app::activity_probe {[this]() -> workspace_activity { return activity; }};
         motif::slint_app::register_analysis_callbacks(*window, *analysis, probe);
@@ -217,7 +211,10 @@ struct host
         return result;
     }
 
-    static auto text(slint::SharedString const& value) -> std::string { return std::string {std::string_view {value.data(), value.size()}}; }
+    static auto text(slint::SharedString const& value) -> std::string
+    {
+        return std::string {std::string_view {value.data(), value.size()}};
+    }
 
     void add_engine(std::string const& path) { window->invoke_analysis_engine_added(slint::SharedString {path}); }
 
@@ -264,7 +261,8 @@ TEST_CASE("analysis host: with no engine the panel says so and Start does nothin
     CHECK(test.loop.pending(analysis_flush_interval) == 0);
 }
 
-TEST_CASE("analysis host: adding an engine appends it to the config, selects it and clears the path field", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: adding an engine appends it to the config, selects it and clears the path field",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -440,7 +438,8 @@ TEST_CASE("analysis host: a burst queued for an older workspace epoch or session
     }
 }
 
-TEST_CASE("analysis host: removing the selected engine selects the first remaining one, then the empty state", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: removing the selected engine selects the first remaining one, then the empty state",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -552,7 +551,8 @@ TEST_CASE("analysis host: black to move is scored from White's side", "[motif-sl
     test.stop();
 }
 
-TEST_CASE("analysis host: a finished analysis keeps its best line, releases the engine and keeps following the board", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: a finished analysis keeps its best line, releases the engine and keeps following the board",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -581,7 +581,8 @@ TEST_CASE("analysis host: a finished analysis keeps its best line, releases the 
     test.stop();
 }
 
-TEST_CASE("analysis host: a position change stops the old analysis, clears the lines and analyses the new position", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: a position change stops the old analysis, clears the lines and analyses the new position",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -638,7 +639,8 @@ TEST_CASE("analysis host: a burst of position changes costs one restart on the f
     test.stop();
 }
 
-TEST_CASE("analysis host: moves that do not change the position, such as a selection, do not restart the engine", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: moves that do not change the position, such as a selection, do not restart the engine",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -656,7 +658,8 @@ TEST_CASE("analysis host: moves that do not change the position, such as a selec
     test.stop();
 }
 
-TEST_CASE("analysis host: Stop releases the engine, keeps the last lines marked stale and stops following the board", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: Stop releases the engine, keeps the last lines marked stale and stops following the board",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -762,7 +765,8 @@ TEST_CASE("analysis host: a file that is not executable fails to start in the sa
     CHECK(test.window->get_analysis_can_start());
 }
 
-TEST_CASE("analysis host: a crashing engine is visible, offers Start again and is not restarted by itself", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: a crashing engine is visible, offers Start again and is not restarted by itself",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -836,7 +840,8 @@ TEST_CASE("analysis host: leaving the Analysis preset stops the analysis", "[mot
     CHECK(process_gone(processes.front()));
 }
 
-TEST_CASE("analysis host: shutting down while analysing releases the engine and nothing runs afterwards", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: shutting down while analysing releases the engine and nothing runs afterwards",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -862,7 +867,8 @@ TEST_CASE("analysis host: shutting down while analysing releases the engine and 
     CHECK(test.lines().empty());
 }
 
-TEST_CASE("analysis host: destroying the runner with analysis on ends the engine and leaves the queued tasks harmless", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: destroying the runner with analysis on ends the engine and leaves the queued tasks harmless",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -905,7 +911,8 @@ TEST_CASE("analysis host: the controls that shape a session are locked while ana
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("analysis host: engine list changes wait for a workspace operation, but Start and Stop never do", "[motif-slint-app][analysis][host]")
+TEST_CASE("analysis host: engine list changes wait for a workspace operation, but Start and Stop never do",
+          "[motif-slint-app][analysis][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     auto test = host {};
@@ -948,4 +955,5 @@ TEST_CASE("analysis host: engine list changes wait for a workspace operation, bu
         CHECK_FALSE(test.window->get_analysis_active());
     }
 }
+
 // NOLINTEND(portability-template-virtual-member-function,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

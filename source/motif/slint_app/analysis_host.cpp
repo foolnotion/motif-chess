@@ -242,8 +242,8 @@ struct async_analysis_runner::impl
     void persist_options()
     {
         auto const& state = presenter.state();
-        if (!config->set_engine_options(engine_options {
-                .multipv = state.multipv, .limit = state.limit, .depth = state.depth, .movetime_ms = state.movetime_ms}))
+        if (!config->set_engine_options(
+                engine_options {.multipv = state.multipv, .limit = state.limit, .depth = state.depth, .movetime_ms = state.movetime_ms}))
         {
             reload_after_failure();
         }
@@ -264,13 +264,15 @@ async_analysis_runner::async_analysis_runner(slint::ComponentWeakHandle<Workspac
     : impl_ {std::make_shared<impl>(std::move(window), config, std::move(environment), std::move(position))}
 {
     auto const self = std::weak_ptr<impl> {impl_};
-    impl_->inbox->set_flush([self]() -> void
-                            {
-                                if (auto const locked = self.lock()) {
-                                    locked->schedule(self, analysis_flush_interval, &impl::flush);
-                                }
-                            });
-    impl_->service = std::make_unique<analysis_service>([inbox = impl_->inbox](analysis_event event) -> void { inbox->push(std::move(event)); });
+    impl_->inbox->set_flush(
+        [self]() -> void
+        {
+            if (auto const locked = self.lock()) {
+                locked->schedule(self, analysis_flush_interval, &impl::flush);
+            }
+        });
+    impl_->service =
+        std::make_unique<analysis_service>([inbox = impl_->inbox](analysis_event event) -> void { inbox->push(std::move(event)); });
 }
 
 async_analysis_runner::~async_analysis_runner()

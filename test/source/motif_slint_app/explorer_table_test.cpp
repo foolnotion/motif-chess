@@ -194,7 +194,8 @@ TEST_CASE("explorer table: every row's accessible label carries move, games, sha
     row.average_white_elo = 2500.0;
     row.average_black_elo = 2480.0;
     auto const table = make_explorer_table(std::vector<continuation> {row}, 40);
-    CHECK(table.rows[0].accessible_label == "Nf3, 20 games, 50% of games, average Elo white 2500 black 2480, white 50%, draws 25%, black 25%");
+    CHECK(table.rows[0].accessible_label
+          == "Nf3, 20 games, 50% of games, average Elo white 2500 black 2480, white 50%, draws 25%, black 25%");
     CHECK(table.total.accessible_label == "Total, 40 games, results of the games that continued: white 50%, draws 25%, black 25%");
 }
 
@@ -208,4 +209,5 @@ TEST_CASE("explorer table: ECO and opening name pass through, absent values are 
     CHECK(table.rows[0].opening_name == "King's Pawn");
     CHECK(table.rows[1].eco.empty());
 }
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

@@ -101,6 +101,7 @@ class analysis_presenter
     // Index into the engine list; an out-of-range index changes nothing.
     // Returns the chosen engine's path.
     auto select_engine(int index) -> std::optional<std::string>;
+
     [[nodiscard]] auto locked() const noexcept -> bool { return state_.active; }
 
     void set_notice(std::string notice);
