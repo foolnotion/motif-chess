@@ -120,7 +120,7 @@ class scripted_file_picker final : public file_picker
         choose,
         cancel,
         fail,
-        // Blocks until release() or finish(), or abort() when abortable.
+        // Blocks until finish(), or abort() when abortable.
         hang,
     };
 

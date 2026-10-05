@@ -68,7 +68,11 @@ class async_picker_runner
     std::shared_ptr<impl> impl_;
 };
 
-// Wires the window's Browse buttons to the runner.
+// Wires the window's Browse buttons to the runner. The callback captures both
+// references, and the window owns the callback: the runner must outlive every
+// press the window can still receive, that is, until its event loop has ended.
+// main() declares the runner after the window and calls shutdown() once run()
+// returns; tests destroy the runner while nothing presses a button.
 void register_picker_callbacks(WorkspaceWindow& window, async_picker_runner& picker);
 
 }  // namespace motif::slint_app

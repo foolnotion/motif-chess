@@ -23,6 +23,8 @@
 #include "motif/db/types.hpp"
 #include "motif/slint_app/activity_gate.hpp"
 #include "motif/slint_app/board_host.hpp"
+#include "motif/slint_app/file_picker.hpp"
+#include "motif/slint_app/picker_host.hpp"
 #include "snapshot_platform.hpp"
 #include "workspace.h"
 
@@ -1090,6 +1092,66 @@ TEST_CASE("browser host: mounting during an import waits for the reload that end
     test.browser.load_initial();
     test.settle();
     CHECK(test.names() == names_list {"Knight"});
+}
+
+// A file dialog is not workspace activity (Story 13.6): a browser query still starts
+// and completes through the registered callbacks while one is open, and the board
+// keeps answering, as it does with no dialog.
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: filters, paging, sort and Follow board still run while a file dialog is open",
+          "[motif-slint-app][host][browser][picker]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(120);
+    auto test = host {};
+    test.open(database);
+    REQUIRE(test.row_count() == 100);
+
+    auto picker = std::make_shared<motif::slint_app::scripted_file_picker>(motif::slint_app::scripted_file_picker::script {
+        .behaviour = motif::slint_app::scripted_file_picker::mode::hang, .text = {}, .abortable = true});
+    auto dialogs = motif::slint_app::async_picker_runner {test.window, test.loop.environment(), picker};
+    motif::slint_app::register_picker_callbacks(*test.window, dialogs);
+    test.window->invoke_browse_requested(BrowseTarget::ImportPgn);
+    REQUIRE(picker->wait_for_calls(1, std::chrono::seconds {10}));
+    REQUIRE(test.window->get_picker_open());
+
+    test.window->invoke_game_page_requested(1);
+    test.settle();
+    CHECK(test.row_count() == 20);
+    CHECK(test.window->get_game_page_index() == 1);
+
+    test.window->invoke_game_sort_requested(0, /*arg_1=*/false);
+    test.settle();
+    CHECK(test.white(0) == "White 119");
+
+    test.window->invoke_game_filters_changed("White 007", "");
+    test.settle();
+    CHECK(test.row_count() == 1);
+    CHECK(test.window->get_game_total_count() == 1);
+    CHECK(test.filter_changes == 1);
+
+    test.window->invoke_game_filters_changed("", "");
+    test.settle();
+    test.window->invoke_game_selected(2);
+    CHECK(test.window->get_game_selected_row() == 2);
+
+    test.follow_on();
+    test.settle();
+    CHECK(test.window->get_game_following());
+    test.play({"e4"});
+    test.settle();
+    CHECK(test.window->get_board_current_node() > 0);
+    test.follow_off();
+    test.settle();
+    CHECK_FALSE(test.window->get_game_following());
+
+    // Through all of it the dialog stayed open and was not an activity.
+    CHECK(test.window->get_picker_open());
+    CHECK(dialogs.open());
+
+    picker->finish(motif::slint_app::picker_outcome::cancelled());
+    dialogs.shutdown();
 }
 
 // NOLINTEND(portability-template-virtual-member-function,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

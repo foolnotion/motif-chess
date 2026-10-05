@@ -43,6 +43,8 @@ class nfd_session
 
     ~nfd_session()
     {
+        // Whatever path the dialog took, leave no error text behind in NFD's global.
+        NFD_ClearError();
         if (ok()) {
             NFD_Quit();
         }

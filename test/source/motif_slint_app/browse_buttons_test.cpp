@@ -1,10 +1,12 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,6 +29,10 @@
 #endif
 #include <slint-testing.h>
 
+#include "fake_uci_engine.hpp"
+#include "motif/slint_app/event_loop.hpp"
+#include "motif/slint_app/file_picker.hpp"
+#include "motif/slint_app/picker_host.hpp"
 #include "snapshot_platform.hpp"
 #include "workspace.h"
 
@@ -533,11 +539,110 @@ TEST_CASE("browse buttons: the status bar says a dialog may be hidden, and an er
     render(*state);
     CHECK(labelled(window, hint_text).size() == 1);
     CHECK(labelled(window, "Could not save the preset").empty());
+    // The hint has nothing to dismiss: the error's button is absent while the dialog is open.
+    CHECK(labelled(window, "Dismiss").empty());
 
     window->set_picker_open(false);
     render(*state);
     CHECK(labelled(window, hint_text).empty());
     CHECK(labelled(window, "Could not save the preset").size() == 1);
+    CHECK(labelled(window, "Dismiss").size() == 1);
+}
+
+namespace
+{
+
+// The event loop of this test: what the runner posts waits until the test runs it.
+class posted_tasks
+{
+  public:
+    [[nodiscard]] auto environment() -> motif::slint_app::event_loop_environment
+    {
+        return motif::slint_app::event_loop_environment {.schedule = [this](std::chrono::milliseconds, std::function<void()> task) -> void
+                                                         {
+                                                             std::scoped_lock const lock {mutex_};
+                                                             tasks_.push_back(std::move(task));
+                                                         }};
+    }
+
+    // Waits for the dialog's answer to be posted, then runs it.
+    void run_when_posted()
+    {
+        REQUIRE(fake_uci::wait_for(
+            [this]() -> bool
+            {
+                std::scoped_lock const lock {mutex_};
+                return !tasks_.empty();
+            }));
+        auto batch = std::vector<std::function<void()>> {};
+        {
+            std::scoped_lock const lock {mutex_};
+            batch.swap(tasks_);
+        }
+        for (auto& task : batch) {
+            task();
+        }
+    }
+
+  private:
+    std::mutex mutex_;
+    std::vector<std::function<void()>> tasks_;
+};
+
+}  // namespace
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browse buttons: cancelling a dialog leaves keyboard focus and the field where they were", "[motif-slint-app][layout][picker]")
+{
+    using motif::slint_app::scripted_file_picker;
+    constexpr auto patience = std::chrono::seconds {10};
+    constexpr auto first_stop_after_field = slint::platform::key_codes::Tab;
+
+    for (auto const size : {narrow, wide}) {
+        INFO(size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto window = make_workspace_window(*state, WorkspacePreset::Review);
+        auto picker = std::make_shared<scripted_file_picker>(
+            scripted_file_picker::script {.behaviour = scripted_file_picker::mode::hang, .text = {}, .abortable = true});
+        auto loop = posted_tasks {};
+        auto runner = motif::slint_app::async_picker_runner {window, loop.environment(), picker};
+        motif::slint_app::register_picker_callbacks(*window, runner);
+        auto actions = std::vector<std::string> {};
+        window->on_import_requested([&actions](slint::SharedString const&) -> void { actions.emplace_back("import"); });
+
+        // Focus the import field, type, and move to the Browse button after it.
+        REQUIRE(focus_field(*state, *window, import_case()));
+        auto const typed = text_of(window->get_import_path_text());
+        REQUIRE_FALSE(typed.empty());
+        press_key(*state, *window, first_stop_after_field);
+
+        // Enter opens the dialog; the button is disabled while it is open.
+        press_key(*state, *window, slint::platform::key_codes::Return);
+        REQUIRE(picker->wait_for_calls(1, patience));
+        REQUIRE(window->get_picker_open());
+        render(*state);
+        CHECK(enabled(window, import_case()) == std::optional<bool> {false});
+
+        // The user cancels.
+        picker->finish(motif::slint_app::picker_outcome::cancelled());
+        loop.run_when_posted();
+        render(*state);
+
+        CHECK_FALSE(window->get_picker_open());
+        CHECK(enabled(window, import_case()) == std::optional<bool> {true});
+        CHECK(text_of(window->get_import_path_text()) == typed);
+        CHECK(text_of(window->get_error_text()).empty());
+        CHECK(actions.empty());
+
+        // Focus did not move: Space on the same button asks for a second dialog.
+        press_key(*state, *window, slint::platform::key_codes::Space);
+        CHECK(picker->wait_for_calls(2, patience));
+
+        // Leave nothing blocked behind the test.
+        picker->finish(motif::slint_app::picker_outcome::cancelled());
+        runner.shutdown();
+    }
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
