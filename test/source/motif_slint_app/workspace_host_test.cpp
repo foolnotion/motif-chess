@@ -213,6 +213,8 @@ TEST_CASE("workspace host: recent removal is ignored while busy and applied when
     std::filesystem::remove_all(bundle);
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("workspace host: dismiss error clears real browser board search and window errors", "[motif-slint-app]")
 {
     auto const platform = snapshot_test::use_snapshot_platform();
@@ -236,6 +238,11 @@ TEST_CASE("workspace host: dismiss error clears real browser board search and wi
     test.browser.activate_by_id(missing_game_id, 0);
     test.browser.wait_for_worker();
     (void)test.loop.run(no_delay);
+    while (test.search.is_busy()) {
+        test.loop.wait_for_tasks(no_delay, 1);
+        (void)test.loop.run(no_delay);
+    }
+
     test.search.attach(unindexed);
     test.search.search(error_search_hash, {});
     test.loop.wait_for_tasks(no_delay, 1);
