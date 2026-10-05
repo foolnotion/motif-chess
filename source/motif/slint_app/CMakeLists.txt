@@ -34,7 +34,7 @@ target_include_directories(motif_slint_app_service PUBLIC
 )
 target_compile_features(motif_slint_app_service PUBLIC cxx_std_23)
 
-add_executable(motif_slint_app main.cpp analysis_host.cpp board_host.cpp browser_host.cpp event_loop.cpp)
+add_executable(motif_slint_app main.cpp analysis_host.cpp board_host.cpp browser_host.cpp database_host.cpp event_loop.cpp)
 # Pick a deliberate Qt-free desktop style instead of relying on native's linux fallback.
 set_property(GLOBAL PROPERTY SLINT_STYLE "cosmic")
 slint_target_sources(motif_slint_app ui/workspace.slint)
