@@ -1,7 +1,10 @@
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <optional>
+#include <thread>
 #include <utility>
 
 #include "motif/slint_app/search_host.hpp"
@@ -26,6 +29,49 @@ constexpr auto second_stale_hash = motif::db::zobrist_hash {987654321};
 constexpr auto stale_total_sentinel = 73;
 constexpr auto shutdown_hash = motif::db::zobrist_hash {1234};
 constexpr auto no_delay = std::chrono::milliseconds {0};
+
+struct query_blocker_scope
+{
+    query_blocker_scope()
+        : blocker {std::make_shared<motif::db::query_connection_blocker>()}
+    {
+        motif::db::set_query_connection_blocker_for_tests(blocker);
+    }
+
+    query_blocker_scope(query_blocker_scope const&) = delete;
+    auto operator=(query_blocker_scope const&) -> query_blocker_scope& = delete;
+    query_blocker_scope(query_blocker_scope&&) = delete;
+    auto operator=(query_blocker_scope&&) -> query_blocker_scope& = delete;
+
+    ~query_blocker_scope() { motif::db::set_query_connection_blocker_for_tests({}); }
+
+    std::shared_ptr<motif::db::query_connection_blocker> blocker;
+};
+
+template<typename Close>
+auto close_within_one_second(Close close, query_blocker_scope const& blocker) -> bool
+{
+    auto mutex = std::mutex {};
+    auto condition = std::condition_variable {};
+    auto complete = false;
+    auto watchdog = std::thread {[&]() -> void
+                                 {
+                                     auto lock = std::unique_lock {mutex};
+                                     if (!condition.wait_for(lock, std::chrono::seconds {1}, [&]() -> bool { return complete; })) {
+                                         blocker.blocker->release();
+                                     }
+                                 }};
+    auto const started = std::chrono::steady_clock::now();
+    close();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    {
+        std::scoped_lock const lock {mutex};
+        complete = true;
+    }
+    condition.notify_one();
+    watchdog.join();
+    return elapsed <= std::chrono::seconds {1};
+}
 
 auto make_match_game() -> motif::db::game
 {
@@ -372,17 +418,35 @@ TEST_CASE("search host: detach interrupts a blocked dedicated SQLite query", "[m
 {
     auto const platform = snapshot_test::use_snapshot_platform();
     auto test = search_host_fixture {};
-    auto blocker = std::make_shared<motif::db::query_connection_blocker>();
-    motif::db::set_query_connection_blocker_for_tests(blocker);
+    auto blocker = query_blocker_scope {};
     test.search.search(shutdown_hash, test.browser.active_filter());
-    blocker->wait_until_entered();
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
 
-    auto const started = std::chrono::steady_clock::now();
-    test.search.detach();
-    auto const elapsed = std::chrono::steady_clock::now() - started;
-    motif::db::set_query_connection_blocker_for_tests({});
-
-    CHECK(elapsed <= std::chrono::seconds {1});
+    CHECK(close_within_one_second([&]() -> void { test.search.detach(); }, blocker));
+    test.window->set_search_total_matches(stale_total_sentinel);
+    (void)test.loop.run(no_delay);
     CHECK_FALSE(test.search.is_busy());
-    CHECK_FALSE(test.window->get_search_searching());
+    CHECK(test.window->get_search_total_matches() == stale_total_sentinel);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
+}
+
+TEST_CASE("search host: destruction interrupts a blocked dedicated SQLite query", "[motif-slint-app][search][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto loop = test_support::manual_event_loop {};
+    auto window = WorkspaceWindow::create();
+    auto created = motif::db::database_manager::create_scratch();
+    REQUIRE(created);
+    auto database = std::move(*created);
+    auto blocker = query_blocker_scope {};
+    auto search = std::make_unique<motif::slint_app::async_search_runner>(window, loop.environment());
+    search->attach(database);
+    search->search(shutdown_hash, {});
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_within_one_second([&]() -> void { search.reset(); }, blocker));
+    window->set_search_total_matches(stale_total_sentinel);
+    (void)loop.run(no_delay);
+    CHECK(window->get_search_total_matches() == stale_total_sentinel);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
 }

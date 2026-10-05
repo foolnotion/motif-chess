@@ -46,6 +46,10 @@ auto nonempty_optional(std::string const& value) -> std::optional<std::string>
     return value.empty() ? std::nullopt : std::optional<std::string> {value};
 }
 
+auto cancelled_query_error() -> browser_error
+{
+    return {.code = error_code::database_failure, .message = "Game metadata query was cancelled"};
+}
 }  // namespace
 
 auto browser_status_text(game_browser_state const& state) -> std::string
@@ -174,10 +178,16 @@ auto game_browser_presenter::execute_query(browser_query const& query, motif::db
     -> browser_result<browser_page>
 {
     auto const page_index = query.filter.offset / browser_page_size;
+    if (connection.cancelled()) {
+        return tl::unexpected {cancelled_query_error()};
+    }
     if (!query.filter.position) {
         auto result = connection.store().find_games(query.filter);
         if (!result) {
             return tl::unexpected {from_database_error(result.error())};
+        }
+        if (connection.cancelled()) {
+            return tl::unexpected {cancelled_query_error()};
         }
         return browser_page {
             .generation = query.generation,
@@ -195,6 +205,9 @@ auto game_browser_presenter::execute_query(browser_query const& query, motif::db
     if (!result) {
         return tl::unexpected {from_database_error(result.error())};
     }
+    if (connection.cancelled()) {
+        return tl::unexpected {cancelled_query_error()};
+    }
     auto plies = std::vector<std::uint16_t> {};
     if (!result->games.empty()) {
         auto game_ids = std::vector<motif::db::game_id> {};
@@ -206,7 +219,13 @@ auto game_browser_presenter::execute_query(browser_query const& query, motif::db
         if (!matches) {
             return tl::unexpected {from_database_error(matches.error())};
         }
+        if (connection.cancelled()) {
+            return tl::unexpected {cancelled_query_error()};
+        }
         std::ranges::sort(*matches, {}, &motif::db::position_match::game_id);
+        if (connection.cancelled()) {
+            return tl::unexpected {cancelled_query_error()};
+        }
         plies.reserve(result->games.size());
         for (auto const& game : result->games) {
             auto const found = std::ranges::lower_bound(*matches, game.id, {}, &motif::db::position_match::game_id);
@@ -394,9 +413,15 @@ auto game_browser_presenter::execute_activation(activation_request const& reques
 auto game_browser_presenter::execute_activation(activation_request const& request, motif::db::query_connection const& connection)
     -> browser_result<loaded_game>
 {
+    if (connection.cancelled()) {
+        return tl::unexpected {cancelled_query_error()};
+    }
     auto game = connection.store().get(request.game_id);
     if (!game) {
         return tl::unexpected {from_database_error(game.error())};
+    }
+    if (connection.cancelled()) {
+        return tl::unexpected {cancelled_query_error()};
     }
     return loaded_game {.generation = request.generation, .game_id = request.game_id, .game = std::move(*game)};
 }

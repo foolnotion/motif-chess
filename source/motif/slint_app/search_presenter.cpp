@@ -121,9 +121,15 @@ auto search_presenter::execute_query(search_query const& query) const -> search_
 auto search_presenter::execute_query(search_query const& query, motif::db::query_connection const& connection) const
     -> search_result<search_page>
 {
+    if (connection.cancelled()) {
+        return tl::unexpected {search_error {.code = error_code::database_failure, .message = "Search metadata query was cancelled"}};
+    }
     auto games_result = database_->find_games(query.filter, connection.store());
     if (!games_result) {
         return tl::unexpected {from_database_error(games_result.error())};
+    }
+    if (connection.cancelled()) {
+        return tl::unexpected {search_error {.code = error_code::database_failure, .message = "Search metadata query was cancelled"}};
     }
 
     auto const game_ids = [&games = games_result->games]() -> std::vector<motif::db::game_id>
@@ -139,12 +145,18 @@ auto search_presenter::execute_query(search_query const& query, motif::db::query
     if (!matches_result) {
         return tl::unexpected {from_database_error(matches_result.error())};
     }
+    if (connection.cancelled()) {
+        return tl::unexpected {search_error {.code = error_code::database_failure, .message = "Search metadata query was cancelled"}};
+    }
     if (matches_result->size() != games_result->games.size()) {
         return tl::unexpected {
             search_error {.code = error_code::database_failure, .message = "Position results changed while search metadata was loaded."}};
     }
 
     std::ranges::sort(*matches_result, {}, &motif::db::position_match::game_id);
+    if (connection.cancelled()) {
+        return tl::unexpected {search_error {.code = error_code::database_failure, .message = "Search metadata query was cancelled"}};
+    }
     auto matches = std::vector<search_match> {};
     matches.reserve(games_result->games.size());
     for (auto& entry : games_result->games) {
@@ -155,10 +167,16 @@ auto search_presenter::execute_query(search_query const& query, motif::db::query
         }
         matches.push_back(search_match {.game = std::move(entry), .ply = found->ply});
     }
+    if (connection.cancelled()) {
+        return tl::unexpected {search_error {.code = error_code::database_failure, .message = "Search metadata query was cancelled"}};
+    }
 
     auto stats_result = motif::search::opening_stats::query(*database_, query.hash, query.filter, connection.store());
     if (!stats_result) {
         return tl::unexpected {from_search_error(stats_result.error())};
+    }
+    if (connection.cancelled()) {
+        return tl::unexpected {search_error {.code = error_code::database_failure, .message = "Search metadata query was cancelled"}};
     }
 
     return search_page {
