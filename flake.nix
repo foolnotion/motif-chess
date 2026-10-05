@@ -61,7 +61,9 @@
           # xdg-desktop-portal backend over D-Bus: nixpkgs builds the GTK3 backend, which
           # drags GTK into the closure and aborts the process without its GSettings
           # schemas. Static, so the macOS bundle needs no extra library; the portal
-          # build links only libdbus. The test programs need a display and are not built.
+          # build links only libdbus, which is propagated: a static library's users
+          # need it on their run path (the app would not start without it).
+          # The test programs need a display and are not built.
           nfd-portal =
             let
               static = pkgs.nativefiledialog-extended.override { enableShared = false; };
@@ -69,6 +71,7 @@
             if pkgs.stdenv.hostPlatform.isLinux then
               static.overrideAttrs (old: {
                 buildInputs = [ pkgs.dbus ];
+                propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [ pkgs.dbus ];
                 cmakeFlags = old.cmakeFlags ++ [
                   "-DNFD_PORTAL=ON"
                   "-DNFD_BUILD_TESTS=OFF"
