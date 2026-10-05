@@ -119,6 +119,51 @@ the number of jobs to use, which should ideally be specified to the number of
 threads your CPU has. You may also want to add that to your preset using the
 `jobs` property, see the [presets documentation][1] for more details.
 
+### File dialog in the Slint app
+
+The Browse buttons beside the database, PGN import and engine path fields open
+the operating system's file dialog through [nativefiledialog-extended][nfd]
+(NFD). The typed path field is always the fallback. A choice only fills the
+field; nothing is submitted.
+
+- **Packaging.** NFD comes from nixpkgs through `find_package(nfd CONFIG)`. On
+  Linux `flake.nix` overrides the package to build the xdg-desktop-portal
+  backend, static, so the dialog needs a running portal and session bus at
+  run time and no GTK or Qt is linked. The dev shell and `nix build .#app` carry
+  the override.
+- **Failures.** With no session bus or portal, Browse shows the reason NFD gives
+  in the error bar. To see it: `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent
+  motif_slint_app`.
+- **A dialog cannot be closed from outside.** While one is open every Browse
+  button is disabled and the status bar says the dialog may be behind the window.
+  Closing the window waits 100 ms for the dialog and then leaves its thread
+  behind. With the GTK portal backend the dialog closes with the application
+  (the portal drops the requests of a client that leaves the bus).
+- **Scripted dialogs for headless runs.** `MOTIF_FILE_PICKER` replaces NFD for
+  the process, so a UI check needs no desktop portal:
+
+  | Value | Answer |
+  | --- | --- |
+  | `choose:<path>` | the dialog returns `<path>` |
+  | `cancel` | the user cancels |
+  | `fail:<message>` | the dialog cannot open, with `<message>` as the reason |
+  | `hang` | the dialog never returns and ignores close, as a real one does |
+
+  Any other value is reported on stderr and ignored. It only fills a text field
+  the user still has to submit.
+- **Tests.** The host tests use the scripted picker. The NFD adapter's failure
+  path runs in `motif_nfd_picker_test`, Linux only, against a session bus that
+  does not exist. A real dialog needs a portal on a session bus and is checked by hand (a private
+  bus with `xdg-desktop-portal` and its GTK backend works on a headless Sway).
+- **Closing the dialog.** The GTK portal backend reports the Cancel button as a
+  cancel and Escape as "response code 2" (observed); the adapter treats both as a
+  cancel and shows no error. The window's close button is expected to match
+  Escape and was not tried.
+- **Not verified here.** macOS (NFD runs `NSOpenPanel` on the event-loop thread,
+  which blocks the loop while the panel is open) and Windows (no build exists).
+
+[nfd]: https://github.com/btzy/nativefiledialog-extended
+
 ### Benchmark corpora
 
 The import and search performance tests honor `MOTIF_IMPORT_PERF_PGN`.

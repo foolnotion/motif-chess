@@ -28,7 +28,9 @@
 #include "motif/slint_app/database_host.hpp"
 #include "motif/slint_app/game_browser_presenter.hpp"
 #include "motif/slint_app/import_service.hpp"
+#include "motif/slint_app/nfd_file_picker.hpp"
 #include "motif/slint_app/pgn_launch_queue.hpp"
+#include "motif/slint_app/picker_host.hpp"
 #include "motif/slint_app/replace_controller.hpp"
 #include "motif/slint_app/replace_gate.hpp"
 #include "motif/slint_app/search_presenter.hpp"
@@ -957,6 +959,8 @@ auto main(int const argc, char** const argv) -> int
                                                              service,
                                                              motif::slint_app::make_event_loop_environment(),
                                                              [&board]() -> std::optional<std::string> { return board.current_fen(); }};
+    auto picker = motif::slint_app::async_picker_runner {
+        window, motif::slint_app::make_event_loop_environment(), motif::slint_app::make_default_file_picker()};
     auto activation = motif::slint_app::make_board_activation_handlers(slint::ComponentWeakHandle<WorkspaceWindow> {window}, board);
     browser.set_activation_handlers(activation.loaded, activation.failed);
     browser.set_external_activation_handlers(activation.loaded_at, activation.failed_at);
@@ -1040,6 +1044,7 @@ auto main(int const argc, char** const argv) -> int
                                                       return hash && search.shows_position(*hash);
                                                   });
     register_import_callbacks(import_context_value);
+    motif::slint_app::register_picker_callbacks(*window, picker);
 
     // Launch arguments (command line or a file manager's %F): invalid ones are
     // reported in the error bar and on stderr; valid ones wait for a database
@@ -1058,7 +1063,9 @@ auto main(int const argc, char** const argv) -> int
     motif::slint_app::install_close_guard(*window, board, confirmation);
 
     window->run();
-    // The window is closed: stop and release the engine before anything else is torn down.
+    // The window is closed: a file dialog still open is given a moment, then left behind.
+    picker.shutdown();
+    // Stop and release the engine before anything else is torn down.
     analysis.shutdown();
     return 0;
 }

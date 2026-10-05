@@ -119,6 +119,7 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/import_service_test.cpp
         source/motif_slint_app/pgn_launch_queue_test.cpp
         source/motif_slint_app/board_host_test.cpp
+        source/motif_slint_app/browse_buttons_test.cpp
         source/motif_slint_app/browser_host_test.cpp
         source/motif_slint_app/database_host_test.cpp
         source/motif_slint_app/replace_gate_test.cpp
@@ -127,6 +128,8 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/workspace_service_test.cpp
         source/motif_slint_app/game_browser_presenter_test.cpp
         source/motif_slint_app/explorer_table_test.cpp
+        source/motif_slint_app/file_picker_test.cpp
+        source/motif_slint_app/picker_host_test.cpp
         source/motif_slint_app/search_presenter_test.cpp
         source/motif_slint_app/layout_snapshot_test.cpp
     )
@@ -147,6 +150,7 @@ if(motif_ENABLE_SLINT_APP)
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/browser_host.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/database_host.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/event_loop.cpp"
+        "${CMAKE_SOURCE_DIR}/source/motif/slint_app/picker_host.cpp"
     )
     set_source_files_properties(
         "${CMAKE_BINARY_DIR}/source/motif/slint_app/slint_generated_workspace_1.cpp"
@@ -166,6 +170,26 @@ if(motif_ENABLE_SLINT_APP)
     endif()
     add_dependencies(motif_slint_app_service_test motif_slint_app)
     catch_discover_tests(motif_slint_app_service_test PROPERTIES RUN_SERIAL TRUE)
+
+    # The real NFD adapter's failure path. A dialog needs a desktop session, so
+    # this runs on Linux only (a Mac would show a panel) and in its own
+    # executable: it changes the process environment and links NFD, which the
+    # service test binary never does.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(nfd CONFIG REQUIRED)
+        add_executable(motif_nfd_picker_test
+            source/motif_slint_app/nfd_file_picker_test.cpp
+            "${CMAKE_SOURCE_DIR}/source/motif/slint_app/nfd_file_picker.cpp"
+        )
+        target_link_libraries(motif_nfd_picker_test PRIVATE
+            motif_slint_app_service
+            nfd::nfd
+            Catch2::Catch2WithMain
+        )
+        target_compile_features(motif_nfd_picker_test PRIVATE cxx_std_23)
+        target_include_directories(motif_nfd_picker_test PRIVATE "${CMAKE_SOURCE_DIR}/source")
+        catch_discover_tests(motif_nfd_picker_test PROPERTIES RUN_SERIAL TRUE)
+    endif()
 endif()
 
 # ---- End-of-file commands ----

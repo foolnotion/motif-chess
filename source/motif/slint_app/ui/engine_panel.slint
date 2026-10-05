@@ -1,3 +1,4 @@
+import { BrowseButton } from "browse_button.slint";
 import { Button, ComboBox, LineEdit, ListView, Palette, SpinBox } from "std-widgets.slint";
 
 // One MultiPV row of the engine panel. Every figure and the numbered SAN line
@@ -13,7 +14,7 @@ export struct AnalysisLine {
 // Engine analysis controls and live lines (Story 13.3). The panel holds no UCI,
 // engine or chess logic: it draws the state it is given and reports user intent
 // through callbacks. Tab order is the declaration order: engine, Remove, path,
-// Add, lines, limit kind, limit value, then Start/Stop.
+// Browse, Add, lines, limit kind, limit value, then Start/Stop.
 export component EnginePanel inherits Rectangle {
     in property <[string]> engine-names;
     in-out property <int> selected-engine: -1;
@@ -34,11 +35,16 @@ export component EnginePanel inherits Rectangle {
     in property <bool> config-enabled: true;
     in property <bool> compact: false;
     in-out property <string> path-text;
+    // A file dialog is open (Browse waits), and the sidebar is too narrow for "Browse…".
+    in property <bool> picker-open: false;
+    in property <bool> compact-browse: false;
 
     callback start-requested();
     callback stop-requested();
     callback engine-selected(int);
     callback engine-added(string);
+    // Browse was pressed; the host opens a file dialog and fills `path-text`.
+    callback browse-requested();
     callback engine-removed();
     callback multipv-changed(int);
     callback limit-kind-changed(int);
@@ -89,6 +95,13 @@ export component EnginePanel inherits Rectangle {
                 enabled: !root.locked;
                 accessible-label: "Engine path to add";
                 accepted => { root.add-engine(); }
+            }
+            BrowseButton {
+                subject: "an engine executable";
+                field-enabled: !root.locked;
+                picker-open: root.picker-open;
+                compact: root.compact-browse;
+                clicked => { root.browse-requested(); }
             }
             Button {
                 text: "Add";

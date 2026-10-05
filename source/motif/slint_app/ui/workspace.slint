@@ -1,3 +1,4 @@
+import { BrowseButton } from "browse_button.slint";
 import { AnalysisLine, EnginePanel } from "engine_panel.slint";
 import { GameBrowser, GameRow } from "game_browser.slint";
 import { GameReviewPanel, NotationToken, SquareHighlight } from "board_notation.slint";
@@ -16,6 +17,10 @@ export struct RecentEntry {
 // sidebar and how the row is divided; there is no docking, floating, or
 // draggable placement.
 export enum WorkspacePreset { review, explorer, analysis }
+
+// The four path fields that have a Browse button (Story 13.6). The host opens a
+// file dialog for the target and writes the answer into that field's text.
+export enum BrowseTarget { database-open, database-create, import-pgn, engine }
 
 export component WorkspaceWindow inherits Window {
     in property <bool> has-database: false;
@@ -116,6 +121,9 @@ export component WorkspaceWindow inherits Window {
     in property <bool> analysis-lines-stale: false;
     in property <bool> analysis-can-start: false;
     in-out property <string> analysis-engine-path-text;
+    // A file dialog is open. Browse buttons are disabled meanwhile and the status
+    // bar says the dialog may be behind the window.
+    in property <bool> picker-open: false;
     // In-window confirmation shown before an edited or unsaved game is
     // replaced; the host owns the pending action.
     in property <bool> confirm-visible: false;
@@ -173,6 +181,8 @@ export component WorkspaceWindow inherits Window {
     callback analysis-limit-value-changed(int);
     // Leaving the Analysis preset unmounts the panel; the host stops the analysis.
     callback analysis-panel-left();
+    // A Browse button was pressed; the host opens a file dialog for its field.
+    callback browse-requested(BrowseTarget);
     callback preset-selected(WorkspacePreset);
     callback search-requested();
     callback search-auto-search-toggled(bool);
@@ -189,8 +199,15 @@ export component WorkspaceWindow inherits Window {
     // than bound to it: a layout size bound to `height` forms a binding loop,
     // and the Explorer panel's own binding is already one too many.
     property <bool> short-window: false;
-    init => { root.short-window = root.height < 640px; }
+    // The sidebar's Browse buttons shrink to "…" below this width. Assigned, like
+    // short-window, so the layout does not depend on a binding to the window size.
+    property <bool> narrow-window: false;
+    init => {
+        root.short-window = root.height < 640px;
+        root.narrow-window = root.width < 1100px;
+    }
     changed height => { root.short-window = root.height < 640px; }
+    changed width => { root.narrow-window = root.width < 1100px; }
     changed workspace-preset => {
         if (root.workspace-preset != WorkspacePreset.analysis) {
             root.analysis-panel-left();
@@ -206,6 +223,12 @@ export component WorkspaceWindow inherits Window {
         : (root.board-error-text != "" ? root.board-error-text
         : root.browser-error-text));
     property <bool> workspace-idle: !root.busy && !root.browser-busy && !root.search-busy && !root.import-active;
+    // A file dialog cannot be closed from outside and may open behind the window,
+    // so while one is open the status bar says so, ahead of any error or the busy text.
+    property <bool> show-error: root.merged-error-text != "" && !root.picker-open;
+    property <bool> status-highlighted: root.merged-error-text != "" || root.picker-open;
+    property <string> status-text: root.picker-open ? "File dialog open. It may be behind this window."
+        : (root.merged-error-text != "" ? root.merged-error-text : (root.busy ? "Working…" : ""));
     // The platform supplies the initial logical size and scale factor. Keep
     // this component's constraints in logical units and let the compositor
     // choose the native physical size.
@@ -263,6 +286,12 @@ export component WorkspaceWindow inherits Window {
                                     text <=> root.create-path-text;
                                     enabled: !root.busy;
                                 }
+                                BrowseButton {
+                                    subject: "the folder to create the database in";
+                                    field-enabled: !root.busy;
+                                    picker-open: root.picker-open;
+                                    clicked => { root.browse-requested(BrowseTarget.database-create); }
+                                }
                                 LineEdit {
                                     horizontal-stretch: 1;
                                     placeholder-text: "Name";
@@ -284,6 +313,12 @@ export component WorkspaceWindow inherits Window {
                                     placeholder-text: "Bundle directory path";
                                     text <=> root.open-path-text;
                                     enabled: !root.busy;
+                                }
+                                BrowseButton {
+                                    subject: "the database folder to open";
+                                    field-enabled: !root.busy;
+                                    picker-open: root.picker-open;
+                                    clicked => { root.browse-requested(BrowseTarget.database-open); }
                                 }
                                 Button {
                                     text: "Open";
@@ -513,10 +548,13 @@ export component WorkspaceWindow inherits Window {
                     config-enabled: !root.busy;
                     compact: root.short-window;
                     path-text <=> root.analysis-engine-path-text;
+                    picker-open: root.picker-open;
+                    compact-browse: root.narrow-window;
                     start-requested() => { root.analysis-start-requested(); }
                     stop-requested() => { root.analysis-stop-requested(); }
                     engine-selected(index) => { root.analysis-engine-selected(index); }
                     engine-added(path) => { root.analysis-engine-added(path); }
+                    browse-requested() => { root.browse-requested(BrowseTarget.engine); }
                     engine-removed() => { root.analysis-engine-removed(); }
                     multipv-changed(count) => { root.analysis-multipv-changed(count); }
                     limit-kind-changed(kind) => { root.analysis-limit-kind-changed(kind); }
@@ -593,6 +631,13 @@ export component WorkspaceWindow inherits Window {
                                 text <=> root.import-path-text;
                                 enabled: !root.busy && !root.browser-busy && !root.search-busy;
                             }
+                            BrowseButton {
+                                subject: "a PGN file to import";
+                                field-enabled: !root.busy && !root.browser-busy && !root.search-busy;
+                                picker-open: root.picker-open;
+                                compact: root.narrow-window;
+                                clicked => { root.browse-requested(BrowseTarget.import-pgn); }
+                            }
                             Button {
                                 text: "Import PGN";
                                 enabled: !root.busy && !root.browser-busy && !root.search-busy && root.import-path-text != "";
@@ -630,19 +675,19 @@ export component WorkspaceWindow inherits Window {
             vertical-stretch: 0;
             min-height: 30px;
             border-radius: 3px;
-            background: root.merged-error-text != "" ? Palette.selection-background : transparent;
+            background: root.status-highlighted ? Palette.selection-background : transparent;
             HorizontalLayout {
                 padding-left: 9px;
                 padding-right: 9px;
                 spacing: 8px;
                 Text {
                     horizontal-stretch: 1;
-                    text: root.merged-error-text != "" ? root.merged-error-text : (root.busy ? "Working…" : "");
-                    color: root.merged-error-text != "" ? Palette.selection-foreground : Palette.accent-foreground;
+                    text: root.status-text;
+                    color: root.status-highlighted ? Palette.selection-foreground : Palette.accent-foreground;
                     wrap: word-wrap;
                     vertical-alignment: center;
                 }
-                if root.merged-error-text != "": Button {
+                if root.show-error: Button {
                     text: "Dismiss";
                     clicked => { root.dismiss-error(); }
                 }
