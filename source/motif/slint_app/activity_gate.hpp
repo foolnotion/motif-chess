@@ -1,7 +1,6 @@
 #pragma once
 
 #include <functional>
-#include <utility>
 
 namespace motif::slint_app
 {
@@ -21,18 +20,17 @@ struct workspace_activity
     }
 };
 
+class import_service;
+class async_workspace_runner;
+class async_browser_runner;
+class async_search_runner;
+
 // The one composition of the live activity: an import, a workspace change
-// (open, create, scratch), a game load and a search. Templated over the runners
-// so the composition is tested without them; main() passes the real ones.
-template<typename Importer, typename Workspace, typename Browser, typename Search>
-[[nodiscard]] auto current_activity(Importer const& importer, Workspace const& workspace, Browser const& browser, Search const& search)
-    -> workspace_activity
-{
-    return workspace_activity {.import_active = importer.active(),
-                               .workspace_busy = workspace.is_busy(),
-                               .browser_busy = browser.is_busy(),
-                               .search_busy = search.is_busy()};
-}
+// (open, create, scratch), a game load and a search.
+[[nodiscard]] auto current_activity(import_service const& importer,
+                                    async_workspace_runner const& workspace,
+                                    async_browser_runner const& browser,
+                                    async_search_runner const& search) -> workspace_activity;
 
 // Reports the workspace's current activity. Built once in main(); every board,
 // play, New Game, replace, database-switch and search callback decides through

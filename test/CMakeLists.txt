@@ -131,6 +131,8 @@ if(motif_ENABLE_SLINT_APP)
         source/motif_slint_app/file_picker_test.cpp
         source/motif_slint_app/picker_host_test.cpp
         source/motif_slint_app/search_presenter_test.cpp
+        source/motif_slint_app/search_host_test.cpp
+        source/motif_slint_app/workspace_host_test.cpp
         source/motif_slint_app/layout_snapshot_test.cpp
     )
     target_link_libraries(motif_slint_app_service_test PRIVATE
@@ -151,6 +153,8 @@ if(motif_ENABLE_SLINT_APP)
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/database_host.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/event_loop.cpp"
         "${CMAKE_SOURCE_DIR}/source/motif/slint_app/picker_host.cpp"
+        "${CMAKE_SOURCE_DIR}/source/motif/slint_app/search_host.cpp"
+        "${CMAKE_SOURCE_DIR}/source/motif/slint_app/workspace_host.cpp"
     )
     set_source_files_properties(
         "${CMAKE_BINARY_DIR}/source/motif/slint_app/slint_generated_workspace_1.cpp"
