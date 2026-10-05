@@ -295,7 +295,7 @@ class async_search_runner
         ++state_->epoch;
         state_->presenter = std::make_shared<motif::slint_app::search_presenter>(database);
         state_->pending_query.reset();
-        state_->last_hash.reset();
+        state_->rows.database_attached();
         publish();
     }
 
@@ -313,7 +313,7 @@ class async_search_runner
         }
         state_->busy.store(false, std::memory_order_release);
         state_->presenter.reset();
-        state_->last_hash.reset();
+        state_->rows.database_detached();
         if (auto locked = state_->window.lock()) {
             (*locked)->set_search_busy(false);
             clear_search(**locked);
@@ -336,8 +336,7 @@ class async_search_runner
     [[nodiscard]] auto shows_position(motif::db::zobrist_hash const hash) const -> bool
     {
         return state_->presenter
-            && motif::slint_app::rows_are_current(
-                   state_->presenter->state().searching, state_->presenter->state().current_hash, hash, state_->rows_outdated);
+            && state_->rows.current(state_->presenter->state().searching, state_->presenter->state().current_hash, hash);
     }
 
     // Records the board's position and tells the table whether its rows still
@@ -345,7 +344,7 @@ class async_search_runner
     // (which clears the flag) wins.
     void note_board_position(motif::db::zobrist_hash const hash)
     {
-        state_->board_hash = hash;
+        state_->rows.board_hash = hash;
         if (auto locked = state_->window.lock()) {
             (*locked)->set_search_rows_stale(rows_stale(*state_));
         }
@@ -356,8 +355,8 @@ class async_search_runner
         if (!state_->presenter) {
             return;
         }
-        state_->last_hash = hash;
-        state_->rows_outdated = false;
+        state_->rows.last_hash = hash;
+        state_->rows.outdated = false;
         auto query = state_->presenter->search(hash, filter);
         publish();
         if (!query) {
@@ -388,7 +387,7 @@ class async_search_runner
         if (!state_->presenter || !state_->presenter->state().auto_search) {
             return;
         }
-        if (state_->last_hash && *state_->last_hash == hash && !state_->rows_outdated) {
+        if (state_->rows.last_hash && *state_->rows.last_hash == hash && !state_->rows.outdated) {
             return;
         }
         search(hash, filter);
@@ -422,7 +421,7 @@ class async_search_runner
         }
         // Only a manual Search re-queries, so the rows on screen no longer match
         // the filter (or the imported data): mark them until it does.
-        state_->rows_outdated = true;
+        state_->rows.outdated = true;
         if (auto locked = state_->window.lock()) {
             (*locked)->set_search_rows_stale(rows_stale(*state_));
         }
@@ -470,11 +469,8 @@ class async_search_runner
         std::thread worker;
         std::atomic<bool> busy {false};
         std::optional<search_query_result> pending_query;
-        std::optional<motif::db::zobrist_hash> last_hash;
-        // Position on the board as last reported; the rows are stale when they were searched for another.
-        std::optional<motif::db::zobrist_hash> board_hash;
-        // The browser filter or the data changed while auto-search was off: the rows predate it.
-        bool rows_outdated {false};
+        // Which position the rows were searched for, where the board is, and whether the rows predate a filter or data change.
+        motif::slint_app::explorer_rows_tracker rows;
         std::uint64_t epoch {};
         std::shared_ptr<std::atomic<std::uint64_t>> lifetime {std::make_shared<std::atomic<std::uint64_t>>(0)};
         std::function<bool()> retry_on_database_failure;
@@ -484,9 +480,7 @@ class async_search_runner
 
     [[nodiscard]] static auto rows_stale(state const& shared) -> bool
     {
-        return shared.presenter
-            && motif::slint_app::rows_are_stale(
-                   shared.presenter->state().searching, shared.presenter->state().current_hash, shared.board_hash, shared.rows_outdated);
+        return shared.presenter && shared.rows.stale(shared.presenter->state().searching, shared.presenter->state().current_hash);
     }
 
     void publish()

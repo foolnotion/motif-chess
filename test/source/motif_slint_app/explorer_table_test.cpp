@@ -210,4 +210,40 @@ TEST_CASE("explorer table: ECO and opening name pass through, absent values are 
     CHECK(table.rows[1].eco.empty());
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("explorer rows tracker: a database switch leaves no rows flagged stale", "[motif-slint-app][explorer]")
+{
+    // A fresh presenter shows no rows; its searched position is the default hash.
+    auto const fresh = motif::db::zobrist_hash {};
+    auto const old_board = motif::db::zobrist_hash {7};
+    using motif::slint_app::explorer_rows_tracker;
+
+    // The state a manual-search user leaves behind: the board moved on and a
+    // filter change marked the rows outdated, then the database is replaced.
+    auto const dirty = []() -> explorer_rows_tracker
+    {
+        auto tracker = explorer_rows_tracker {};
+        tracker.last_hash = motif::db::zobrist_hash {3};
+        tracker.board_hash = motif::db::zobrist_hash {7};
+        tracker.outdated = true;
+        return tracker;
+    };
+
+    auto attached = dirty();
+    attached.database_attached();
+    CHECK_FALSE(attached.stale(false, fresh));
+    CHECK_FALSE(attached.outdated);
+    CHECK_FALSE(attached.last_hash);
+    CHECK_FALSE(attached.board_hash);
+    CHECK_FALSE(attached.current(false, fresh, old_board));
+
+    auto detached = dirty();
+    detached.database_detached();
+    CHECK_FALSE(detached.stale(false, fresh));
+    CHECK_FALSE(detached.outdated);
+    CHECK_FALSE(detached.last_hash);
+    CHECK_FALSE(detached.board_hash);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

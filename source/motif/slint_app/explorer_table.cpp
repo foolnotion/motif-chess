@@ -136,4 +136,28 @@ auto rows_are_stale(bool const searching,
     return !searching && (outdated || (board && *board != shown));
 }
 
+void explorer_rows_tracker::database_attached() noexcept
+{
+    database_detached();
+}
+
+void explorer_rows_tracker::database_detached() noexcept
+{
+    last_hash.reset();
+    board_hash.reset();
+    outdated = false;
+}
+
+auto explorer_rows_tracker::current(bool const searching,
+                                    motif::db::zobrist_hash const shown,
+                                    motif::db::zobrist_hash const board) const noexcept -> bool
+{
+    return rows_are_current(searching, shown, board, outdated);
+}
+
+auto explorer_rows_tracker::stale(bool const searching, motif::db::zobrist_hash const shown) const noexcept -> bool
+{
+    return rows_are_stale(searching, shown, board_hash, outdated);
+}
+
 }  // namespace motif::slint_app

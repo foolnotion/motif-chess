@@ -83,4 +83,22 @@ struct explorer_table
                                   std::optional<motif::db::zobrist_hash> board,
                                   bool outdated) noexcept -> bool;
 
+// What the search runner remembers about the rows on screen: the position the
+// last search started for, the position last reported by the board, and
+// whether the rows predate a filter or data change nothing re-queried.
+// A database switch ends the rows' relevance, so attach and detach both reset
+// all of it; the next search starts from a clean slate.
+struct explorer_rows_tracker
+{
+    std::optional<motif::db::zobrist_hash> last_hash;
+    std::optional<motif::db::zobrist_hash> board_hash;
+    bool outdated {false};
+
+    void database_attached() noexcept;
+    void database_detached() noexcept;
+
+    [[nodiscard]] auto current(bool searching, motif::db::zobrist_hash shown, motif::db::zobrist_hash board) const noexcept -> bool;
+    [[nodiscard]] auto stale(bool searching, motif::db::zobrist_hash shown) const noexcept -> bool;
+};
+
 }  // namespace motif::slint_app
