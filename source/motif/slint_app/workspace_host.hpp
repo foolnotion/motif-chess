@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -18,6 +19,16 @@ class async_analysis_runner;
 class async_board_runner;
 class async_browser_runner;
 class async_search_runner;
+enum class workspace_attach_step : std::uint8_t
+{
+    analysis_changed,
+    browser_attached,
+    browser_loaded,
+    search_attached,
+    board_attached,
+};
+
+using attach_observer = std::function<void(workspace_attach_step)>;
 
 void publish_workspace(WorkspaceWindow& window, workspace_service const& service);
 
@@ -36,7 +47,8 @@ class async_workspace_runner
                            async_board_runner& board,
                            async_search_runner& search,
                            async_analysis_runner& analysis,
-                           event_loop_environment environment);
+                           event_loop_environment environment,
+                           attach_observer observer = {});
     ~async_workspace_runner();
 
     async_workspace_runner(async_workspace_runner const&) = delete;
@@ -49,9 +61,10 @@ class async_workspace_runner
     [[nodiscard]] auto run_scratch() -> start_outcome;
     [[nodiscard]] auto is_busy() const noexcept -> bool;
 
-  private:
     struct state;
-    std::shared_ptr<state> state_;
+    std::shared_ptr<state> state_;  // NOLINT(readability-identifier-naming)
+    static void notify_attach(state& shared, workspace_attach_step step);
+    static void attach_hosts(state& shared);
     [[nodiscard]] auto start(std::function<result<void>()> operation) -> start_outcome;
 };
 
