@@ -113,6 +113,31 @@ auto close_within_one_second(Close close, query_blocker_scope const& blocker) ->
     return elapsed <= std::chrono::seconds {1};
 }
 
+template<typename Close>
+auto close_gate_within_one_second(Close close, query_open_gate_scope const& gate) -> bool
+{
+    auto mutex = std::mutex {};
+    auto condition = std::condition_variable {};
+    auto complete = false;
+    auto watchdog = std::thread {[&]() -> void
+                                 {
+                                     auto lock = std::unique_lock {mutex};
+                                     if (!condition.wait_for(lock, std::chrono::seconds {1}, [&]() -> bool { return complete; })) {
+                                         gate.gate->release();
+                                     }
+                                 }};
+    auto const started = std::chrono::steady_clock::now();
+    close();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    {
+        std::scoped_lock const lock {mutex};
+        complete = true;
+    }
+    condition.notify_one();
+    watchdog.join();
+    return elapsed <= std::chrono::seconds {1};
+}
+
 // The event loop of these tests: tasks the runner schedules wait here until a
 // test runs them, which stands in for the loop turning. Tasks are run on the
 // test thread, which plays the event-loop thread.
@@ -591,14 +616,165 @@ TEST_CASE("browser host: detach cancels before connection publication", "[motif-
     browser.load_initial();
     REQUIRE(gate.gate->wait_until_entered_for(std::chrono::seconds {1}));
 
-    auto const started = std::chrono::steady_clock::now();
-    browser.detach();
-    auto const elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(close_gate_within_one_second([&]() -> void { browser.detach(); }, gate));
     window->set_game_total_count(shutdown_total_sentinel);
     (void)loop.run(no_delay);
-    CHECK(elapsed <= std::chrono::seconds {1});
     CHECK_FALSE(browser.is_busy());
     CHECK(window->get_game_total_count() == shutdown_total_sentinel);
+}
+
+TEST_CASE("browser host: destruction cancels before connection publication", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto gate = query_open_gate_scope {};
+    auto blocker = query_blocker_scope {};
+    auto browser = std::make_unique<motif::slint_app::async_browser_runner>(window, loop.environment());
+    browser->attach(database);
+    browser->load_initial();
+    REQUIRE(gate.gate->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_gate_within_one_second([&]() -> void { browser.reset(); }, gate));
+    CHECK_FALSE(blocker.blocker->wait_until_entered_for(no_delay));
+    window->set_game_total_count(shutdown_total_sentinel);
+    (void)loop.run(no_delay);
+    CHECK(window->get_game_total_count() == shutdown_total_sentinel);
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: detaching a blocked activation publishes no callbacks", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto successes = std::size_t {0};
+    auto failures = std::size_t {0};
+    auto external_successes = std::size_t {0};
+    auto external_failures = std::size_t {0};
+    auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+    browser.set_activation_handlers([&](motif::db::game_id, motif::db::game const&) -> void { ++successes; },
+                                    [&]() -> void { ++failures; });
+    browser.set_external_activation_handlers([&](motif::db::game_id, motif::db::game const&, std::size_t) -> void { ++external_successes; },
+                                             [&]() -> void { ++external_failures; });
+    browser.attach(database);
+    browser.load_initial();
+    browser.wait_for_worker();
+    (void)loop.run(no_delay);
+    browser.select(0);
+    auto blocker = query_blocker_scope {};
+    browser.activate();
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_within_one_second([&]() -> void { browser.detach(); }, blocker));
+    (void)loop.run(no_delay);
+    CHECK(successes == 0);
+    CHECK(failures == 0);
+    CHECK(external_successes == 0);
+    CHECK(external_failures == 0);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: destroying a blocked activation publishes no callbacks", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto successes = std::size_t {0};
+    auto failures = std::size_t {0};
+    auto external_successes = std::size_t {0};
+    auto external_failures = std::size_t {0};
+    auto browser = std::make_unique<motif::slint_app::async_browser_runner>(window, loop.environment());
+    browser->set_activation_handlers([&](motif::db::game_id, motif::db::game const&) -> void { ++successes; },
+                                     [&]() -> void { ++failures; });
+    browser->set_external_activation_handlers([&](motif::db::game_id, motif::db::game const&, std::size_t) -> void
+                                              { ++external_successes; },
+                                              [&]() -> void { ++external_failures; });
+    browser->attach(database);
+    browser->load_initial();
+    browser->wait_for_worker();
+    (void)loop.run(no_delay);
+    browser->select(0);
+    auto blocker = query_blocker_scope {};
+    browser->activate();
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_within_one_second([&]() -> void { browser.reset(); }, blocker));
+    (void)loop.run(no_delay);
+    CHECK(successes == 0);
+    CHECK(failures == 0);
+    CHECK(external_successes == 0);
+    CHECK(external_failures == 0);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: detaching a blocked external activation publishes no callbacks", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto successes = std::size_t {0};
+    auto failures = std::size_t {0};
+    auto external_successes = std::size_t {0};
+    auto external_failures = std::size_t {0};
+    auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+    browser.set_activation_handlers([&](motif::db::game_id, motif::db::game const&) -> void { ++successes; },
+                                    [&]() -> void { ++failures; });
+    browser.set_external_activation_handlers([&](motif::db::game_id, motif::db::game const&, std::size_t) -> void { ++external_successes; },
+                                             [&]() -> void { ++external_failures; });
+    browser.attach(database);
+    auto blocker = query_blocker_scope {};
+    browser.activate_by_id(manager_probe_game_id, 0);
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_within_one_second([&]() -> void { browser.detach(); }, blocker));
+    (void)loop.run(no_delay);
+    CHECK(successes == 0);
+    CHECK(failures == 0);
+    CHECK(external_successes == 0);
+    CHECK(external_failures == 0);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("browser host: destroying a blocked external activation publishes no callbacks", "[motif-slint-app][browser][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto database = make_numbered_database(12);
+    auto loop = manual_loop {};
+    auto window = WorkspaceWindow::create();
+    auto successes = std::size_t {0};
+    auto failures = std::size_t {0};
+    auto external_successes = std::size_t {0};
+    auto external_failures = std::size_t {0};
+    auto browser = std::make_unique<motif::slint_app::async_browser_runner>(window, loop.environment());
+    browser->set_activation_handlers([&](motif::db::game_id, motif::db::game const&) -> void { ++successes; },
+                                     [&]() -> void { ++failures; });
+    browser->set_external_activation_handlers([&](motif::db::game_id, motif::db::game const&, std::size_t) -> void
+                                              { ++external_successes; },
+                                              [&]() -> void { ++external_failures; });
+    browser->attach(database);
+    auto blocker = query_blocker_scope {};
+    browser->activate_by_id(manager_probe_game_id, 0);
+    REQUIRE(blocker.blocker->wait_until_entered_for(std::chrono::seconds {1}));
+
+    CHECK(close_within_one_second([&]() -> void { browser.reset(); }, blocker));
+    (void)loop.run(no_delay);
+    CHECK(successes == 0);
+    CHECK(failures == 0);
+    CHECK(external_successes == 0);
+    CHECK(external_failures == 0);
+    CHECK(blocker.blocker->observed_sqlite_interrupt());
 }
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
