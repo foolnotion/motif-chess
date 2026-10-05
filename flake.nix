@@ -57,6 +57,27 @@
             '';
           });
 
+          # nativefiledialog-extended for the file picker (Story 13.6). Linux uses the
+          # xdg-desktop-portal backend over D-Bus: nixpkgs builds the GTK3 backend, which
+          # drags GTK into the closure and aborts the process without its GSettings
+          # schemas. Static, so the macOS bundle needs no extra library; the portal
+          # build links only libdbus. The test programs need a display and are not built.
+          nfd-portal =
+            let
+              static = pkgs.nativefiledialog-extended.override { enableShared = false; };
+            in
+            if pkgs.stdenv.hostPlatform.isLinux then
+              static.overrideAttrs (old: {
+                buildInputs = [ pkgs.dbus ];
+                cmakeFlags = old.cmakeFlags ++ [
+                  "-DNFD_PORTAL=ON"
+                  "-DNFD_BUILD_TESTS=OFF"
+                  "-DNFD_BUILD_SDL2_TESTS=OFF"
+                ];
+              })
+            else
+              static;
+
           glaze-simd-no-ssl = pkgs.glaze.overrideAttrs (old: {
             cmakeFlags = (old.cmakeFlags or [ ]) ++ [
               "-DGLZ_DISABLE_SIMD=OFF"
@@ -168,7 +189,10 @@
               ];
             buildInputs =
               old.buildInputs
-              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [ pkgs.slint ];
+              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [
+                pkgs.slint
+                nfd-portal
+              ];
           });
 
           packages.app-mcp = packages.default.overrideAttrs (old: {
@@ -180,7 +204,10 @@
               ];
             buildInputs =
               old.buildInputs
-              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [ slint-with-mcp ];
+              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [
+                slint-with-mcp
+                nfd-portal
+              ];
           });
 
           devShells.default = mkShell {
