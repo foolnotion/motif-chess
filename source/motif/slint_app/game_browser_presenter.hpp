@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
+#include "motif/db/query_connection.hpp"
 #include "motif/db/types.hpp"
 #include "motif/slint_app/error.hpp"
 
@@ -140,6 +142,8 @@ class game_browser_presenter
   public:
     explicit game_browser_presenter(motif::db::database_manager& database) noexcept;
 
+    [[nodiscard]] auto database_dir() const -> std::filesystem::path const&;
+
     auto prepare_initial_load() -> browser_result<browser_query>;
     auto set_filters(std::string player_name, std::string result) -> browser_result<browser_query>;
     auto sort_games(std::size_t column, bool ascending) -> browser_result<browser_query>;
@@ -169,6 +173,8 @@ class game_browser_presenter
     auto reload(std::optional<motif::db::zobrist_hash> board_hash) -> browser_result<browser_query>;
 
     [[nodiscard]] auto execute_query(browser_query const& query) const -> browser_result<browser_page>;
+    [[nodiscard]] auto execute_query(browser_query const& query, motif::db::query_connection const& connection) const
+        -> browser_result<browser_page>;
     auto apply_query(browser_page page) -> browser_result<bool>;
     auto apply_query_error(std::uint64_t generation, browser_error query_error) -> browser_result<bool>;
 
@@ -176,6 +182,8 @@ class game_browser_presenter
     auto move_selection(int delta) -> browser_result<std::size_t>;
     auto prepare_activation() -> browser_result<activation_request>;
     [[nodiscard]] auto execute_activation(activation_request const& request) const -> browser_result<loaded_game>;
+    [[nodiscard]] static auto execute_activation(activation_request const& request, motif::db::query_connection const& connection)
+        -> browser_result<loaded_game>;
     auto apply_activation(loaded_game game) -> browser_result<bool>;
     auto apply_activation_error(std::uint64_t generation, browser_error activation_error) -> browser_result<bool>;
     // Activation entry point for callers outside the browser's own row

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,6 +9,7 @@
 #include <tl/expected.hpp>
 
 #include "motif/db/database_manager.hpp"
+#include "motif/db/query_connection.hpp"
 #include "motif/db/types.hpp"
 #include "motif/search/opening_stats.hpp"
 #include "motif/slint_app/error.hpp"
@@ -79,6 +81,8 @@ class search_presenter
   public:
     explicit search_presenter(motif::db::database_manager& database);
 
+    [[nodiscard]] auto database_dir() const -> std::filesystem::path const&;
+
     // Async query pipeline: search() runs on the caller's thread and is
     // cheap; execute_query() performs the (potentially blocking) database
     // reads and should run off the UI event loop; apply_query()/
@@ -90,6 +94,8 @@ class search_presenter
     // already reflects the result and there is nothing to dispatch.
     auto search(motif::db::zobrist_hash hash, motif::db::search_filter filter) -> search_result<std::optional<search_query>>;
     [[nodiscard]] auto execute_query(search_query const& query) const -> search_result<search_page>;
+    [[nodiscard]] auto execute_query(search_query const& query, motif::db::query_connection const& connection) const
+        -> search_result<search_page>;
     auto apply_query(search_page page) -> search_result<bool>;
     auto apply_query_error(std::uint64_t generation, search_error query_error) -> search_result<bool>;
 

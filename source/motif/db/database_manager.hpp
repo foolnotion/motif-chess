@@ -95,10 +95,13 @@ class database_manager
     // avoids materializing a position's complete occurrence set when joining
     // one metadata page to its matched plies.
     auto query_position_first_matches(zobrist_hash hash, std::span<game_id const> game_ids) const -> result<std::vector<position_match>>;
+    auto query_position_first_matches(zobrist_hash hash, std::span<game_id const> game_ids, game_store const& metadata_store) const
+        -> result<std::vector<position_match>>;
 
     // One ascending game ID per game reaching hash. Fails closed when
     // postings are stale or absent.
     auto position_game_ids(zobrist_hash hash) const -> result<std::vector<game_id>>;
+    auto position_game_ids(zobrist_hash hash, game_store const& metadata_store) const -> result<std::vector<game_id>>;
 
     // Directory-level exact occurrence metadata from valid postings.
     auto position_summary(zobrist_hash hash) const -> result<std::optional<position_postings_summary>>;
@@ -138,9 +141,13 @@ class database_manager
     // Unfiltered opening-stat aggregate. Uses the shallow continuation index
     // only when exact postings prove the index covers every root occurrence.
     auto query_unfiltered_opening_stats(zobrist_hash hash) const -> result<std::vector<opening_stat_agg_row>>;
+    auto query_unfiltered_opening_stats(zobrist_hash hash, game_store const& metadata_store) const
+        -> result<std::vector<opening_stat_agg_row>>;
 
     // Filtered continuation aggregate from exact postings and bounded replay.
     auto query_filtered_opening_stats(zobrist_hash hash, std::vector<game_id> const& game_ids) const
+        -> result<std::vector<opening_stat_agg_row>>;
+    auto query_filtered_opening_stats(zobrist_hash hash, std::vector<game_id> const& game_ids, game_store const& metadata_store) const
         -> result<std::vector<opening_stat_agg_row>>;
 
     // Bounded continuation rows per exact root occurrence, from postings and
@@ -152,6 +159,10 @@ class database_manager
     // filter.position is set, queries postings for matching game IDs first,
     // then applies metadata filters in SQLite.
     auto find_games(search_filter const& filter) -> result<game_list_result>;
+    // Worker-facing metadata query against an independent read-only SQLite
+    // connection. Immutable index reads still use this manager's published
+    // readers, whose lifetime must outlast the worker join.
+    auto find_games(search_filter const& filter, game_store const& metadata_store) const -> result<game_list_result>;
 
     // Rebuild the immutable exact-occurrence sidecar from canonical SQLite
     // games. Persistent bundles and scratch databases alike.

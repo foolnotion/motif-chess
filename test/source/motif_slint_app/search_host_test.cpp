@@ -11,6 +11,7 @@
 
 #include "manual_event_loop.hpp"
 #include "motif/chess/chess.hpp"
+#include "motif/db/query_connection.hpp"
 #include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/browser_host.hpp"
 #include "snapshot_platform.hpp"
@@ -23,6 +24,7 @@ using motif::slint_app::workspace_activity;
 constexpr auto first_stale_hash = motif::db::zobrist_hash {123456789};
 constexpr auto second_stale_hash = motif::db::zobrist_hash {987654321};
 constexpr auto stale_total_sentinel = 73;
+constexpr auto shutdown_hash = motif::db::zobrist_hash {1234};
 constexpr auto no_delay = std::chrono::milliseconds {0};
 
 auto make_match_game() -> motif::db::game
@@ -364,4 +366,23 @@ TEST_CASE("search host: destroyed runner ignores queued completion with window a
     window->set_search_total_matches(stale_total_sentinel);
     (void)loop.run(no_delay);
     CHECK(window->get_search_total_matches() == stale_total_sentinel);
+}
+
+TEST_CASE("search host: detach interrupts a blocked dedicated SQLite query", "[motif-slint-app][search][shutdown]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto test = search_host_fixture {};
+    auto blocker = std::make_shared<motif::db::query_connection_blocker>();
+    motif::db::set_query_connection_blocker_for_tests(blocker);
+    test.search.search(shutdown_hash, test.browser.active_filter());
+    blocker->wait_until_entered();
+
+    auto const started = std::chrono::steady_clock::now();
+    test.search.detach();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    motif::db::set_query_connection_blocker_for_tests({});
+
+    CHECK(elapsed <= std::chrono::seconds {1});
+    CHECK_FALSE(test.search.is_busy());
+    CHECK_FALSE(test.window->get_search_searching());
 }

@@ -11,6 +11,7 @@
 namespace motif::db
 {
 class database_manager;
+class game_store;
 }  // namespace motif::db
 
 namespace motif::search::opening_stats
@@ -47,6 +48,10 @@ struct stats
 [[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash) -> result<stats>;
 [[nodiscard]] auto query(motif::db::database_manager const& database, motif::db::zobrist_hash hash, motif::db::search_filter const& filter)
     -> result<stats>;
+[[nodiscard]] auto query(motif::db::database_manager const& database,
+                         motif::db::zobrist_hash hash,
+                         motif::db::search_filter const& filter,
+                         motif::db::game_store const& metadata_store) -> result<stats>;
 
 [[nodiscard]] auto query_elo_distribution(motif::db::database_manager const& database,
                                           motif::db::zobrist_hash hash,
