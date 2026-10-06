@@ -1,5 +1,6 @@
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -10,6 +11,7 @@
 #include "motif/slint_app/activity_gate.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <pthread.h>
 #include <sys/stat.h>
 
 #include "manual_event_loop.hpp"
@@ -150,6 +152,10 @@ TEST_CASE("activity gate: FIFO import maps only the concrete import flag", "[mot
 
     auto writer = std::thread {[fifo]() -> void
                                {
+                                   auto blocked_signals = sigset_t {};
+                                   static_cast<void>(::sigemptyset(&blocked_signals));
+                                   static_cast<void>(::sigaddset(&blocked_signals, SIGPIPE));
+                                   static_cast<void>(::pthread_sigmask(SIG_BLOCK, &blocked_signals, nullptr));
                                    auto stream = std::ofstream {fifo};
                                    stream << "[Event \"FIFO\"]\n[Site \"Local\"]\n[Date \"2026.10.05\"]\n[Round \"1\"]\n[White "
                                              "\"White\"]\n[Black \"Black\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n";
