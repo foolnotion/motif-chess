@@ -97,7 +97,7 @@ class engine_manager
     // `isready` handshakes): the engine process is terminated and its reader joined
     // before the call returns engine_start_cancelled, which is distinct from a
     // genuine engine_start_failed. The token is not consulted once the launch has
-    // succeeded.
+    // succeeded. A token that is already stopped cancels without starting a process.
     auto start_analysis(analysis_params const& params, std::stop_token const& stop_token = {}) -> result<std::string>;
 
     // Stop an active analysis session.

@@ -193,6 +193,10 @@ auto launch_failure(std::error_code const err) -> error_code
 
 auto launch_engine(session& sess, engine_config const& cfg, std::stop_token const& stop_token) -> result<void>
 {
+    // Nothing to start, and no process to spawn only to terminate it again.
+    if (stop_token.stop_requested()) {
+        return tl::unexpected {error_code::engine_start_cancelled};
+    }
     if (auto const started = sess.engine.start(cfg.path, stop_token); !started) {
         return tl::unexpected {launch_failure(started.error())};
     }

@@ -737,6 +737,36 @@ TEST_CASE("engine_manager: a stop token cancels a blocked uci or isready handsha
     CHECK(manager.release_analysis(analysis_id).has_value());
 }
 
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("engine_manager: a stop token that is already requested cancels the launch before any engine runs", "[motif-engine]")
+{
+    auto const fake_engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body()};
+    motif::engine::engine_manager manager;
+    REQUIRE(manager.configure_engine(motif::engine::engine_config {.name = "fake", .path = fake_engine.path()}).has_value());
+    auto const params = motif::engine::analysis_params {
+        .fen = startpos_fen,
+        .engine = "fake",
+        .multipv = 1,
+        .depth = default_depth,
+        .movetime_ms = std::nullopt,
+    };
+    std::stop_source const source;
+    source.request_stop();
+
+    auto const result = manager.start_analysis(params, source.get_token());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error() == motif::engine::error_code::engine_start_cancelled);
+    // The script never ran: it logs a pid on `uci`, and every command it reads.
+    CHECK(fake_engine.commands().empty());
+    CHECK(fake_engine.process_ids().empty());
+    // No session was left behind, and the same manager still launches engines.
+    auto const analysis_id = start_fake_session(manager, fake_engine, "fake");
+    CHECK(fake_uci::process_alive(engine_process(fake_engine)));
+    CHECK(manager.release_analysis(analysis_id).has_value());
+}
+
 TEST_CASE("engine_manager: a genuine launch failure is not reported as cancelled while the stop token is live", "[motif-engine]")
 {
     motif::engine::engine_manager manager;

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -154,15 +156,21 @@ class fake_engine
 
     // Waits until the first process has reached its stalled handshake phase; its
     // process id is in the command log by then. Blocks in poll(2) rather than in a
-    // loop with sleeps. False if nothing arrived within `timeout` or the engine
-    // stalls no phase.
+    // loop with sleeps. One-shot: it consumes the announcement, so a second call
+    // waits for a further one (which never comes, the script stalls once). False if
+    // nothing arrived within `timeout` or the engine stalls no phase.
     [[nodiscard]] auto wait_blocked(std::chrono::milliseconds const timeout = std::chrono::seconds {10}) const -> bool
     {
         if (gate_fd_ < 0) {
             return false;
         }
         auto descriptor = pollfd {.fd = gate_fd_, .events = POLLIN, .revents = 0};
-        return ::poll(&descriptor, 1, static_cast<int>(timeout.count())) == 1 && descriptor.revents == POLLIN;
+        if (::poll(&descriptor, 1, static_cast<int>(timeout.count())) != 1 || descriptor.revents != POLLIN) {
+            return false;
+        }
+        constexpr auto drain_size = std::size_t {64};
+        auto drained = std::array<char, drain_size> {};
+        return ::read(gate_fd_, drained.data(), drained.size()) > 0;
     }
 
     [[nodiscard]] auto commands() const -> std::vector<std::string>

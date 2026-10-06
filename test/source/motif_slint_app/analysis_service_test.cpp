@@ -280,8 +280,10 @@ TEST_CASE("analysis service: destroying the service while analysing ends the eng
 
 // The blocked-handshake cases below stall the first engine process in `uci` or
 // `isready` (see fake_uci_engine.hpp) and cancel the launch. Cancellation ends the
-// child through the upstream stop ladder, which waits up to half a second for a
-// polite exit; the fake exits on `quit` at once, so one second is a firm bound.
+// child through the upstream stop ladder (quit, then up to 0.5s each of waiting,
+// SIGTERM and SIGKILL). The fake exits on `quit` at once, which is what makes one
+// second a firm bound here; an engine that ignores both quit and SIGTERM would
+// take up to 1.5s and is not covered by this bound.
 constexpr auto cancel_bound = std::chrono::seconds {1};
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
@@ -337,6 +339,39 @@ TEST_CASE("analysis service: a newer start during a blocked handshake reaps the 
     CHECK(fake_uci::process_alive(processes[1]));
     CHECK(events.count_other_than(2) == 0);
     CHECK(events.count<analysis_start_failure>(2) == 0);
+    auto const positions = engine.commands_starting_with("position");
+    REQUIRE(positions.size() == 1);
+    CHECK(positions.front() == std::string {"position fen "} + after_e4_fen);
+    service.shutdown();
+    CHECK_FALSE(fake_uci::process_alive(processes[1]));
+}
+
+// With the same generation asked for again, the generation filter cannot hide the
+// cancelled launch: only the manager's cancelled result keeps a start failure out.
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("analysis service: a cancelled launch of the generation that is asked for again reports no start failure",
+          "[motif-slint-app][analysis]")
+{
+    auto const phase = GENERATE(fake_uci::blocked_phase::uci, fake_uci::blocked_phase::isready);
+    auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body(), phase};
+    auto events = recorder {};
+    auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
+    service.start(make_request(engine, 1));
+    REQUIRE(engine.wait_blocked());
+    auto const stalled = engine.process_ids();
+    REQUIRE(stalled.size() == 1);
+
+    service.start(make_request(engine, 1, after_e4_fen));
+    service.wait_until_idle();
+
+    REQUIRE(fake_uci::wait_for([&]() -> bool { return events.count<motif::engine::info_event>(1) == 1; }));
+    CHECK(events.count<analysis_start_failure>(1) == 0);
+    CHECK(events.events().size() == 1);
+    auto const processes = engine.process_ids();
+    REQUIRE(processes.size() == 2);
+    CHECK_FALSE(fake_uci::process_alive(processes[0]));
+    CHECK(fake_uci::process_alive(processes[1]));
     auto const positions = engine.commands_starting_with("position");
     REQUIRE(positions.size() == 1);
     CHECK(positions.front() == std::string {"position fen "} + after_e4_fen);
