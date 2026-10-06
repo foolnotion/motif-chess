@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -92,7 +93,12 @@ class engine_manager
     auto list_engines() -> std::vector<engine_config>;
 
     // Start an analysis session. Returns an opaque analysis_id on success.
-    auto start_analysis(analysis_params const& params) -> result<std::string>;
+    // `stop_token` cancels the blocking engine launch (process start, `uci` and
+    // `isready` handshakes): the engine process is terminated and its reader joined
+    // before the call returns engine_start_cancelled, which is distinct from a
+    // genuine engine_start_failed. The token is not consulted once the launch has
+    // succeeded.
+    auto start_analysis(analysis_params const& params, std::stop_token const& stop_token = {}) -> result<std::string>;
 
     // Stop an active analysis session.
     // Returns analysis_already_terminal if the session is already done.

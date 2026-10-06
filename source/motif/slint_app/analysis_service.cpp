@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>
@@ -48,6 +49,11 @@ struct analysis_service::impl
     std::optional<command> pending;
     bool busy {false};
     bool stopping {false};
+    // Cancels the launch the worker is running, if any. Replaced by the worker
+    // when it takes a command, so it is only ever touched under the mutex: a
+    // caller can then cancel a launch without waiting for the worker, and the
+    // request cannot land on the next command's launch.
+    std::stop_source launch_stop;
 
     // The generation of the session whose events may still be delivered; 0 when
     // none. Written under the mutex by the caller, read by reader threads.
@@ -80,7 +86,7 @@ struct analysis_service::impl
         session_id.reset();
     }
 
-    void launch(analysis_request const& request)
+    void launch(analysis_request const& request, std::stop_token const& stop_token)
     {
         if (active_generation.load(std::memory_order_acquire) != request.generation) {
             return;  // superseded while it waited in the queue
@@ -93,15 +99,20 @@ struct analysis_service::impl
             fail();
             return;
         }
-        auto const started = manager.start_analysis(motif::engine::analysis_params {
-            .fen = request.fen,
-            .engine = request.engine_name,
-            .multipv = request.multipv,
-            .depth = request.depth,
-            .movetime_ms = request.movetime_ms,
-        });
+        auto const started = manager.start_analysis(
+            motif::engine::analysis_params {
+                .fen = request.fen,
+                .engine = request.engine_name,
+                .multipv = request.multipv,
+                .depth = request.depth,
+                .movetime_ms = request.movetime_ms,
+            },
+            stop_token);
         if (!started) {
-            fail();
+            // A launch cancelled by a stop, a newer start or shutdown is not a failure.
+            if (started.error().code != motif::engine::error_code::engine_start_cancelled) {
+                fail();
+            }
             return;
         }
         session_id = *started;
@@ -127,6 +138,7 @@ struct analysis_service::impl
     {
         for (;;) {
             auto next = command {};
+            auto stop_token = std::stop_token {};
             {
                 std::unique_lock lock {mutex};
                 wake.wait(lock, [this]() -> bool { return pending.has_value() || stopping; });
@@ -136,10 +148,12 @@ struct analysis_service::impl
                 next = std::move(*pending);
                 pending.reset();
                 busy = true;
+                launch_stop = std::stop_source {};
+                stop_token = launch_stop.get_token();
             }
             release_session();
             if (next.request) {
-                launch(*next.request);
+                launch(*next.request, stop_token);
             }
             {
                 std::scoped_lock const lock {mutex};
@@ -170,6 +184,7 @@ void analysis_service::start(analysis_request request)
             return;
         }
         impl_->active_generation.store(request.generation, std::memory_order_release);
+        impl_->launch_stop.request_stop();
         impl_->pending = command {.request = std::move(request)};
     }
     impl_->wake.notify_one();
@@ -183,6 +198,7 @@ void analysis_service::stop()
             return;
         }
         impl_->active_generation.store(0, std::memory_order_release);
+        impl_->launch_stop.request_stop();
         impl_->pending = command {};
     }
     impl_->wake.notify_one();
@@ -201,6 +217,7 @@ void analysis_service::shutdown()
         impl_->stopping = true;
         impl_->pending.reset();
         impl_->active_generation.store(0, std::memory_order_release);
+        impl_->launch_stop.request_stop();
     }
     impl_->wake.notify_all();
     impl_->idle.notify_all();

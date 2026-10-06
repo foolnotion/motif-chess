@@ -17,6 +17,8 @@ enum class error_code : std::uint8_t
     engine_not_configured,
     invalid_analysis_params,
     engine_start_failed,
+    // The caller's stop token cancelled the launch; not a genuine failure.
+    engine_start_cancelled,
     engine_stop_failed,
 };
 
@@ -56,6 +58,8 @@ using result = tl::expected<T, error>;
             return "invalid_analysis_params";
         case error_code::engine_start_failed:
             return "engine_start_failed";
+        case error_code::engine_start_cancelled:
+            return "engine_start_cancelled";
         case error_code::engine_stop_failed:
             return "engine_stop_failed";
     }

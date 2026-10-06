@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -15,6 +16,7 @@
 #include "motif/engine/engine_manager.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <fmt/format.h>
 
 #include "fake_uci_engine.hpp"
@@ -692,6 +694,67 @@ TEST_CASE("engine_manager: destroying the manager ends every live engine process
 
     CHECK(process_gone(first_process));
     CHECK(process_gone(second_process));
+}
+
+// ---------------------------------------------------------------------------
+// start_analysis cancellation
+// ---------------------------------------------------------------------------
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("engine_manager: a stop token cancels a blocked uci or isready handshake and reports it as cancelled", "[motif-engine]")
+{
+    auto const phase = GENERATE(fake_uci::blocked_phase::uci, fake_uci::blocked_phase::isready);
+    auto const fake_engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body(), phase};
+    motif::engine::engine_manager manager;
+    REQUIRE(manager.configure_engine(motif::engine::engine_config {.name = "fake", .path = fake_engine.path()}).has_value());
+    auto const params = motif::engine::analysis_params {
+        .fen = startpos_fen,
+        .engine = "fake",
+        .multipv = 1,
+        .depth = default_depth,
+        .movetime_ms = std::nullopt,
+    };
+    std::stop_source source;
+    auto launch = std::async(std::launch::async, [&]() -> auto { return manager.start_analysis(params, source.get_token()); });
+    REQUIRE(fake_engine.wait_blocked());
+    auto const stalled = fake_engine.process_ids();
+    REQUIRE(stalled.size() == 1);
+    REQUIRE(fake_uci::process_alive(stalled.front()));
+
+    source.request_stop();
+
+    REQUIRE(launch.wait_for(std::chrono::seconds {1}) == std::future_status::ready);
+    auto const result = launch.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error() == motif::engine::error_code::engine_start_cancelled);
+    // The child is reaped by the time the call returns, and the search never began.
+    CHECK_FALSE(fake_uci::process_alive(stalled.front()));
+    CHECK(fake_engine.commands_starting_with("go").empty());
+    // Cancelling left no session behind and the manager still launches engines.
+    auto const analysis_id = start_fake_session(manager, fake_engine, "fake");
+    CHECK(fake_uci::process_alive(engine_process(fake_engine, 1)));
+    CHECK(manager.release_analysis(analysis_id).has_value());
+}
+
+TEST_CASE("engine_manager: a genuine launch failure is not reported as cancelled while the stop token is live", "[motif-engine]")
+{
+    motif::engine::engine_manager manager;
+    REQUIRE(manager.configure_engine(motif::engine::engine_config {.name = "missing", .path = "/nonexistent/engine"}).has_value());
+    std::stop_source const source;
+
+    auto const result = manager.start_analysis(
+        motif::engine::analysis_params {
+            .fen = startpos_fen,
+            .engine = "missing",
+            .multipv = 1,
+            .depth = default_depth,
+            .movetime_ms = std::nullopt,
+        },
+        source.get_token());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error() == motif::engine::error_code::engine_start_failed);
 }
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.

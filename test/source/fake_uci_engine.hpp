@@ -3,21 +3,33 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
 #include <fmt/format.h>
+#include <poll.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 // Shell-script UCI engines for tests. The script answers the handshake, logs every
 // command it receives and every process id it runs under, and replies to `go`
 // with a caller supplied body. Real engines never run in unit tests.
+//
+// A script can also stall one handshake phase: its first process receives `uci`
+// (or `isready`), logs its pid, announces the arrival on a FIFO and then stays
+// silent, still reading its input so `quit` ends it at once. Later processes of
+// the same script answer normally. A test waits for the announcement with poll(2)
+// on the FIFO, so it needs no sleep to know the handshake is blocked.
 namespace fake_uci
 {
 
@@ -28,33 +40,77 @@ inline auto unique_stamp() -> std::string
     return fmt::format("{}_{}", stamp, counter.fetch_add(1));
 }
 
-// A fake engine on disk. The script and its command log are removed with it.
+// The handshake command a fake engine stalls on, for its first process.
+enum class blocked_phase : std::uint8_t
+{
+    none,
+    uci,
+    isready,
+};
+
+constexpr auto phase_name(blocked_phase const phase) -> std::string_view
+{
+    switch (phase) {
+        case blocked_phase::uci:
+            return "uci";
+        case blocked_phase::isready:
+            return "isready";
+        case blocked_phase::none:
+            break;
+    }
+    return "none";
+}
+
+// A fake engine on disk. The script, its command log and its FIFO are removed with it.
 class fake_engine
 {
   public:
     // `go_body` is shell text executed for each `go` command; every line needs
     // its own indentation and trailing newline.
-    explicit fake_engine(std::string_view go_body)
+    explicit fake_engine(std::string_view go_body, blocked_phase const phase = blocked_phase::none)
         : path_ {std::filesystem::temp_directory_path() / fmt::format("motif_fake_uci_engine_{}.sh", unique_stamp())}
         , log_ {path_.string() + ".log"}
+        , gate_ {path_.string() + ".gate"}
+        , once_ {path_.string() + ".once"}
     {
         // The script appends to the log only while it exists, so a process that
         // outlives this object (its owner quits it later) cannot recreate it.
         std::ofstream {log_}.close();
+        if (phase != blocked_phase::none) {
+            // O_RDWR keeps open(2) from blocking on either side; the script's
+            // announcement waits in the pipe until wait_blocked() sees it.
+            if (::mkfifo(gate_.c_str(), S_IRUSR | S_IWUSR) != 0) {
+                throw std::runtime_error {"fake_engine: mkfifo failed"};
+            }
+            // open(2) is variadic in its declaration; there is no other way to get a descriptor to poll.
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+            gate_fd_ = ::open(gate_.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+            if (gate_fd_ < 0) {
+                throw std::runtime_error {"fake_engine: cannot open the gate"};
+            }
+        }
         auto script = std::ofstream {path_};
         script << "#!/usr/bin/env sh\n"
                   "LOG='"
-               << log_.string()
+               << log_.string() << "'\nGATE='" << gate_.string() << "'\nONCE='" << once_.string() << "'\nPHASE='" << phase_name(phase)
                << "'\n"
+                  // Stalls the first process on phase `$1`: succeeds once, and only while the gate exists.
+                  "stall() {\n"
+                  "  [ \"$PHASE\" = \"$1\" ] && [ ! -e \"$ONCE\" ] && [ -e \"$GATE\" ] || return 1\n"
+                  "  : > \"$ONCE\"\n"
+                  "  printf '%s\\n' \"$1\" > \"$GATE\"\n"
+                  "}\n"
                   "while IFS= read -r line; do\n"
                   "  [ -e \"$LOG\" ] && printf '%s\\n' \"$line\" >> \"$LOG\"\n"
                   "  case \"$line\" in\n"
                   "    uci)\n"
                   "      [ -e \"$LOG\" ] && printf '%s\\n' \"pid $$\" >> \"$LOG\"\n"
+                  "      stall uci && continue\n"
                   "      printf '%s\\n' 'id name MotifFake'\n"
                   "      printf '%s\\n' 'uciok'\n"
                   "      ;;\n"
                   "    isready)\n"
+                  "      stall isready && continue\n"
                   "      printf '%s\\n' 'readyok'\n"
                   "      ;;\n"
                   "    setoption*)\n"
@@ -79,9 +135,14 @@ class fake_engine
 
     ~fake_engine()
     {
+        if (gate_fd_ >= 0) {
+            ::close(gate_fd_);
+        }
         std::error_code ignored;
         std::filesystem::remove(path_, ignored);
         std::filesystem::remove(log_, ignored);
+        std::filesystem::remove(gate_, ignored);
+        std::filesystem::remove(once_, ignored);
     }
 
     fake_engine(fake_engine const&) = delete;
@@ -90,6 +151,19 @@ class fake_engine
     auto operator=(fake_engine&&) -> fake_engine& = delete;
 
     [[nodiscard]] auto path() const -> std::string { return path_.string(); }
+
+    // Waits until the first process has reached its stalled handshake phase; its
+    // process id is in the command log by then. Blocks in poll(2) rather than in a
+    // loop with sleeps. False if nothing arrived within `timeout` or the engine
+    // stalls no phase.
+    [[nodiscard]] auto wait_blocked(std::chrono::milliseconds const timeout = std::chrono::seconds {10}) const -> bool
+    {
+        if (gate_fd_ < 0) {
+            return false;
+        }
+        auto descriptor = pollfd {.fd = gate_fd_, .events = POLLIN, .revents = 0};
+        return ::poll(&descriptor, 1, static_cast<int>(timeout.count())) == 1 && descriptor.revents == POLLIN;
+    }
 
     [[nodiscard]] auto commands() const -> std::vector<std::string>
     {
@@ -126,6 +200,9 @@ class fake_engine
   private:
     std::filesystem::path path_;
     std::filesystem::path log_;
+    std::filesystem::path gate_;
+    std::filesystem::path once_;
+    int gate_fd_ {-1};
 };
 
 constexpr auto info_line = "      printf '%s\\n' 'info depth 1 seldepth 1 multipv 1 score cp 13 nodes 42 nps 1000 time 1 pv e2e4 e7e5'\n";
