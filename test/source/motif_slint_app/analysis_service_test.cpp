@@ -14,6 +14,7 @@
 #include "motif/slint_app/analysis_service.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "fake_uci_engine.hpp"
 #include "motif/engine/engine_manager.hpp"
@@ -277,6 +278,120 @@ TEST_CASE("analysis service: destroying the service while analysing ends the eng
     CHECK(process_gone(process));
 }
 
+// The blocked-handshake cases below stall the first engine process in `uci` or
+// `isready` (see fake_uci_engine.hpp) and cancel the launch. Cancellation ends the
+// child through the upstream stop ladder, which waits up to half a second for a
+// polite exit; the fake exits on `quit` at once, so one second is a firm bound.
+constexpr auto cancel_bound = std::chrono::seconds {1};
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("analysis service: stop during a blocked handshake ends the launch without a failure event", "[motif-slint-app][analysis]")
+{
+    auto const phase = GENERATE(fake_uci::blocked_phase::uci, fake_uci::blocked_phase::isready);
+    auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body(), phase};
+    auto events = recorder {};
+    auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
+    service.start(make_request(engine, 1));
+    REQUIRE(engine.wait_blocked());
+    auto const processes = engine.process_ids();
+    REQUIRE(processes.size() == 1);
+    REQUIRE(fake_uci::process_alive(processes.front()));
+    auto const begin = std::chrono::steady_clock::now();
+
+    service.stop();
+    service.wait_until_idle();
+
+    CHECK(std::chrono::steady_clock::now() - begin < cancel_bound);
+    CHECK_FALSE(fake_uci::process_alive(processes.front()));
+    CHECK(events.events().empty());
+    CHECK(engine.process_ids().size() == 1);
+    CHECK(engine.commands_starting_with("position").empty());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("analysis service: a newer start during a blocked handshake reaps the old engine before the new one runs",
+          "[motif-slint-app][analysis]")
+{
+    auto const phase = GENERATE(fake_uci::blocked_phase::uci, fake_uci::blocked_phase::isready);
+    auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body(), phase};
+    auto events = recorder {};
+    auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
+    service.start(make_request(engine, 1));
+    REQUIRE(engine.wait_blocked());
+    auto const stalled = engine.process_ids();
+    REQUIRE(stalled.size() == 1);
+    auto const begin = std::chrono::steady_clock::now();
+
+    service.start(make_request(engine, 2, after_e4_fen));
+    service.wait_until_idle();
+
+    CHECK(std::chrono::steady_clock::now() - begin < cancel_bound);
+    REQUIRE(fake_uci::wait_for([&]() -> bool { return events.count<motif::engine::info_event>(2) == 1; }));
+    auto const processes = engine.process_ids();
+    REQUIRE(processes.size() == 2);
+    CHECK(processes.front() == stalled.front());
+    // The newer engine answered, so the older one is already gone.
+    CHECK_FALSE(fake_uci::process_alive(processes[0]));
+    CHECK(fake_uci::process_alive(processes[1]));
+    CHECK(events.count_other_than(2) == 0);
+    CHECK(events.count<analysis_start_failure>(2) == 0);
+    auto const positions = engine.commands_starting_with("position");
+    REQUIRE(positions.size() == 1);
+    CHECK(positions.front() == std::string {"position fen "} + after_e4_fen);
+    service.shutdown();
+    CHECK_FALSE(fake_uci::process_alive(processes[1]));
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("analysis service: shutdown during a blocked handshake joins promptly and later calls do nothing", "[motif-slint-app][analysis]")
+{
+    auto const phase = GENERATE(fake_uci::blocked_phase::uci, fake_uci::blocked_phase::isready);
+    auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body(), phase};
+    auto events = recorder {};
+    auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
+    service.start(make_request(engine, 1));
+    REQUIRE(engine.wait_blocked());
+    auto const processes = engine.process_ids();
+    REQUIRE(processes.size() == 1);
+    auto const begin = std::chrono::steady_clock::now();
+
+    service.shutdown();
+
+    CHECK(std::chrono::steady_clock::now() - begin < cancel_bound);
+    CHECK_FALSE(fake_uci::process_alive(processes.front()));
+    service.start(make_request(engine, 2));
+    service.stop();
+    service.wait_until_idle();
+    service.shutdown();
+    CHECK(engine.process_ids().size() == 1);
+    CHECK(events.events().empty());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("analysis service: destroying the service during a blocked handshake joins promptly", "[motif-slint-app][analysis]")
+{
+    auto const phase = GENERATE(fake_uci::blocked_phase::uci, fake_uci::blocked_phase::isready);
+    auto const engine = fake_uci::fake_engine {fake_uci::wait_for_stop_body(), phase};
+    auto events = recorder {};
+    auto process = pid_t {};
+    auto begin = std::chrono::steady_clock::now();
+    {
+        auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
+        service.start(make_request(engine, 1));
+        REQUIRE(engine.wait_blocked());
+        process = engine.process_ids().front();
+        begin = std::chrono::steady_clock::now();
+    }
+
+    CHECK(std::chrono::steady_clock::now() - begin < cancel_bound);
+    CHECK_FALSE(fake_uci::process_alive(process));
+    CHECK(events.events().empty());
+}
+
 TEST_CASE("analysis service: a burst of engine output is delivered in full and in order for the live session",
           "[motif-slint-app][analysis]")
 {
@@ -343,7 +458,7 @@ class silent_engine
 
 }  // namespace
 
-// The UCI handshake gives up after ten seconds, so these two cases take that long.
+// The UCI handshake gives up after ten seconds, so this case takes that long.
 TEST_CASE("analysis service: an executable that never answers uci ends in a start failure after the handshake timeout",
           "[motif-slint-app][analysis][slow]")
 {
@@ -359,22 +474,6 @@ TEST_CASE("analysis service: an executable that never answers uci ends in a star
     service.wait_until_idle();
     CHECK(events.events().size() == 1);
     service.shutdown();
-}
-
-TEST_CASE("analysis service: shutdown during a hung handshake returns within the handshake timeout", "[motif-slint-app][analysis][slow]")
-{
-    auto const engine = silent_engine {};
-    auto events = recorder {};
-    auto service = analysis_service {[&events](analysis_event event) -> void { events.add(std::move(event)); }};
-    service.start(engine.request(1));
-    std::this_thread::sleep_for(std::chrono::milliseconds {300});
-    auto const begin = std::chrono::steady_clock::now();
-
-    service.shutdown();
-
-    CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds {20});
-    // The superseded start never reports: shutdown silenced its generation.
-    CHECK(events.events().empty());
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

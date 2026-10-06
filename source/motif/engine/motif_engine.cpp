@@ -182,13 +182,22 @@ auto resolve_engine_config(gtl::flat_hash_map<std::string, engine_config> const&
     return iter->second;
 }
 
-auto launch_engine(session& sess, engine_config const& cfg) -> result<void>
+// Mirrors uci::engine::is_ready()'s default timeout, which has to be spelled out
+// to reach the stop-token parameter after it.
+constexpr auto ready_timeout = uci::milliseconds {5000};
+
+auto launch_failure(std::error_code const err) -> error_code
 {
-    if (!sess.engine.start(cfg.path)) {
-        return tl::unexpected {error_code::engine_start_failed};
+    return err == uci::errc::operation_cancelled ? error_code::engine_start_cancelled : error_code::engine_start_failed;
+}
+
+auto launch_engine(session& sess, engine_config const& cfg, std::stop_token const& stop_token) -> result<void>
+{
+    if (auto const started = sess.engine.start(cfg.path, stop_token); !started) {
+        return tl::unexpected {launch_failure(started.error())};
     }
-    if (!sess.engine.is_ready()) {
-        return tl::unexpected {error_code::engine_start_failed};
+    if (auto const ready = sess.engine.is_ready(ready_timeout, stop_token); !ready) {
+        return tl::unexpected {launch_failure(ready.error())};
     }
     return {};
 }
@@ -387,7 +396,7 @@ auto engine_manager::list_engines() -> std::vector<engine_config>
     return result;
 }
 
-auto engine_manager::start_analysis(analysis_params const& params) -> result<std::string>
+auto engine_manager::start_analysis(analysis_params const& params, std::stop_token const& stop_token) -> result<std::string>
 {
     if (auto params_result = validate_params(params); !params_result) {
         return tl::unexpected {params_result.error()};
@@ -410,7 +419,7 @@ auto engine_manager::start_analysis(analysis_params const& params) -> result<std
     sess->start_fen = params.fen.empty() ? std::string {startpos_fen} : params.fen;
     sess->params = params;
 
-    if (auto launch_result = launch_engine(*sess, cfg); !launch_result) {
+    if (auto launch_result = launch_engine(*sess, cfg, stop_token); !launch_result) {
         return tl::unexpected {launch_result.error()};
     }
     if (auto pos_result = configure_position(*sess, params); !pos_result) {

@@ -56,6 +56,11 @@ struct analysis_event
 // the caller's thread. An event is delivered only while its generation is still
 // the latest one asked for, so after start() or stop() returns the old session
 // can no longer reach the sink.
+//
+// A launch that is still in its blocking UCI handshake is cancelled, not waited
+// for, by a newer start(), by stop() and by shutdown(): the worker then finishes
+// once the engine process is terminated and its reader joined, and the cancelled
+// launch reports neither a start failure nor any other event.
 class analysis_service
 {
   public:
