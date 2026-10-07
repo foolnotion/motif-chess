@@ -15,6 +15,7 @@
 #include "motif/slint_app/analysis_host.hpp"
 #include "motif/slint_app/board_host.hpp"
 #include "motif/slint_app/browser_host.hpp"
+#include "motif/slint_app/database_host.hpp"
 #include "motif/slint_app/search_host.hpp"
 #include "snapshot_platform.hpp"
 #include "workspace.h"
@@ -256,6 +257,55 @@ TEST_CASE("workspace host: dismiss error clears real browser board search and wi
     CHECK(test.window->get_board_error_text().empty());
     CHECK(test.window->get_search_error_text().empty());
     CHECK(test.window->get_browser_error_text().empty());
+}
+
+// The notice is an ordinary error-bar message: the production Dismiss clears it
+// together with the other sources' errors, exactly as before this notice existed.
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace host: dismiss clears the busy-request notice together with a board error", "[motif-slint-app]")
+{
+    auto const platform = snapshot_test::use_snapshot_platform();
+    auto test = workspace_host_fixture {};
+    REQUIRE(test.runner.run_scratch() == motif::slint_app::async_workspace_runner::start_outcome::accepted);
+    test.drain_workspace();
+    test.settle_browser();
+    test.window->invoke_board_play_san("not-a-move");
+    REQUIRE_FALSE(test.window->get_board_error_text().empty());
+
+    auto calls = std::vector<std::string> {};
+    motif::slint_app::register_database_callbacks(
+        *test.window,
+        []() -> motif::slint_app::workspace_activity { return {.search_busy = true}; },
+        test.confirmation,
+        motif::slint_app::database_actions {
+            .create = [&calls](std::string const&, std::string const&) -> bool
+            {
+                calls.emplace_back("create");
+                return true;
+            },
+            .open = [&calls](std::string const&) -> bool
+            {
+                calls.emplace_back("open");
+                return true;
+            },
+            .scratch = [&calls]() -> bool
+            {
+                calls.emplace_back("scratch");
+                return true;
+            },
+            .close = [&calls]() -> void { calls.emplace_back("close"); },
+        });
+
+    test.window->invoke_scratch_requested();
+    CHECK(calls.empty());
+    CHECK(std::string_view {test.window->get_error_text().data(), test.window->get_error_text().size()}
+          == motif::slint_app::request_busy_notice);
+    CHECK_FALSE(test.window->get_board_error_text().empty());
+
+    test.window->invoke_dismiss_error();
+    CHECK(test.window->get_error_text().empty());
+    CHECK(test.window->get_board_error_text().empty());
 }
 
 TEST_CASE("workspace host: preset and notation callbacks persist preferences", "[motif-slint-app]")

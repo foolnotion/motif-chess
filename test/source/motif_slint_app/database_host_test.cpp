@@ -41,6 +41,13 @@ enum class action : std::uint8_t
 
 constexpr auto every_action = std::array {action::create, action::open, action::recent, action::scratch, action::close};
 
+// A request made while busy says what the host publishes (motif::slint_app::
+// request_busy_notice). A confirmation accepted after the workspace became busy
+// keeps its own, deliberately different, wording, pinned here verbatim.
+using motif::slint_app::request_busy_notice;
+constexpr auto accepted_busy_notice =
+    std::string_view {"Nothing was changed: the workspace became busy while the confirmation was open. Try again when it is idle."};
+
 // The production registrar wired to a real window and board, with fake
 // workspace actions that record what they were asked to do.
 struct host
@@ -181,20 +188,82 @@ TEST_CASE("database host: an edited board holds the action until the user accept
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("database host: every action is rejected under each busy condition and changes nothing", "[motif-slint-app][host]")
+TEST_CASE("database host: every action is rejected under each busy condition, changes nothing and says why", "[motif-slint-app][host]")
 {
     auto const state = snapshot_test::use_snapshot_platform();
     for (auto const& busy : busy_conditions) {
         for (auto const which : every_action) {
             auto test = host {};
+            test.window->set_create_path_text("kept create path");
+            test.window->set_create_name_text("kept create name");
+            test.window->set_open_path_text("kept open path");
             test.activity = busy;
 
             test.invoke(which);
 
             CHECK(test.calls.empty());
             CHECK_FALSE(test.window->get_confirm_visible());
+            CHECK_FALSE(test.confirmation.pending());
             CHECK_FALSE(test.window->get_busy());
+            CHECK(test.window->get_create_path_text() == "kept create path");
+            CHECK(test.window->get_create_name_text() == "kept create name");
+            CHECK(test.window->get_open_path_text() == "kept open path");
+            CHECK(test.error() == request_busy_notice);
+
+            // The rejected request is not kept: once idle nothing starts by itself.
+            test.activity = workspace_activity {};
+            CHECK(test.calls.empty());
+            test.window->set_error_text("");
+            test.invoke(which);
+            CHECK(test.calls.size() == 1);
+            CHECK(test.error().empty());
         }
+    }
+}
+
+// An edited board would hold the action behind a confirmation; a busy request
+// is turned away before that dialog is ever shown.
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("database host: a busy request on an edited board shows the notice and no confirmation", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    for (auto const& busy : busy_conditions) {
+        for (auto const which : every_action) {
+            auto test = host {};
+            test.edit_board();
+            test.activity = busy;
+
+            test.invoke(which);
+
+            CHECK_FALSE(test.window->get_confirm_visible());
+            CHECK_FALSE(test.confirmation.pending());
+            CHECK(test.calls.empty());
+            CHECK(test.window->get_board_edited());
+            CHECK(test.error() == request_busy_notice);
+        }
+    }
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("database host: an idle request publishes no busy notice", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    for (auto const which : every_action) {
+        auto plain = host {};
+        plain.invoke(which);
+        CHECK(plain.calls.size() == 1);
+        CHECK(plain.error().empty());
+
+        auto edited = host {};
+        edited.edit_board();
+        edited.invoke(which);
+        CHECK(edited.window->get_confirm_visible());
+        CHECK(edited.error().empty());
+        edited.window->invoke_confirm_accepted();
+        CHECK(edited.calls.size() == 1);
+        CHECK(edited.error().empty());
     }
 }
 
@@ -220,7 +289,7 @@ TEST_CASE("database host: accepting after the workspace became busy does nothing
             CHECK_FALSE(test.window->get_confirm_visible());
             CHECK_FALSE(test.confirmation.pending());
             CHECK_FALSE(test.window->get_busy());
-            CHECK(test.error().contains("became busy"));
+            CHECK(test.error() == accepted_busy_notice);
             CHECK(test.window->get_board_edited());
 
             // Nothing is left half-armed: once idle again the same request works.
