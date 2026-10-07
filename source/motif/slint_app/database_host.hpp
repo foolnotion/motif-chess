@@ -36,14 +36,14 @@ struct database_actions
 // workspace became busy is different and stays private to the host.
 inline constexpr auto request_busy_notice = std::string_view {"Nothing was changed: the workspace is busy. Try again when it is idle."};
 
-// Create, open, recent, scratch and close. Each waits for the workspace to be
-// idle when it is requested; a request made while it is busy does nothing
-// except tell the user so in the error bar, and is not kept. Then comes the
-// replace confirmation when an edited or unsaved game is on the board. The
-// confirmation is a separate moment: an import can start while the dialog is
-// open, so the gate is checked again when the user accepts. A request that
-// became busy in the meantime does nothing except tell the user why, in its own
-// words, in the error bar; the rejected request is not kept.
+// Create, open, recent, scratch and close run only when the workspace is idle
+// at request time. A busy request does nothing except tell the user in the error
+// bar, and is not kept. Then comes the replace confirmation when an edited or
+// unsaved game is on the board. The confirmation is a separate moment: an
+// import can start while the dialog is open, so the gate is checked again when
+// the user accepts. A request that became busy in the meantime does nothing
+// except tell the user why, in its own words, in the error bar; the rejected
+// request is not kept.
 void register_database_callbacks(WorkspaceWindow& window,
                                  activity_probe const& activity,
                                  replace_controller& confirmation,

@@ -20,7 +20,7 @@
 // The element-query API is gated behind two feature macros in its header, but the
 // Slint library this project builds against is compiled with them: the dev
 // shell's Slint carries the TESTING feature. The queries read the item tree, so
-// they work on the headless snapshot platform. Only this file uses them.
+// they work on the headless snapshot platform.
 #ifndef SLINT_FEATURE_TESTING
 #    define SLINT_FEATURE_TESTING
 #endif
