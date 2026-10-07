@@ -43,6 +43,17 @@ auto when_still_idle(WorkspaceWindow& window, activity_probe activity, std::func
     };
 }
 
+// The gate as decided when the user asks. This is the one request-time
+// rejection path of the five database callbacks: a busy workspace runs nothing,
+// keeps nothing queued, and the error bar says why.
+template<typename Request>
+void request_when_idle(WorkspaceWindow& window, activity_probe const& activity, Request&& request)
+{
+    if (!run_when_idle(activity(), std::forward<Request>(request))) {
+        window.set_error_text(shared_string(request_busy_notice));
+    }
+}
+
 }  // namespace
 
 auto trim_whitespace(std::string_view const value) -> std::string_view
@@ -64,86 +75,91 @@ void register_database_callbacks(WorkspaceWindow& window,
     window.on_create_requested(
         [&window, &confirmation, activity, shared](slint::SharedString const& dir_path, slint::SharedString const& name) -> void
         {
-            (void)run_when_idle(activity(),
-                                [&]() -> void
-                                {
-                                    confirmation.request("Create database",
-                                                         when_still_idle(window,
-                                                                         activity,
-                                                                         [&window, shared, dir_path, name]() -> void
-                                                                         {
-                                                                             window.set_error_text("");
-                                                                             auto const trimmed_path = std::string {text_of(dir_path)};
-                                                                             auto const trimmed_name = std::string {text_of(name)};
-                                                                             window.set_create_path_text(shared_string(trimmed_path));
-                                                                             window.set_create_name_text(shared_string(trimmed_name));
-                                                                             if (shared->create(trimmed_path, trimmed_name)) {
-                                                                                 window.set_busy(true);
-                                                                             }
-                                                                         }));
-                                });
+            request_when_idle(window,
+                              activity,
+                              [&]() -> void
+                              {
+                                  confirmation.request("Create database",
+                                                       when_still_idle(window,
+                                                                       activity,
+                                                                       [&window, shared, dir_path, name]() -> void
+                                                                       {
+                                                                           window.set_error_text("");
+                                                                           auto const trimmed_path = std::string {text_of(dir_path)};
+                                                                           auto const trimmed_name = std::string {text_of(name)};
+                                                                           window.set_create_path_text(shared_string(trimmed_path));
+                                                                           window.set_create_name_text(shared_string(trimmed_name));
+                                                                           if (shared->create(trimmed_path, trimmed_name)) {
+                                                                               window.set_busy(true);
+                                                                           }
+                                                                       }));
+                              });
         });
     window.on_open_requested(
         [&window, &confirmation, activity, shared](slint::SharedString const& dir_path) -> void
         {
-            (void)run_when_idle(activity(),
-                                [&]() -> void
-                                {
-                                    confirmation.request("Open database",
-                                                         when_still_idle(window,
-                                                                         activity,
-                                                                         [&window, shared, dir_path]() -> void
-                                                                         {
-                                                                             window.set_error_text("");
-                                                                             auto const trimmed_path = std::string {text_of(dir_path)};
-                                                                             window.set_open_path_text(shared_string(trimmed_path));
-                                                                             if (shared->open(trimmed_path)) {
-                                                                                 window.set_busy(true);
-                                                                             }
-                                                                         }));
-                                });
+            request_when_idle(window,
+                              activity,
+                              [&]() -> void
+                              {
+                                  confirmation.request("Open database",
+                                                       when_still_idle(window,
+                                                                       activity,
+                                                                       [&window, shared, dir_path]() -> void
+                                                                       {
+                                                                           window.set_error_text("");
+                                                                           auto const trimmed_path = std::string {text_of(dir_path)};
+                                                                           window.set_open_path_text(shared_string(trimmed_path));
+                                                                           if (shared->open(trimmed_path)) {
+                                                                               window.set_busy(true);
+                                                                           }
+                                                                       }));
+                              });
         });
     window.on_recent_activated(
         [&window, &confirmation, activity, shared](slint::SharedString const& path) -> void
         {
-            (void)run_when_idle(activity(),
-                                [&]() -> void
-                                {
-                                    confirmation.request("Open database",
-                                                         when_still_idle(window,
-                                                                         activity,
-                                                                         [&window, shared, path]() -> void
-                                                                         {
-                                                                             window.set_error_text("");
-                                                                             if (shared->open(std::string {text_of(path)})) {
-                                                                                 window.set_busy(true);
-                                                                             }
-                                                                         }));
-                                });
+            request_when_idle(window,
+                              activity,
+                              [&]() -> void
+                              {
+                                  confirmation.request("Open database",
+                                                       when_still_idle(window,
+                                                                       activity,
+                                                                       [&window, shared, path]() -> void
+                                                                       {
+                                                                           window.set_error_text("");
+                                                                           if (shared->open(std::string {text_of(path)})) {
+                                                                               window.set_busy(true);
+                                                                           }
+                                                                       }));
+                              });
         });
     window.on_scratch_requested(
         [&window, &confirmation, activity, shared]() -> void
         {
-            (void)run_when_idle(activity(),
-                                [&]() -> void
-                                {
-                                    confirmation.request("Open scratch database",
-                                                         when_still_idle(window,
-                                                                         activity,
-                                                                         [&window, shared]() -> void
-                                                                         {
-                                                                             window.set_error_text("");
-                                                                             if (shared->scratch()) {
-                                                                                 window.set_busy(true);
-                                                                             }
-                                                                         }));
-                                });
+            request_when_idle(window,
+                              activity,
+                              [&]() -> void
+                              {
+                                  confirmation.request("Open scratch database",
+                                                       when_still_idle(window,
+                                                                       activity,
+                                                                       [&window, shared]() -> void
+                                                                       {
+                                                                           window.set_error_text("");
+                                                                           if (shared->scratch()) {
+                                                                               window.set_busy(true);
+                                                                           }
+                                                                       }));
+                              });
         });
     window.on_close_requested(
         [&window, &confirmation, activity, shared]() -> void
         {
-            (void)run_when_idle(
-                activity(),
+            request_when_idle(
+                window,
+                activity,
                 [&]() -> void
                 { confirmation.request("Close database", when_still_idle(window, activity, [shared]() -> void { shared->close(); })); });
         });

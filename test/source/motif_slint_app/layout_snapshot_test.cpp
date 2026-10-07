@@ -5,11 +5,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -18,6 +21,25 @@
 #include <slint-platform.h>
 #include <slint.h>
 
+// The element-query API sits behind two feature macros in its header; the dev
+// shell's Slint is built with them (see browse_buttons_test.cpp).
+#ifndef SLINT_FEATURE_TESTING
+#    define SLINT_FEATURE_TESTING
+#endif
+#ifndef SLINT_FEATURE_EXPERIMENTAL
+#    define SLINT_FEATURE_EXPERIMENTAL
+#endif
+#include <slint-testing.h>
+
+#include "manual_event_loop.hpp"
+#include "motif/slint_app/activity_gate.hpp"
+#include "motif/slint_app/analysis_host.hpp"
+#include "motif/slint_app/board_host.hpp"
+#include "motif/slint_app/browser_host.hpp"
+#include "motif/slint_app/database_host.hpp"
+#include "motif/slint_app/replace_controller.hpp"
+#include "motif/slint_app/search_host.hpp"
+#include "motif/slint_app/workspace_host.hpp"
 #include "snapshot_platform.hpp"
 #include "workspace.h"
 
@@ -2268,6 +2290,178 @@ TEST_CASE("workspace layout: a new result scrolls the table to the top and revea
     };
     CHECK(selection_pixels(top) < selection_pixels(revealed) - 1'000);
     CHECK(selection_pixels(revealed) > 1'000);
+}
+
+// ---------------------------------------------------------------------------
+// Busy-workspace notice (Story 13.7)
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+using motif::slint_app::request_busy_notice;
+
+// A directory under the system temporary directory that is gone again at scope end.
+struct scratch_directory
+{
+    explicit scratch_directory(std::string const& name)
+        : path {std::filesystem::temp_directory_path() / name}
+    {
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+
+    scratch_directory(scratch_directory const&) = delete;
+    auto operator=(scratch_directory const&) -> scratch_directory& = delete;
+    scratch_directory(scratch_directory&&) = delete;
+    auto operator=(scratch_directory&&) -> scratch_directory& = delete;
+
+    ~scratch_directory()
+    {
+        auto ignored = std::error_code {};
+        std::filesystem::remove_all(path, ignored);
+    }
+
+    std::filesystem::path path;
+};
+
+auto labelled_elements(slint::ComponentHandle<WorkspaceWindow> const& window, std::string_view const label)
+    -> std::vector<slint::testing::ElementHandle>
+{
+    auto found = std::vector<slint::testing::ElementHandle> {};
+    for (auto const& item : slint::testing::ElementHandle::find_by_accessible_label(window, label)) {
+        found.push_back(item);
+    }
+    return found;
+}
+
+auto error_text_of(WorkspaceWindow const& window) -> std::string
+{
+    auto const text = window.get_error_text();
+    return std::string {std::string_view {text.data(), text.size()}};
+}
+
+// An element must be drawn inside the window it belongs to.
+void check_inside_window(slint::testing::ElementHandle const& item, analysis_size const size)
+{
+    auto const position = item.absolute_position();
+    auto const extent = item.size();
+    CHECK(extent.width > 0.F);
+    CHECK(extent.height > 0.F);
+    CHECK(position.x >= 0.F);
+    CHECK(position.y >= 0.F);
+    CHECK(position.x + extent.width <= static_cast<float>(size.width));
+    CHECK(position.y + extent.height <= static_cast<float>(size.height));
+}
+
+}  // namespace
+
+// The database callbacks and Dismiss are the production registrations over a
+// real window and the real hosts; only the workspace actions behind Create,
+// Open, Scratch and Close are recorded fakes.
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("workspace layout: a request made while the workspace is busy shows a notice the Dismiss button removes at narrow and wide sizes",
+          "[motif-slint-app][layout][notice]")
+{
+    for (auto const size : {narrow_analysis, wide_analysis}) {
+        INFO("size " << size.width << "x" << size.height);
+        auto const state = use_snapshot_platform(size.width, size.height);
+        auto window = make_loaded_workspace({});
+        window->set_board_loaded(true);
+
+        // The same registrations main() performs: the database callbacks under
+        // test and the workspace callbacks that own Dismiss, over the real
+        // service and the real workspace, browser, board and search hosts.
+        auto const config_root = scratch_directory {"motif-notice-layout-" + std::to_string(size.width)};
+        auto loop = test_support::manual_event_loop {};
+        auto service = motif::slint_app::workspace_service {config_root.path / "config.json"};
+        auto board = motif::slint_app::async_board_runner {window};
+        auto browser = motif::slint_app::async_browser_runner {window, loop.environment()};
+        auto search = motif::slint_app::async_search_runner {window, loop.environment()};
+        auto analysis = motif::slint_app::async_analysis_runner {
+            window, service, loop.environment(), [&board]() -> std::optional<std::string> { return board.current_fen(); }};
+        auto runner = motif::slint_app::async_workspace_runner {service, window, browser, board, search, analysis, loop.environment()};
+        board.attach();
+        auto confirmation = motif::slint_app::make_replace_confirmation(window, board);
+        auto activity = motif::slint_app::workspace_activity {.search_busy = true};
+        auto calls = std::vector<std::string> {};
+        motif::slint_app::register_database_callbacks(
+            *window,
+            [&activity]() -> motif::slint_app::workspace_activity { return activity; },
+            confirmation,
+            motif::slint_app::database_actions {
+                .create = [&calls](std::string const&, std::string const&) -> bool
+                {
+                    calls.emplace_back("create");
+                    return true;
+                },
+                .open = [&calls](std::string const&) -> bool
+                {
+                    calls.emplace_back("open");
+                    return true;
+                },
+                .scratch = [&calls]() -> bool
+                {
+                    calls.emplace_back("scratch");
+                    return true;
+                },
+                .close = [&calls]() -> void { calls.emplace_back("close"); },
+            });
+        motif::slint_app::register_workspace_callbacks(*window, service, runner, browser, board, search);
+        state->window_adapter->render();
+        state->window_adapter->render();
+        auto const quiet = render_at_size(*state, size.width);
+        REQUIRE(labelled_elements(window, request_busy_notice).empty());
+
+        auto const requests = std::array<std::pair<char const*, std::function<void()>>, 5> {{
+            {"create", [&window]() -> void { window->invoke_create_requested("/data/dbs", "club"); }},
+            {"open", [&window]() -> void { window->invoke_open_requested("/data/dbs/club"); }},
+            {"recent", [&window]() -> void { window->invoke_recent_activated("/data/dbs/recent"); }},
+            {"scratch", [&window]() -> void { window->invoke_scratch_requested(); }},
+            {"close", [&window]() -> void { window->invoke_close_requested(); }},
+        }};
+        for (auto const& [name, request] : requests) {
+            INFO("request " << name);
+            request();
+            state->window_adapter->render();
+            state->window_adapter->render();
+
+            // The notice is on screen, inside the window, with a Dismiss button beside it.
+            auto const notice = labelled_elements(window, request_busy_notice);
+            REQUIRE(notice.size() == 1);
+            check_inside_window(notice.front(), size);
+            auto const dismiss = labelled_elements(window, "Dismiss");
+            REQUIRE(dismiss.size() == 1);
+            check_inside_window(dismiss.front(), size);
+            CHECK(notice.front().absolute_position().x + notice.front().size().width <= dismiss.front().absolute_position().x + 0.5F);
+            CHECK(differs(quiet, render_at_size(*state, size.width)));
+            CHECK(calls.empty());
+            CHECK(error_text_of(*window) == request_busy_notice);
+
+            // Pressing Dismiss with the mouse removes it and restores the quiet bar.
+            auto const& button = dismiss.front();
+            click_at(*window,
+                     slint::LogicalPosition {slint::Point<float> {
+                         .x = button.absolute_position().x + (button.size().width / 2.F),
+                         .y = button.absolute_position().y + (button.size().height / 2.F),
+                     }});
+            state->window_adapter->render();
+            state->window_adapter->render();
+            CHECK(error_text_of(*window).empty());
+            CHECK(labelled_elements(window, request_busy_notice).empty());
+            CHECK(labelled_elements(window, "Dismiss").empty());
+            CHECK_FALSE(differs(quiet, render_at_size(*state, size.width)));
+        }
+
+        // Existing behaviour is untouched: once idle the same request goes through, silently.
+        activity = motif::slint_app::workspace_activity {};
+        window->invoke_open_requested("/data/dbs/club");
+        state->window_adapter->render();
+        CHECK(calls == std::vector<std::string> {"open"});
+        CHECK(labelled_elements(window, request_busy_notice).empty());
+        CHECK(error_text_of(*window).empty());
+    }
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
