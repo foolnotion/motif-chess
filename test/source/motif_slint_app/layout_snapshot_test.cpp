@@ -2356,24 +2356,25 @@ void check_inside_window(slint::testing::ElementHandle const& item, analysis_siz
 
 }  // namespace
 
-// The database callbacks and Dismiss are the production registrations over a
-// real window and the real hosts; only the workspace actions behind Create,
-// Open, Scratch and Close are recorded fakes.
+// The database callbacks and Dismiss are the production registrations exercised
+// here over real hosts; workspace actions behind the database callbacks are
+// recorded fakes, and the activity probe is supplied by the test.
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("workspace layout: a request made while the workspace is busy shows a notice the Dismiss button removes at narrow and wide sizes",
           "[motif-slint-app][layout][notice]")
 {
+    static auto scratch_suffix = std::size_t {0};
     for (auto const size : {narrow_analysis, wide_analysis}) {
         INFO("size " << size.width << "x" << size.height);
         auto const state = use_snapshot_platform(size.width, size.height);
         auto window = make_loaded_workspace({});
         window->set_board_loaded(true);
 
-        // The same registrations main() performs: the database callbacks under
-        // test and the workspace callbacks that own Dismiss, over the real
-        // service and the real workspace, browser, board and search hosts.
-        auto const config_root = scratch_directory {"motif-notice-layout-" + std::to_string(size.width)};
+        // The database and workspace callback registrations are exercised over
+        // real hosts; the activity probe and database actions are test doubles.
+        auto const config_root =
+            scratch_directory {"motif-notice-layout-" + std::to_string(size.width) + "-" + std::to_string(++scratch_suffix)};
         auto loop = test_support::manual_event_loop {};
         auto service = motif::slint_app::workspace_service {config_root.path / "config.json"};
         auto board = motif::slint_app::async_board_runner {window};
@@ -2385,6 +2386,7 @@ TEST_CASE("workspace layout: a request made while the workspace is busy shows a 
         board.attach();
         auto confirmation = motif::slint_app::make_replace_confirmation(window, board);
         auto activity = motif::slint_app::workspace_activity {.search_busy = true};
+        window->set_search_busy(true);
         auto calls = std::vector<std::string> {};
         motif::slint_app::register_database_callbacks(
             *window,

@@ -245,6 +245,27 @@ TEST_CASE("database host: a busy request on an edited board shows the notice and
     }
 }
 
+TEST_CASE("database host: a busy second request leaves an existing confirmation pending", "[motif-slint-app][host]")
+{
+    auto const state = snapshot_test::use_snapshot_platform();
+    auto test = host {};
+    test.edit_board();
+    test.invoke(action::open);
+    REQUIRE(test.confirmation.pending());
+    test.activity = workspace_activity {.search_busy = true};
+
+    test.invoke(action::scratch);
+
+    CHECK(test.confirmation.pending());
+    CHECK(test.window->get_confirm_visible());
+    CHECK(test.calls.empty());
+    CHECK(test.error() == request_busy_notice);
+    test.window->invoke_confirm_accepted();
+    CHECK(test.error() == accepted_busy_notice);
+    CHECK(test.calls.empty());
+}
+
+// Catch2 assertion macros inflate this test's measured cognitive complexity.
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("database host: an idle request publishes no busy notice", "[motif-slint-app][host]")
