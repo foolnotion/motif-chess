@@ -30,7 +30,7 @@ fi
 output_directory=$(dirname "$output_dmg")
 mkdir -p "$output_directory"
 staging_directory=$(mktemp -d "${TMPDIR:-/tmp}/motif-chess-dmg.XXXXXX")
-trap 'rm -rf "$staging_directory"' EXIT
+trap 'chmod -R u+w "$staging_directory"; rm -rf "$staging_directory"' EXIT
 
 ditto "$input_app" "$staging_directory/$(basename "$input_app")"
 rm -f "$output_dmg"
