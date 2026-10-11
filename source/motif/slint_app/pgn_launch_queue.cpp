@@ -52,29 +52,34 @@ auto pgn_launch_queue::from_arguments(std::span<std::string const> const argumen
 {
     auto queue = pgn_launch_queue {};
     for (auto const& argument : arguments) {
-        if (argument.empty()) {
-            queue.rejected_.push_back({.argument = argument, .reason = "empty path"});
-            continue;
-        }
-
-        auto const candidate = std::filesystem::path {argument};
-        if (!has_pgn_extension(candidate)) {
-            queue.rejected_.push_back({.argument = argument, .reason = "not a .pgn file"});
-            continue;
-        }
-
-        std::error_code fs_error;
-        auto absolute = std::filesystem::absolute(candidate, fs_error);
-        if (fs_error) {
-            absolute = candidate;
-        }
-        if (auto reason = check_regular_file(absolute)) {
-            queue.rejected_.push_back({.argument = argument, .reason = std::move(*reason)});
-            continue;
-        }
-        queue.paths_.push_back(std::move(absolute));
+        queue.enqueue(argument);
     }
     return queue;
+}
+
+void pgn_launch_queue::enqueue(std::string argument)
+{
+    if (argument.empty()) {
+        rejected_.push_back({.argument = std::move(argument), .reason = "empty path"});
+        return;
+    }
+
+    auto const candidate = std::filesystem::path {argument};
+    if (!has_pgn_extension(candidate)) {
+        rejected_.push_back({.argument = std::move(argument), .reason = "not a .pgn file"});
+        return;
+    }
+
+    std::error_code fs_error;
+    auto absolute = std::filesystem::absolute(candidate, fs_error);
+    if (fs_error) {
+        absolute = candidate;
+    }
+    if (auto reason = check_regular_file(absolute)) {
+        rejected_.push_back({.argument = std::move(argument), .reason = std::move(*reason)});
+        return;
+    }
+    paths_.push_back(std::move(absolute));
 }
 
 auto pgn_launch_queue::rejection_message() const -> std::string

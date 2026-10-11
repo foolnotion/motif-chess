@@ -10,6 +10,10 @@ project(
     LANGUAGES CXX
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  enable_language(OBJCXX)
+endif()
+
 option(
     motif_ENABLE_X86_64_V3
     "Enable -march=x86-64-v3 for x86_64 builds"

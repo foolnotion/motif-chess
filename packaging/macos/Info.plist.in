@@ -31,17 +31,18 @@
             <array>
                 <string>application/x-chess-pgn</string>
             </array>
+            <key>CFBundleTypeName</key>
+            <string>Portable Game Notation</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
             <key>LSItemContentTypes</key>
             <array>
                 <string>com.apple.chess.pgn</string>
             </array>
             <key>LSHandlerRank</key>
             <string>Owner</string>
-            <key>CFBundleTypeName</key>
-            <string>Portable Game Notation</string>
-            <key>CFBundleTypeRole</key>
-            <string>Editor</string>
         </dict>
     </array>
+
 </dict>
 </plist>

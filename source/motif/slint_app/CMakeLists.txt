@@ -49,6 +49,13 @@ add_executable(motif_slint_app
     nfd_file_picker.cpp
     picker_host.cpp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_sources(motif_slint_app PRIVATE macos_open_file_bridge.mm)
+    target_link_libraries(motif_slint_app PRIVATE "-framework AppKit")
+else()
+    target_sources(motif_slint_app PRIVATE macos_open_file_bridge.cpp)
+endif()
 # Pick a deliberate Qt-free desktop style instead of relying on native's linux fallback.
 set_property(GLOBAL PROPERTY SLINT_STYLE "cosmic")
 slint_target_sources(motif_slint_app ui/workspace.slint)
