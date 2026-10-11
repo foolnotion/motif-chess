@@ -23,6 +23,29 @@
 #include "motif/slint_app/workspace_host.hpp"
 #include "snapshot_platform.hpp"
 
+struct scoped_sigpipe_ignore
+{
+    scoped_sigpipe_ignore()
+    {
+        struct sigaction action {};
+
+        action.sa_handler = SIG_IGN;
+        static_cast<void>(sigemptyset(&action.sa_mask));
+        REQUIRE(sigaction(SIGPIPE, &action, &previous_) == 0);
+    }
+
+    scoped_sigpipe_ignore(scoped_sigpipe_ignore const&) = delete;
+    auto operator=(scoped_sigpipe_ignore const&) -> scoped_sigpipe_ignore& = delete;
+
+    scoped_sigpipe_ignore(scoped_sigpipe_ignore&&) = delete;
+    auto operator=(scoped_sigpipe_ignore&&) -> scoped_sigpipe_ignore& = delete;
+
+    ~scoped_sigpipe_ignore() { static_cast<void>(sigaction(SIGPIPE, &previous_, nullptr)); }
+
+  private:
+    struct sigaction previous_ {};
+};
+
 namespace
 {
 
@@ -124,6 +147,7 @@ TEST_CASE("activity gate: concrete idle composition has independent flags", "[mo
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("activity gate: FIFO import maps only the concrete import flag", "[motif-slint-app]")
 {
+    auto const ignored_sigpipe = scoped_sigpipe_ignore {};
     auto const platform = snapshot_test::use_snapshot_platform();
     auto loop = test_support::manual_event_loop {};
     auto window = WorkspaceWindow::create();
