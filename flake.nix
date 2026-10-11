@@ -44,7 +44,14 @@
           };
           inherit (pkgs.llvmPackages_21) stdenv;
           mkShell = pkgs.mkShell.override { inherit stdenv; };
-          slint-with-mcp = pkgs.slint.overrideAttrs (old: {
+          # Nix's Darwin CMake hook does not rewrite the Rust-built Slint dylib's
+          # install name. Consumers otherwise retain its ephemeral build path.
+          slint-fixed = pkgs.slint.overrideAttrs (old: {
+            postFixup = (old.postFixup or "") + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              install_name_tool -id "$out/lib/libslint_cpp.dylib" "$out/lib/libslint_cpp.dylib"
+            '';
+          });
+          slint-with-mcp = slint-fixed.overrideAttrs (old: {
             cmakeFlags = (old.cmakeFlags or [ ]) ++ [
               "-DSLINT_FEATURE_MCP=ON"
               "-DSLINT_FEATURE_SYSTEM_TESTING=ON"
@@ -193,7 +200,7 @@
             buildInputs =
               old.buildInputs
               ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [
-                pkgs.slint
+                slint-fixed
                 nfd-portal
               ];
           });
