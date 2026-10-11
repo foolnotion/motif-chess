@@ -17,6 +17,7 @@
 #include "motif/slint_app/browser_host.hpp"
 #include "motif/slint_app/database_host.hpp"
 #include "motif/slint_app/import_service.hpp"
+#include "motif/slint_app/macos_open_file_bridge.hpp"
 #include "motif/slint_app/nfd_file_picker.hpp"
 #include "motif/slint_app/pgn_launch_queue.hpp"
 #include "motif/slint_app/picker_host.hpp"
@@ -255,6 +256,22 @@ auto launch_arguments(std::span<char* const> const raw) -> std::vector<std::stri
     return arguments;
 }
 
+void report_launch_rejections(WorkspaceWindow& window, motif::slint_app::pgn_launch_queue const& queue)
+{
+    if (auto const rejection = queue.rejection_message(); !rejection.empty()) {
+        fmt::print(stderr, "warning: {}\n", rejection);
+        window.set_error_text(shared_string(rejection));
+    }
+}
+
+void start_launch_queue_timer(import_context& context, slint::Timer& timer)
+{
+    publish_launch_queue(context.window, context.launch_queue);
+    report_launch_rejections(context.window, context.launch_queue);
+    if (!context.launch_queue.empty() && !timer.running()) {
+        timer.start(slint::TimerMode::Repeated, import_poll_interval, [&context, &timer]() -> void { pump_launch_queue(context, timer); });
+    }
+}
 }  // namespace
 
 auto main(int const argc, char** const argv) -> int
@@ -351,15 +368,18 @@ auto main(int const argc, char** const argv) -> int
     // reported in the error bar and on stderr; valid ones wait for a database
     // and then follow the normal import flow.
     publish_launch_queue(*window, launch_queue);
-    if (auto const rejection = launch_queue.rejection_message(); !rejection.empty()) {
-        fmt::print(stderr, "warning: {}\n", rejection);
-        window->set_error_text(shared_string(rejection));
-    }
-    if (!launch_queue.empty()) {
-        launch_timer.start(slint::TimerMode::Repeated,
-                           import_poll_interval,
-                           [&import_context_value, &launch_timer]() -> void { pump_launch_queue(import_context_value, launch_timer); });
-    }
+    start_launch_queue_timer(import_context_value, launch_timer);
+
+    motif::slint_app::install_macos_open_file_handler(
+        [&import_context_value, &launch_timer](std::string path) -> void
+        {
+            slint::invoke_from_event_loop(
+                [&import_context_value, &launch_timer, path = std::move(path)]() mutable -> void
+                {
+                    import_context_value.launch_queue.enqueue(std::move(path));
+                    start_launch_queue_timer(import_context_value, launch_timer);
+                });
+        });
 
     motif::slint_app::install_close_guard(*window, board, confirmation);
 

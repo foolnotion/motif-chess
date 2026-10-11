@@ -53,9 +53,10 @@ auto write_games(std::filesystem::path const& path, int const count, std::string
 
 auto wait_until_idle(motif::slint_app::import_service const& importer) -> motif::slint_app::import_snapshot
 {
+    constexpr auto poll_interval = std::chrono::milliseconds {10};
     auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds {20};
     while (importer.active() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds {10});
+        std::this_thread::sleep_for(poll_interval);
     }
     return importer.snapshot();
 }
@@ -100,8 +101,21 @@ TEST_CASE("pgn_launch_queue: relative paths are resolved against the working dir
     REQUIRE(queue.pending() == 1);
     auto const resolved = queue.take_next();
     REQUIRE(resolved.has_value());
-    REQUIRE(resolved->is_absolute());
-    REQUIRE(resolved->filename() == "rel.pgn");
+    REQUIRE(resolved->is_absolute());  // NOLINT(bugprone-unchecked-optional-access)
+    REQUIRE(resolved->filename() == "rel.pgn");  // NOLINT(bugprone-unchecked-optional-access)
+}
+
+TEST_CASE("pgn_launch_queue: a valid document received after startup queues for import", "[motif-slint-app][launch]")
+{
+    tmp_dir const tmp {"late"};
+    auto const pgn = touch(tmp.path / "from_finder.pgn");
+    auto queue = motif::slint_app::pgn_launch_queue {};
+
+    queue.enqueue(pgn.string());
+
+    REQUIRE(queue.pending() == 1);
+    REQUIRE(queue.rejected().empty());
+    REQUIRE(queue.take_next() == pgn);
 }
 
 TEST_CASE("pgn_launch_queue: invalid arguments are reported, never silently dropped", "[motif-slint-app][launch]")
@@ -159,6 +173,7 @@ TEST_CASE("pgn_launch_queue: clear drops pending paths but keeps rejection histo
     REQUIRE(queue.clear() == 0);
 }
 
+// NOLINTBEGIN(readability-function-cognitive-complexity)
 TEST_CASE("pgn_launch_queue: queued paths wait for a database, then import through import_service", "[motif-slint-app][launch]")
 {
     tmp_dir const tmp {"import_flow"};
@@ -186,3 +201,5 @@ TEST_CASE("pgn_launch_queue: queued paths wait for a database, then import throu
     REQUIRE(count.has_value());
     REQUIRE(*count == 5);
 }
+
+// NOLINTEND(readability-function-cognitive-complexity)

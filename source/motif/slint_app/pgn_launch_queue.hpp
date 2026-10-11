@@ -30,6 +30,10 @@ class pgn_launch_queue
     // recorded in rejected() with a reason instead of being dropped.
     [[nodiscard]] static auto from_arguments(std::span<std::string const> arguments) -> pgn_launch_queue;
 
+    // Validates and queues one path received after startup, such as a macOS
+    // open-document Apple event. Invalid paths remain inspectable as rejected().
+    void enqueue(std::string argument);
+
     [[nodiscard]] auto pending() const noexcept -> std::size_t { return paths_.size(); }
 
     [[nodiscard]] auto empty() const noexcept -> bool { return paths_.empty(); }
