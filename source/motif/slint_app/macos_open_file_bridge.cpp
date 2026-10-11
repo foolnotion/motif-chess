@@ -3,7 +3,7 @@
 namespace motif::slint_app
 {
 
-void install_macos_open_file_handler(macos_open_file_handler const& handler)  // NOLINT(misc-use-internal-linkage)
+void install_macos_open_file_handler(macos_open_file_handler handler)  // NOLINT(misc-use-internal-linkage,performance-unnecessary-value-param)
 {
     (void)handler;
 }

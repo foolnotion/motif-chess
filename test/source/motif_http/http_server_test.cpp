@@ -1251,7 +1251,7 @@ TEST_CASE("server: opening stats rejects negative hash", "[motif-http]")
     auto db_res = motif::db::database_manager::create(tdir.path, "ostats-neg-db");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18098};
+    constexpr std::uint16_t test_port {18184};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -2869,7 +2869,7 @@ TEST_CASE("server: POST /api/engine/analyses missing fen returns 400", "[motif-h
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-no-fen");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18131};
+    constexpr std::uint16_t test_port {18170};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -2911,7 +2911,7 @@ TEST_CASE("server: POST /api/engine/analyses with both depth and movetime_ms ret
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-both-limits");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18132};
+    constexpr std::uint16_t test_port {18171};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -2934,7 +2934,7 @@ TEST_CASE("server: POST /api/engine/analyses with neither depth nor movetime_ms 
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-no-limit");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18133};
+    constexpr std::uint16_t test_port {18172};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3068,7 +3068,7 @@ TEST_CASE("server: POST /api/engine/engines with empty path returns 400", "[moti
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-engines-empty-path");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18140};
+    constexpr std::uint16_t test_port {18173};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3089,7 +3089,7 @@ TEST_CASE("server: POST /api/engine/analyses returns 503 when no engine configur
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-no-engine");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18141};
+    constexpr std::uint16_t test_port {18174};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3113,7 +3113,7 @@ TEST_CASE("server: GET /api/engine/analyses/:id/stream receives info and complet
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-stream-valid");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18142};
+    constexpr std::uint16_t test_port {18175};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3161,7 +3161,7 @@ TEST_CASE("server: GET /api/engine/analyses/:id/stream reports an engine that cr
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-stream-crash");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18143};
+    constexpr std::uint16_t test_port {18176};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3209,7 +3209,7 @@ TEST_CASE("server: DELETE /api/engine/analyses/:id for active session returns 20
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-delete-active");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18143};
+    constexpr std::uint16_t test_port {18177};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3248,7 +3248,7 @@ TEST_CASE("server: DELETE /api/engine/analyses/:id for already-terminal session 
     auto db_res = motif::db::database_manager::create(tdir.path, "engine-analyses-delete-terminal");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18144};
+    constexpr std::uint16_t test_port {18178};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3338,7 +3338,7 @@ TEST_CASE("server: POST /api/games creates manual game returns 201", "[motif-htt
     auto db_res = motif::db::database_manager::create(tdir.path, "crud-create-db");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18140};
+    constexpr std::uint16_t test_port {18179};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3370,7 +3370,7 @@ TEST_CASE("server: POST /api/games created game readable via GET", "[motif-http]
     auto db_res = motif::db::database_manager::create(tdir.path, "crud-create-get-db");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18141};
+    constexpr std::uint16_t test_port {18180};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3403,7 +3403,7 @@ TEST_CASE("server: POST /api/games created game visible in game list", "[motif-h
     auto db_res = motif::db::database_manager::create(tdir.path, "crud-create-list-db");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18142};
+    constexpr std::uint16_t test_port {18181};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3431,7 +3431,7 @@ TEST_CASE("server: PATCH /api/games/{id} updates metadata returns 200", "[motif-
     auto db_res = motif::db::database_manager::create(tdir.path, "crud-patch-db");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18143};
+    constexpr std::uint16_t test_port {18182};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
@@ -3463,7 +3463,7 @@ TEST_CASE("server: DELETE /api/games/{id} removes manual game returns 204", "[mo
     auto db_res = motif::db::database_manager::create(tdir.path, "crud-delete-db");
     REQUIRE(db_res.has_value());
 
-    constexpr std::uint16_t test_port {18144};
+    constexpr std::uint16_t test_port {18183};
     motif::http::server srv {*db_res};
     std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
     REQUIRE(wait_for_ready(srv));
