@@ -541,8 +541,7 @@ TEST_CASE("engine_manager: subscribe delivers a crash exactly once, whether it h
 namespace
 {
 
-auto start_fake_session(motif::engine::engine_manager& manager, fake_uci::fake_engine const& engine, std::string const& name)
-    -> std::string
+auto start_fake_session(motif::engine::engine_manager& manager, fake_uci::fake_engine const& engine, std::string const& name) -> std::string
 {
     REQUIRE(manager.configure_engine(motif::engine::engine_config {.name = name, .path = engine.path()}).has_value());
     auto const analysis_id = manager.start_analysis(motif::engine::analysis_params {
@@ -751,7 +750,9 @@ TEST_CASE("engine_manager: a stop token that is already requested cancels the la
         .depth = default_depth,
         .movetime_ms = std::nullopt,
     };
-    std::stop_source const source;
+    // libc++ 21's request_stop is non-const on Darwin.
+    // NOLINTNEXTLINE(misc-const-correctness)
+    std::stop_source source;
     source.request_stop();
 
     auto const result = manager.start_analysis(params, source.get_token());
@@ -789,7 +790,8 @@ TEST_CASE("engine_manager: a genuine launch failure is not reported as cancelled
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("engine_manager: a subscriber attached to a fast session sees each line once, in order, then the completion last", "[motif-engine]")
+TEST_CASE("engine_manager: a subscriber attached to a fast session sees each line once, in order, then the completion last",
+          "[motif-engine]")
 {
     // The fake engine prints 400 numbered lines at once, so the subscription lands
     // in the middle of them in some iterations: replayed lines must come first and
