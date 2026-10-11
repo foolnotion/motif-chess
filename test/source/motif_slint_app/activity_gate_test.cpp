@@ -11,8 +11,10 @@
 #include "motif/slint_app/activity_gate.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "manual_event_loop.hpp"
 #include "motif/slint_app/analysis_host.hpp"
@@ -22,29 +24,6 @@
 #include "motif/slint_app/search_host.hpp"
 #include "motif/slint_app/workspace_host.hpp"
 #include "snapshot_platform.hpp"
-
-struct scoped_sigpipe_ignore
-{
-    scoped_sigpipe_ignore()
-    {
-        struct sigaction action {};
-
-        action.sa_handler = SIG_IGN;
-        static_cast<void>(sigemptyset(&action.sa_mask));
-        REQUIRE(sigaction(SIGPIPE, &action, &previous_) == 0);
-    }
-
-    scoped_sigpipe_ignore(scoped_sigpipe_ignore const&) = delete;
-    auto operator=(scoped_sigpipe_ignore const&) -> scoped_sigpipe_ignore& = delete;
-
-    scoped_sigpipe_ignore(scoped_sigpipe_ignore&&) = delete;
-    auto operator=(scoped_sigpipe_ignore&&) -> scoped_sigpipe_ignore& = delete;
-
-    ~scoped_sigpipe_ignore() { static_cast<void>(sigaction(SIGPIPE, &previous_, nullptr)); }
-
-  private:
-    struct sigaction previous_ {};
-};
 
 namespace
 {
@@ -147,7 +126,6 @@ TEST_CASE("activity gate: concrete idle composition has independent flags", "[mo
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("activity gate: FIFO import maps only the concrete import flag", "[motif-slint-app]")
 {
-    auto const ignored_sigpipe = scoped_sigpipe_ignore {};
     auto const platform = snapshot_test::use_snapshot_platform();
     auto loop = test_support::manual_event_loop {};
     auto window = WorkspaceWindow::create();
@@ -176,13 +154,13 @@ TEST_CASE("activity gate: FIFO import maps only the concrete import flag", "[mot
 
     auto writer = std::thread {[fifo]() -> void
                                {
-                                   auto blocked_signals = sigset_t {};
-                                   static_cast<void>(sigemptyset(&blocked_signals));
-                                   static_cast<void>(sigaddset(&blocked_signals, SIGPIPE));
-                                   static_cast<void>(pthread_sigmask(SIG_BLOCK, &blocked_signals, nullptr));
-                                   auto stream = std::ofstream {fifo};
-                                   stream << "[Event \"FIFO\"]\n[Site \"Local\"]\n[Date \"2026.10.05\"]\n[Round \"1\"]\n[White "
-                                             "\"White\"]\n[Black \"Black\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n";
+                                   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg,android-cloexec-open)
+                                   auto const descriptor = ::open(fifo.c_str(), O_RDWR | O_CLOEXEC);
+                                   REQUIRE(descriptor >= 0);
+                                   auto const pgn = std::string {"[Event \"FIFO\"]\n[Site \"Local\"]\n[Date \"2026.10.05\"]\n[Round \"1\"]\n[White "
+                                                                "\"White\"]\n[Black \"Black\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n"};
+                                   REQUIRE(::write(descriptor, pgn.data(), pgn.size()) == static_cast<ssize_t>(pgn.size()));
+                                   static_cast<void>(::close(descriptor));
                                }};
     writer.join();
     importer.request_cancel();
