@@ -33,6 +33,8 @@
             <array>
                 <string>org.motif-chess.pgn</string>
             </array>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
             <key>CFBundleTypeName</key>
             <string>Portable Game Notation</string>
             <key>CFBundleTypeRole</key>
@@ -44,6 +46,7 @@
         <dict>
             <key>UTTypeConformsTo</key>
             <array>
+                <string>public.data</string>
                 <string>public.plain-text</string>
             </array>
             <key>UTTypeDescription</key>
