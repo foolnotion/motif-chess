@@ -48,6 +48,10 @@ class workspace_service
 
     [[nodiscard]] auto error_message() const noexcept -> std::string_view { return error_message_; }
 
+    [[nodiscard]] auto notation_below() const noexcept -> bool { return config_.ui_preferences.notation_layout == "below"; }
+
+    auto set_notation_below(bool below) -> result<void>;
+
     [[nodiscard]] auto active_database() noexcept -> motif::db::database_manager* { return db_ ? &*db_ : nullptr; }
 
   private:

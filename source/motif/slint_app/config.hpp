@@ -40,6 +40,7 @@ struct ui_preferences
     std::string board_theme {"classic"};
     std::string piece_set {"standard"};
     int prefetch_depth {default_prefetch_depth};
+    std::string notation_layout {"right"};
 };
 
 struct workspace_config

@@ -72,6 +72,7 @@ void publish_workspace(WorkspaceWindow& window, motif::slint_app::workspace_serv
     window.set_is_scratch(service.is_temporary());
     window.set_display_name(shared_string(service.display_name()));
     window.set_active_path(shared_string(service.active_path()));
+    window.set_notation_below(service.notation_below());
 
     auto rows = std::vector<RecentEntry> {};
     rows.reserve(service.recent_databases().size());
@@ -250,8 +251,8 @@ void publish_board(WorkspaceWindow& window, motif::slint_app::board_state const&
 
     auto san_moves = std::vector<slint::SharedString> {};
     san_moves.reserve(state.san_moves.size());
-    for (auto const& san : state.san_moves) {
-        san_moves.push_back(shared_string(san));
+    for (auto const& san_move : state.san_moves) {
+        san_moves.push_back(shared_string(san_move));
     }
     window.set_board_san_moves(std::make_shared<slint::VectorModel<slint::SharedString>>(std::move(san_moves)));
 
@@ -1486,6 +1487,16 @@ void register_workspace_callbacks(WorkspaceWindow& window,
             search.dismiss_error();
             window.set_error_text("");
         });
+    window.on_notation_layout_toggled(
+        [&window, &service]() -> void
+        {
+            auto const notation_below = !window.get_notation_below();
+            if (auto saved = service.set_notation_below(notation_below); !saved) {
+                window.set_error_text("Could not save workspace layout preference.");
+                return;
+            }
+            window.set_notation_below(notation_below);
+        });
 }
 
 void register_browser_callbacks(WorkspaceWindow& window,
@@ -1677,14 +1688,6 @@ void register_search_callbacks(WorkspaceWindow& window,
                 browser.activate_by_id(match->first, match->second);
             }
         });
-    window.on_search_panel_visibility_toggled(
-        [&window, &importer, &runner, &browser, &board, &search]() -> void
-        {
-            if (importer.active() || runner.is_busy() || browser.is_busy() || board.is_busy() || search.is_busy()) {
-                return;
-            }
-            window.set_search_panel_visible(!window.get_search_panel_visible());
-        });
 }
 
 void register_import_callbacks(WorkspaceWindow& window,
@@ -1735,6 +1738,9 @@ auto main() -> int
     auto service = motif::slint_app::workspace_service {motif::slint_app::config_path()};
     auto importer = motif::slint_app::import_service {};
     auto window = WorkspaceWindow::create();
+    constexpr auto default_window_width = 1440.F;
+    constexpr auto default_window_height = 860.F;
+    window->window().set_size(slint::LogicalSize {slint::Size<float> {.width = default_window_width, .height = default_window_height}});
     auto browser = async_browser_runner {window};
     auto board = async_board_runner {window};
     auto search = async_search_runner {window};
@@ -1742,6 +1748,7 @@ auto main() -> int
         [&board, &window](motif::db::game_id const game_key, motif::db::game const& game) -> void
         {
             board.apply_loaded_game(game_key, game);
+            window->set_board_load_serial(window->get_board_load_serial() + 1);
             window->set_error_text("");
         },
         [&board]() -> void { board.clear(/*publish_position_change=*/false); });
@@ -1749,6 +1756,7 @@ auto main() -> int
         [&board, &window](motif::db::game_id const game_key, motif::db::game const& game, std::size_t const ply) -> void
         {
             board.apply_loaded_game_at(game_key, game, ply);
+            window->set_board_load_serial(window->get_board_load_serial() + 1);
             window->set_error_text("");
         },
         [&board]() -> void { board.clear(/*publish_position_change=*/false); });
