@@ -129,10 +129,10 @@ class position_postings
 
         constexpr auto operator<=>(record const& other) const noexcept -> std::strong_ordering
         {
-            if (auto const comparison = hash <=> other.hash; comparison != 0) {
+            if (auto const comparison = hash <=> other.hash; std::is_neq(comparison)) {
                 return comparison;
             }
-            if (auto const comparison = game_key <=> other.game_key; comparison != 0) {
+            if (auto const comparison = game_key <=> other.game_key; std::is_neq(comparison)) {
                 return comparison;
             }
             return ply <=> other.ply;

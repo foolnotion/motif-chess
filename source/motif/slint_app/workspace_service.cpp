@@ -1,6 +1,5 @@
 #include <filesystem>
 #include <string>
-#include <system_error>
 #include <utility>
 
 #include "motif/slint_app/workspace_service.hpp"
@@ -53,9 +52,7 @@ auto workspace_service::create_database(std::string const& dir_path, std::string
     auto next_config = config_;
     push_recent(next_config, name, dir_path);
     if (auto persisted = persist_config(next_config); !persisted) {
-        created->close();
-        std::error_code cleanup_error;
-        std::filesystem::remove_all(std::filesystem::path {dir_path}, cleanup_error);
+        created->discard_created_bundle();
         return persisted;
     }
 
