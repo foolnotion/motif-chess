@@ -11,11 +11,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1776771939,
-        "narHash": "sha256-wYvm4ekhNElEQcLsMQiVoc5O8yqQfpx/S2A5JXGg+vA=",
+        "lastModified": 1791839826,
+        "narHash": "sha256-m/y9/vk3/6zXegTCwvHkf1gO0LpBfxWCH5u2JBWkyRM=",
         "owner": "foolnotion",
         "repo": "chesslib",
-        "rev": "0ef840eb29a455e9e5cd13d04c1a8f7142d33d45",
+        "rev": "024813fdf83588e6d23c8f0582355333a691a029",
         "type": "github"
       },
       "original": {
@@ -204,17 +204,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1787050081,
-        "narHash": "sha256-3VNt1cCzyvTJbRk9rHc/pXKgUOOMsVbK09lOp0JZJZc=",
+        "lastModified": 1791839830,
+        "narHash": "sha256-/8IGT9qMIDZbG9Fmcheq+NnT89tvSvtztYKw+Tt02rY=",
         "owner": "foolnotion",
         "repo": "pgnlib",
-        "rev": "f069c1b2a26a2402056d1c78e80fa0bffaaff36a",
+        "rev": "ebeb8e95ad4b91f229f1fe54c9abb16c1bbdfa0c",
         "type": "github"
       },
       "original": {
         "owner": "foolnotion",
         "repo": "pgnlib",
-        "rev": "f069c1b2a26a2402056d1c78e80fa0bffaaff36a",
+        "rev": "ebeb8e95ad4b91f229f1fe54c9abb16c1bbdfa0c",
         "type": "github"
       }
     },
@@ -239,11 +239,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1777461621,
-        "narHash": "sha256-Cg7Pa44DvESIbv++yemme7f33iNlNo5kImLjyc70ZgA=",
+        "lastModified": 1791839834,
+        "narHash": "sha256-IO8p7sRNjd41PHYq0FDRe/LNdtiBbaZKNWUoPjQqFFQ=",
         "owner": "foolnotion",
         "repo": "ucilib",
-        "rev": "60abbdac0f260778164ab9d4b58bc23b8c19327a",
+        "rev": "a6dba39fb75396c5e44164a67c39c2326ff0158e",
         "type": "github"
       },
       "original": {
