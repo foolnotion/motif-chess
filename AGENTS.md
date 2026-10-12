@@ -38,6 +38,16 @@ error handling, module boundaries, packaging workflow, and story-done criteria.
 - Done = all acceptance criteria checked off
 - Do not start a spec whose dependencies are incomplete
 
+### Pull Requests and Remote Branches
+
+- Treat pull requests, their numbers, review history, and remote branch names as durable project records. Create, close, reopen, retarget, convert, or merge a pull request only with the user's explicit approval in the current conversation.
+- Do not push, delete, rename, or force-push a remote branch without that same explicit approval. A request to commit, prepare a branch, or plan a pull request is not approval to mutate the remote.
+- Before requesting approval for a pull request, construct and validate its complete local graph: exact head and base, every prerequisite branch, merge-base ancestry, `git rev-list --count`, `git diff --stat`, `git diff --check`, and the build/test evidence for the proposed comparison. Report the proposed title, head, base, commit count, changed-file count, and dependency order.
+- A stacked pull request MUST use the immediately preceding prerequisite as its base. Its comparison MUST contain only the declared logical change; do not hide prerequisite work in a broad bootstrap pull request without explicit approval.
+- Create remote pull requests only after the user approves that validated graph. Publish and inspect one pull request at a time; verify its GitHub head, base, commit count, and changed-file count before creating the next stack member.
+- Once a pull request exists, its remote head and base are immutable by default. Force-pushing, deleting its head, or closing it requires separate explicit approval that names the affected pull request and explains the consequence. Never assume a closed pull request can be reopened after its head changes or is deleted; verify the hosting provider's current capability first.
+- If a proposed graph is wrong, preserve the existing remote records and repair it locally. Do not create, close, or delete pull requests or remote branches as a diagnostic or recovery experiment.
+
 ## Metadata
 
 - Story and spec files use YAML frontmatter: `id`, `uuid`, `type`, `title`, `epic`, `status`, `assignee`, `depends_on`, `implements`, `acceptance_criteria`, `provenance`.
