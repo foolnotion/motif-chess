@@ -87,6 +87,23 @@ in the terminal.
 > in `Tools > Options > CMake` **prior to opening the project**, after which
 > you can manually configure using `Project > Configure Cache`.
 
+### Slint diagnostics and MCP tooling
+
+The Nix development shell supplies `slint-lsp` for editor diagnostics and
+`slint-viewer` for standalone `.slint` previews. They follow the pinned
+`nixpkgs` version; the application itself uses the Nix-built Slint runtime.
+
+The shell builds the application against an MCP- and system-testing-enabled
+Slint runtime. This does not start a server by default. Set `SLINT_MCP_PORT`
+when launching `motif_slint_app` to enable Slint's loopback MCP server. Keep
+the port local and use the server only for development tooling.
+
+For a reproducible application build with that runtime, run:
+
+```sh
+nix build .#app-mcp
+```
+
 ### Dependency manager
 
 The above preset will make use of the [vcpkg][vcpkg] dependency manager. After

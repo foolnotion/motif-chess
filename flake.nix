@@ -44,6 +44,12 @@
           };
           inherit (pkgs.llvmPackages_21) stdenv;
           mkShell = pkgs.mkShell.override { inherit stdenv; };
+          slint-with-mcp = pkgs.slint.overrideAttrs (old: {
+            cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+              "-DSLINT_FEATURE_MCP=ON"
+              "-DSLINT_FEATURE_SYSTEM_TESTING=ON"
+            ];
+          });
           glaze-simd-no-ssl = pkgs.glaze.overrideAttrs (old: {
             cmakeFlags = (old.cmakeFlags or [ ]) ++ [
               "-DGLZ_DISABLE_SIMD=OFF"
@@ -158,17 +164,39 @@
               ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [ pkgs.slint ];
           });
 
+          packages.app-mcp = packages.default.overrideAttrs (old: {
+            name = "motif-chess-app-mcp";
+            cmakeFlags =
+              old.cmakeFlags
+              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [
+                "-Dmotif_ENABLE_SLINT_APP=ON"
+              ];
+            buildInputs =
+              old.buildInputs
+              ++ pkgs.lib.optionals (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) [ slint-with-mcp ];
+          });
+
           devShells.default = mkShell {
             name = "motif-chess-dev";
 
             nativeBuildInputs =
-              packages.app.nativeBuildInputs
+              packages.app-mcp.nativeBuildInputs
               ++ (with pkgs; [
                 # analysis and formatting
                 clang-tools
                 cppcheck
                 include-what-you-use
                 cmake-language-server
+
+                # Slint layout diagnostics and standalone rendering
+                slint-lsp
+                slint-viewer
+
+                # For manual Slint source and MCP-tooling experiments in the
+                # development shell; the slint-with-mcp derivation supplies
+                # its own Rust toolchain when Nix builds it.
+                cargo
+                rustc
 
                 # spec-kit
                 python3
@@ -181,7 +209,7 @@
               ]);
 
             buildInputs =
-              packages.app.buildInputs
+              packages.app-mcp.buildInputs
               ++ (with pkgs; [
                 # testing
                 catch2_3
