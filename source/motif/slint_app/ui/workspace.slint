@@ -46,6 +46,10 @@ export component WorkspaceWindow inherits Window {
     in property <int> game-sort-column: 0;
     in property <bool> game-sort-ascending: true;
     in property <bool> board-loaded;
+    // Serial changes only for completed game loads. It lets the review panel
+    // request keyboard focus once without reacting to generic busy-state flips.
+    in property <int> board-load-serial: 0;
+    property <int> board-focused-serial: 0;
     in property <[string]> board-square-pieces;
     in property <[SquareHighlight]> board-square-highlights;
     in property <bool> board-flipped;
@@ -251,6 +255,9 @@ export component WorkspaceWindow inherits Window {
                 horizontal-stretch: 2;
                 vertical-stretch: 1;
                 board-loaded: root.board-loaded;
+                load-serial: root.board-load-serial;
+                focused-serial: root.board-focused-serial;
+                load-focused(serial) => { root.board-focused-serial = serial; }
                 square-pieces: root.board-square-pieces;
                 square-highlights: root.board-square-highlights;
                 flipped: root.board-flipped;

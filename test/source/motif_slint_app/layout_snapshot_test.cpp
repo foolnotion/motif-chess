@@ -21,6 +21,9 @@ class snapshot_window_adapter;
 struct snapshot_state
 {
     snapshot_window_adapter* window_adapter {nullptr};
+    // Size of the next window adapter the process-wide platform creates.
+    std::uint32_t width {0};
+    std::uint32_t height {0};
 };
 
 class snapshot_window_adapter final : public slint::platform::WindowAdapter
@@ -68,8 +71,8 @@ class snapshot_platform final : public slint::platform::Platform
     [[nodiscard]] auto create_window_adapter() -> std::unique_ptr<slint::platform::WindowAdapter> override
     {
         auto adapter = std::make_unique<snapshot_window_adapter>(slint::PhysicalSize {slint::Size<std::uint32_t> {
-            .width = width,
-            .height = height,
+            .width = state_->width,
+            .height = state_->height,
         }});
         state_->window_adapter = adapter.get();
         return adapter;
@@ -81,6 +84,25 @@ class snapshot_platform final : public slint::platform::Platform
   private:
     std::shared_ptr<snapshot_state> state_;
 };
+
+// Slint allows exactly one platform per process. Test discovery runs one case
+// per process, but direct Catch2 execution does not; install once in either
+// mode and reconfigure the shared state for each test window.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- callers pass named width/height locals, not literals.
+auto use_snapshot_platform(std::uint32_t const width = snapshot_platform::width, std::uint32_t const height = snapshot_platform::height)
+    -> std::shared_ptr<snapshot_state>
+{
+    static auto const state = []() -> std::shared_ptr<snapshot_state>
+    {
+        auto shared = std::make_shared<snapshot_state>();
+        slint::platform::set_platform(std::make_unique<snapshot_platform>(shared));
+        return shared;
+    }();
+    state->window_adapter = nullptr;
+    state->width = width;
+    state->height = height;
+    return state;
+}
 
 void write_ppm(std::filesystem::path const& directory, std::string const& name, std::span<slint::Rgb8Pixel const> pixels)
 {
@@ -126,8 +148,7 @@ auto render_layout(snapshot_state const& state, std::string const& name) -> std:
 
 TEST_CASE("workspace layout: renders right and below notation without a display server", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -155,8 +176,7 @@ TEST_CASE("workspace layout: renders right and below notation without a display 
 
 TEST_CASE("workspace layout: renders the setup screen without a database", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(false);
@@ -170,8 +190,7 @@ TEST_CASE("workspace layout: renders the setup screen without a database", "[mot
 
 TEST_CASE("workspace layout: renders the explorer sidebar tab", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -249,35 +268,6 @@ auto board_bounding_box(std::span<slint::Rgb8Pixel const> pixels, std::uint32_t 
     return box;
 }
 
-// Platform with a caller-chosen fixed size, used to reproduce reports tied to a
-// specific (e.g. maximized) window size rather than the small default snapshot size.
-class sized_snapshot_platform final : public slint::platform::Platform
-{
-  public:
-    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- callers pass named width/height locals, not literals.
-    sized_snapshot_platform(std::shared_ptr<snapshot_state> state, std::uint32_t const width, std::uint32_t const height)
-        : state_ {std::move(state)}
-        , width_ {width}
-        , height_ {height}
-    {
-    }
-
-    [[nodiscard]] auto create_window_adapter() -> std::unique_ptr<slint::platform::WindowAdapter> override
-    {
-        auto adapter = std::make_unique<snapshot_window_adapter>(slint::PhysicalSize {slint::Size<std::uint32_t> {
-            .width = width_,
-            .height = height_,
-        }});
-        state_->window_adapter = adapter.get();
-        return adapter;
-    }
-
-  private:
-    std::shared_ptr<snapshot_state> state_;
-    std::uint32_t width_;
-    std::uint32_t height_;
-};
-
 auto render_at_size(snapshot_state const& state, std::uint32_t const width) -> std::vector<slint::Rgb8Pixel>
 {
     REQUIRE(state.window_adapter != nullptr);
@@ -286,15 +276,14 @@ auto render_at_size(snapshot_state const& state, std::uint32_t const width) -> s
     REQUIRE(pixels.size() % width == 0);
     return {pixels.begin(), pixels.end()};
 }
-
 }  // namespace
 
 // Catch2 assertion macros inflate this test's measured cognitive complexity.
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TEST_CASE("workspace layout: board footprint is invariant under notation content", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -346,8 +335,7 @@ TEST_CASE("workspace layout: board footprint is invariant under notation content
     constexpr std::uint32_t maximized_width {2518};
     constexpr std::uint32_t maximized_height {1377};
 
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<sized_snapshot_platform>(state, maximized_width, maximized_height));
+    auto const state = use_snapshot_platform(maximized_width, maximized_height);
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -406,8 +394,7 @@ TEST_CASE("workspace layout: board footprint is invariant under the loaded-game 
     constexpr std::uint32_t maximized_width {2518};
     constexpr std::uint32_t maximized_height {1377};
 
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<sized_snapshot_platform>(state, maximized_width, maximized_height));
+    auto const state = use_snapshot_platform(maximized_width, maximized_height);
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -447,8 +434,7 @@ TEST_CASE("workspace layout: arrow-key game navigation works immediately after a
     // arrow-key navigation silently did nothing until the board or a move
     // was clicked at least once -- a keyboard-only-use defect matching
     // AC-9-5-2's still-open keyboard-only check.
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -476,6 +462,7 @@ TEST_CASE("workspace layout: arrow-key game navigation works immediately after a
     auto moves = std::vector<slint::SharedString> {slint::SharedString {"e4"}, slint::SharedString {"e5"}};
     window->set_board_san_moves(std::make_shared<slint::VectorModel<slint::SharedString>>(std::move(moves)));
     window->set_board_loaded(true);
+    window->set_board_load_serial(1);
     render_layout(*state, "arrow-key-after-load");
 
     window->window().dispatch_key_press_event(slint::SharedString {slint::platform::key_codes::RightArrow});
@@ -486,8 +473,7 @@ TEST_CASE("workspace layout: arrow-key game navigation works immediately after a
 
 TEST_CASE("workspace layout: arrow-key game navigation focuses after interaction re-enables", "[motif-slint-app][layout]")
 {
-    auto const state = std::make_shared<snapshot_state>();
-    slint::platform::set_platform(std::make_unique<snapshot_platform>(state));
+    auto const state = use_snapshot_platform();
 
     auto window = WorkspaceWindow::create();
     window->set_has_database(true);
@@ -507,6 +493,7 @@ TEST_CASE("workspace layout: arrow-key game navigation focuses after interaction
     render_layout(*state, "arrow-key-disabled-before-load");
     window->set_import_active(true);
     window->set_board_loaded(true);
+    window->set_board_load_serial(1);
     render_layout(*state, "arrow-key-disabled-after-load");
     window->set_import_active(false);
     render_layout(*state, "arrow-key-after-enable");

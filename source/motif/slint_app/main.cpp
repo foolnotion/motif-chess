@@ -1748,6 +1748,7 @@ auto main() -> int
         [&board, &window](motif::db::game_id const game_key, motif::db::game const& game) -> void
         {
             board.apply_loaded_game(game_key, game);
+            window->set_board_load_serial(window->get_board_load_serial() + 1);
             window->set_error_text("");
         },
         [&board]() -> void { board.clear(/*publish_position_change=*/false); });
@@ -1755,6 +1756,7 @@ auto main() -> int
         [&board, &window](motif::db::game_id const game_key, motif::db::game const& game, std::size_t const ply) -> void
         {
             board.apply_loaded_game_at(game_key, game, ply);
+            window->set_board_load_serial(window->get_board_load_serial() + 1);
             window->set_error_text("");
         },
         [&board]() -> void { board.clear(/*publish_position_change=*/false); });

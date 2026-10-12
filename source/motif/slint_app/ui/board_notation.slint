@@ -403,6 +403,11 @@ export component GameReviewPanel inherits Rectangle {
     in property <[string]> san-moves;
     in property <int> current-ply;
     in property <bool> interaction-enabled: true;
+    // Incremented by the host after a game load completes. The serial avoids
+    // reclaiming focus when unrelated asynchronous work re-enables input.
+    in property <int> load-serial: 0;
+    in property <int> focused-serial: 0;
+    callback load-focused(int);
     in property <bool> notation-below: false;
 
     callback square-activated(int, int);
@@ -414,6 +419,13 @@ export component GameReviewPanel inherits Rectangle {
     callback orientation-toggled();
     callback panel-visibility-toggled();
     callback notation-layout-toggled();
+
+    changed load-serial => { keyboard-scope.focus-pending = true; }
+    init => {
+        if (root.load-serial != root.focused-serial) {
+            keyboard-scope.focus-pending = true;
+        }
+    }
 
     background: Palette.background;
 
@@ -460,14 +472,16 @@ export component GameReviewPanel inherits Rectangle {
 
         keyboard-scope := FocusScope {
             vertical-stretch: 1;
-            // Loading a game is the user's clearest signal of intent to
-            // navigate it; without this, arrow-key navigation silently does
-            // nothing until the user first clicks the board or a move,
-            // which is not discoverable and fails keyboard-only use.
-            property <bool> can-auto-focus: root.board-loaded && root.interaction-enabled;
+            // Move focus into the review region once per completed game load.
+            // Do not key this on interaction-enabled: it toggles around
+            // asynchronous browser and search work while users may be typing.
+            property <bool> focus-pending: false;
+            property <bool> can-auto-focus: self.focus-pending && root.board-loaded && root.interaction-enabled;
             changed can-auto-focus => {
                 if (self.can-auto-focus) {
+                    self.focus-pending = false;
                     self.focus();
+                    root.load-focused(root.load-serial);
                 }
             }
             key-pressed(event) => {
