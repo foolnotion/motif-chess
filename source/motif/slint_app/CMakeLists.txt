@@ -55,9 +55,24 @@ target_link_libraries(motif_slint_app PRIVATE
 )
 target_compile_features(motif_slint_app PRIVATE cxx_std_23)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set_target_properties(motif_slint_app PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${PROJECT_SOURCE_DIR}/packaging/macos/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "Motif Chess"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "org.motif-chess.app"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+endif()
+
 if(NOT CMAKE_SKIP_INSTALL_RULES)
     include(GNUInstallDirs)
-    install(TARGETS motif_slint_app RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        install(TARGETS motif_slint_app BUNDLE DESTINATION ".")
+    else()
+        install(TARGETS motif_slint_app RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         install(FILES "${PROJECT_SOURCE_DIR}/packaging/linux/motif-chess.desktop"
             DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
