@@ -192,7 +192,9 @@
                 slint-lsp
                 slint-viewer
 
-                # Required to rebuild Slint with its MCP feature.
+                # For manual Slint source and MCP-tooling experiments in the
+                # development shell; the slint-with-mcp derivation supplies
+                # its own Rust toolchain when Nix builds it.
                 cargo
                 rustc
 
