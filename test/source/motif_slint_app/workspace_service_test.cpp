@@ -244,7 +244,7 @@ TEST_CASE("workspace_config: malformed input remains untouched", "[motif-slint-a
     REQUIRE(read_file(config_path) == original);
 }
 
-TEST_CASE("workspace_service: failed persistence preserves active workspace and recents", "[motif-slint-app]")
+TEST_CASE("workspace_service: failed persistence preserves a pre-existing directory and its files", "[motif-slint-app]")
 {
     tmp_dir const tmp {"persistence_failure"};
     std::filesystem::create_directories(tmp.path);
@@ -253,12 +253,21 @@ TEST_CASE("workspace_service: failed persistence preserves active workspace and 
         auto file = std::ofstream {tmp.path / "not-a-directory"};
         file << "blocking file";
     }
-    motif::slint_app::workspace_service service {config_path};
     auto const database_path = tmp.path / "database";
+    std::filesystem::create_directories(database_path);
+    {
+        auto file = std::ofstream {database_path / "keep.txt"};
+        file << "caller-owned";
+    }
+    motif::slint_app::workspace_service service {config_path};
 
     auto const result = service.create_database(database_path.string(), "PersistentDB");
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error() == motif::slint_app::error_code::database_failure);
+    REQUIRE(std::filesystem::exists(database_path / "keep.txt"));
+    REQUIRE_FALSE(std::filesystem::exists(database_path / "games.db"));
+    REQUIRE_FALSE(std::filesystem::exists(database_path / "manifest.json"));
+    REQUIRE_FALSE(std::filesystem::exists(database_path / ".motif.lock"));
     REQUIRE_FALSE(service.has_active());
     REQUIRE(service.recent_databases().empty());
 }
