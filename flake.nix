@@ -49,6 +49,10 @@
               "-DSLINT_FEATURE_MCP=ON"
               "-DSLINT_FEATURE_SYSTEM_TESTING=ON"
             ];
+            postFixup = (old.postFixup or "") + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              install_name_tool -id "$out/lib/libslint_cpp.dylib" \
+                "$out/lib/libslint_cpp.dylib"
+            '';
           });
           glaze-simd-no-ssl = pkgs.glaze.overrideAttrs (old: {
             cmakeFlags = (old.cmakeFlags or [ ]) ++ [
