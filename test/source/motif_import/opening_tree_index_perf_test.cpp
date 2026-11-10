@@ -110,14 +110,14 @@ TEST_CASE("opening_tree_index::build bounded-memory claim on a real corpus", "[p
         auto const shutdown_result = motif::import::shutdown_logging();
         (void)shutdown_result;
         REQUIRE(summary.has_value());
-        // Derived-index filenames are generation-qualified (see
-        // publish_derived_index() in database_manager.cpp) -- capture them
+        // Derived-index filenames carry a random artifact id (see
+        // rebuild_position_postings() in database_manager.cpp) -- capture them
         // from the manifest before close() rather than assuming a fixed name.
-        auto const postings_filename = manager->manifest().position_postings
-            ? std::optional<std::string> {manager->manifest().position_postings->filename}
+        auto const postings_filename = manager->manifest().postings() != nullptr
+            ? std::optional<std::string> {manager->manifest().postings()->artifact.filename}
             : std::nullopt;
-        auto const index_filename = manager->manifest().opening_tree_index
-            ? std::optional<std::string> {manager->manifest().opening_tree_index->filename}
+        auto const index_filename = manager->manifest().tree() != nullptr
+            ? std::optional<std::string> {manager->manifest().tree()->checkpoint.filename}
             : std::nullopt;
         manager->close();
         std::error_code size_err;
@@ -278,9 +278,8 @@ TEST_CASE("opening_tree_index::build bounded-memory claim on a real corpus", "[p
     // rather than assumed.
     auto indexed_manager = motif::db::database_manager::open(tmp / "postings-index");
     REQUIRE(indexed_manager.has_value());
-    REQUIRE(indexed_manager->manifest().opening_tree_index.has_value());
-    auto const index_path = tmp / "postings-index"
-        / indexed_manager->manifest().opening_tree_index.value_or(motif::db::derived_index_manifest_entry {}).filename;
+    REQUIRE(indexed_manager->manifest().tree() != nullptr);
+    auto const index_path = tmp / "postings-index" / indexed_manager->manifest().tree()->checkpoint.filename;
 
     auto opened = motif::db::opening_tree_index::open(index_path);
     REQUIRE(opened.has_value());

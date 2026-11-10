@@ -1,5 +1,7 @@
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,6 +16,7 @@
 #include <xxhash.h>
 
 #include "motif/db/error.hpp"
+#include "motif/db/fault_injection.hpp"
 #include "motif/db/schema.hpp"
 #include "motif/db/sqlite_impl.hpp"
 #include "motif/db/sqlite_util.hpp"
@@ -49,6 +52,73 @@ struct game_writer::impl
     auto rollback_transaction() noexcept -> void;
     void clear_insert_caches() noexcept;
 
+    // Mutation-sequence accounting. record_canonical_change() marks an
+    // index-relevant canonical change made by the calling operation: inside a
+    // writer-owned batch it only sets the pending flag (commit_transaction()
+    // advances the sequence once); otherwise it advances the sequence now, in
+    // the caller's open transaction. note_failed_operation() poisons a batch.
+    // has_pending_canonical_change() is true from the first marked change in a
+    // batch until commit or rollback.
+    auto record_canonical_change() -> result<void>;
+    void note_failed_operation() noexcept;
+
+    [[nodiscard]] auto has_pending_canonical_change() const noexcept -> bool { return canonical_changed_; }
+
+    [[nodiscard]] auto batch_open() const noexcept -> bool { return batch_open_; }
+
+    [[nodiscard]] auto data_revision() const noexcept -> std::uint64_t { return data_revision_.load(std::memory_order_relaxed); }
+
+    void note_data_changed() noexcept { data_revision_.fetch_add(1, std::memory_order_relaxed); }
+
+    auto bump_mutation_seq() -> result<void>;
+
+    // Durable game-ID allocator (bundle_meta.next_game_id). reserve_game_id()
+    // returns the next unused ID without consuming it; confirm_game_id()
+    // consumes it once the row is actually inserted, so a deduplicated-away
+    // insert burns nothing. The counter is cached in memory and written back
+    // by persist_game_id_counter() inside the transaction that commits the rows
+    // it covers: once per insert outside a batch, once at commit_transaction()
+    // inside one. This is the connection's only allocator (game_store owns the
+    // single game_writer), so the cache cannot diverge from a sibling's. It is
+    // dropped on rollback, on a failed standalone insert, at begin_transaction()
+    // and when the table is found to have advanced externally.
+    auto reserve_game_id() -> result<std::uint32_t>;
+    void confirm_game_id(std::uint32_t assigned_id) noexcept;
+    auto persist_game_id_counter() -> result<void>;
+    void discard_game_id_counter() noexcept;
+
+    // Drops the cached counter if an insert outside a batch fails after it may
+    // have advanced the counter in memory: the insert's transaction rolled
+    // back, so the cache would otherwise run ahead of the table. Inside a
+    // batch the advance is kept; rollback_transaction() resets it.
+    struct allocation_scope
+    {
+        impl& owner;
+        bool succeeded {false};
+
+        explicit allocation_scope(impl& owning_impl) noexcept
+            : owner {owning_impl}
+        {
+        }
+
+        allocation_scope(allocation_scope const&) = delete;
+        auto operator=(allocation_scope const&) -> allocation_scope& = delete;
+        allocation_scope(allocation_scope&&) = delete;
+        auto operator=(allocation_scope&&) -> allocation_scope& = delete;
+
+        ~allocation_scope() noexcept
+        {
+            if (succeeded) {
+                return;
+            }
+            if (owner.batch_open_) {
+                owner.note_failed_operation();
+            } else {
+                owner.discard_game_id_counter();
+            }
+        }
+    };
+
   private:
     sqlite3* db_;
     gtl::flat_hash_map<std::string, std::int64_t> player_id_cache_;
@@ -64,6 +134,24 @@ struct game_writer::impl
     detail::unique_stmt select_tag_stmt_;
     detail::unique_stmt insert_tag_stmt_;
     detail::unique_stmt insert_game_tag_stmt_;
+    detail::unique_stmt select_next_game_id_stmt_;
+    detail::unique_stmt update_next_game_id_stmt_;
+    detail::unique_stmt bump_mutation_seq_stmt_;
+
+    // Next game ID to hand out; empty until loaded (or after being discarded).
+    // dirty means it is ahead of the table and persist_game_id_counter() owes
+    // an UPDATE.
+    std::optional<std::int64_t> next_game_id_;
+    bool next_game_id_dirty_ {false};
+    bool batch_open_ {false};
+    // Writer-owned batch state: an index-relevant change happened (the single
+    // sequence advance is owed at commit) / a failed operation means the batch
+    // may not commit.
+    bool canonical_changed_ {false};
+    bool batch_poisoned_ {false};
+    // Bumped by every successful canonical change of any kind (indexed or not)
+    // and by batch commit/rollback; see game_writer::data_revision().
+    std::atomic<std::uint64_t> data_revision_ {0};
 };
 
 // ── Implementation details
@@ -79,7 +167,7 @@ namespace
 
 using detail::bind_optional_int;
 using detail::bind_optional_text;
-using detail::txn_guard;
+using detail::mutation_scope;
 using detail::unique_stmt;
 
 auto reset_stmt(sqlite3_stmt* stmt) noexcept -> void
@@ -106,6 +194,7 @@ constexpr int review_status = 10;
 constexpr int move_hash = 11;
 constexpr int white_elo = 12;
 constexpr int black_elo = 13;
+constexpr int game_row_id = 14;
 }  // namespace game_ins_param
 
 // Single atomic statement replacing the former SELECT-then-INSERT pair: the
@@ -119,14 +208,14 @@ constexpr int black_elo = 13;
 constexpr auto insert_game_sql = R"sql(
     INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,
                      source_type, source_label, review_status, move_hash, identity_collision,
-                     white_elo, black_elo)
+                     white_elo, black_elo, id)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
            COALESCE((SELECT MAX(identity_collision) + 1 FROM game
                      WHERE white_id = ?1 AND black_id = ?2
                        AND COALESCE(event_id, -1) = COALESCE(?3, -1)
                        AND COALESCE(date, '') = COALESCE(?4, '')
                        AND result = ?5 AND move_hash = ?11), 0),
-           ?12, ?13
+           ?12, ?13, ?14
     WHERE NOT EXISTS (
         SELECT 1 FROM game
         WHERE white_id = ?1 AND black_id = ?2
@@ -143,8 +232,8 @@ constexpr auto insert_game_sql = R"sql(
 constexpr auto insert_game_raw_sql = R"sql(
     INSERT INTO game(white_id, black_id, event_id, date, result, eco, moves,
                      source_type, source_label, review_status, move_hash, identity_collision,
-                     white_elo, black_elo)
-    VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13)
+                     white_elo, black_elo, id)
+    VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?14)
 )sql";
 
 // Deletes exact duplicates among raw-inserted rows: same identity fields, move_hash, and
@@ -172,7 +261,7 @@ constexpr auto dedup_reassign_collision_sql = R"sql(
         ) - 1 AS new_collision
         FROM game
     ) AS ranked
-    WHERE ranked.id = game.id
+    WHERE ranked.id = game.id AND game.identity_collision <> ranked.new_collision
 )sql";
 
 }  // namespace
@@ -183,6 +272,12 @@ constexpr auto dedup_reassign_collision_sql = R"sql(
 game_writer::game_writer(sqlite3* conn) noexcept
     : impl_ {std::make_unique<impl>(conn)}
 {
+}
+
+auto game_writer::make(sqlite3* const conn) -> std::unique_ptr<game_writer>
+{
+    // The constructor is private to everything but game_store, so make_unique cannot be used.
+    return std::unique_ptr<game_writer> {new game_writer(conn)};  // NOLINT(cppcoreguidelines-owning-memory)
 }
 
 game_writer::~game_writer() = default;
@@ -236,6 +331,36 @@ auto game_writer::deduplicate() -> result<dedup_summary>
     return impl_->deduplicate();
 }
 
+auto game_writer::has_pending_canonical_change() const noexcept -> bool
+{
+    return impl_->has_pending_canonical_change();
+}
+
+auto game_writer::owns_open_batch() const noexcept -> bool
+{
+    return impl_->batch_open();
+}
+
+auto game_writer::data_revision() const noexcept -> std::uint64_t
+{
+    return impl_->data_revision();
+}
+
+void game_writer::note_data_changed() noexcept
+{
+    impl_->note_data_changed();
+}
+
+auto game_writer::record_canonical_change() -> result<void>
+{
+    return impl_->record_canonical_change();
+}
+
+void game_writer::note_failed_operation() noexcept
+{
+    impl_->note_failed_operation();
+}
+
 void game_writer::impl::clear_insert_caches() noexcept
 {
     player_id_cache_.clear();
@@ -259,25 +384,192 @@ auto game_writer::impl::prepare_cached_stmt(detail::unique_stmt& stmt, char cons
     return stmt.get();
 }
 
+auto game_writer::impl::reserve_game_id() -> result<std::uint32_t>
+{
+    if (!next_game_id_) {
+        auto sel = prepare_cached_stmt(select_next_game_id_stmt_, "SELECT next_game_id FROM bundle_meta WHERE id = 1");
+        if (!sel) {
+            return tl::unexpected {sel.error()};
+        }
+        auto const step_rc = sqlite3_step(*sel);
+        if (step_rc != SQLITE_ROW) {
+            reset_stmt(*sel);
+            return tl::unexpected {error {error_code::io_failure, "bundle_meta allocator row is missing"}};
+        }
+        auto const persisted = sqlite3_column_int64(*sel, 0);
+        reset_stmt(*sel);
+        if (persisted < 1) {
+            return tl::unexpected {error {error_code::io_failure, "bundle_meta.next_game_id is corrupt"}};
+        }
+        next_game_id_ = persisted;
+    }
+
+    // Public IDs are uint32_t and 0 is invalid: never wrap or narrow.
+    if (std::cmp_greater(*next_game_id_, std::numeric_limits<std::uint32_t>::max())) {
+        return tl::unexpected {error {error_code::io_failure, "game id space exhausted"}};
+    }
+    return static_cast<std::uint32_t>(*next_game_id_);
+}
+
+void game_writer::impl::confirm_game_id(std::uint32_t const assigned_id) noexcept
+{
+    next_game_id_ = static_cast<std::int64_t>(assigned_id) + 1;
+    next_game_id_dirty_ = true;
+}
+
+auto game_writer::impl::persist_game_id_counter() -> result<void>
+{
+    if (!next_game_id_dirty_ || !next_game_id_.has_value()) {
+        return {};
+    }
+    auto const counter = *next_game_id_;
+    auto upd =
+        prepare_cached_stmt(update_next_game_id_stmt_, "UPDATE bundle_meta SET next_game_id = ?1 WHERE id = 1 AND next_game_id < ?1");
+    if (!upd) {
+        return tl::unexpected {upd.error()};
+    }
+    sqlite3_bind_int64(*upd, 1, counter);
+    auto const step_rc = sqlite3_step(*upd);
+    reset_stmt(*upd);
+    if (step_rc != SQLITE_DONE) {
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+    }
+    if (sqlite3_changes(db_) == 0) {
+        // The table is already at or past the value we meant to write, so it
+        // advanced behind our back (a legitimate sequence never gets here: the
+        // cached value always exceeds the persisted one it was loaded from).
+        // The row just inserted is unaffected; stop trusting the cache.
+        discard_game_id_counter();
+        return {};
+    }
+    next_game_id_dirty_ = false;
+    return {};
+}
+
+void game_writer::impl::discard_game_id_counter() noexcept
+{
+    next_game_id_.reset();
+    next_game_id_dirty_ = false;
+}
+
 auto game_writer::impl::begin_transaction() -> result<void>
 {
     if (sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
     }
+    // Reload once per batch rather than trusting the standalone-insert cache:
+    // this bounds how long an undetected external edit of bundle_meta can
+    // matter to one batch, at the cost of a single SELECT per batch.
+    discard_game_id_counter();
+    batch_open_ = true;
+    canonical_changed_ = false;
+    batch_poisoned_ = false;
     return {};
+}
+
+auto game_writer::impl::bump_mutation_seq() -> result<void>
+{
+    // The bound keeps the increment from overflowing int64; exhaustion fails
+    // the whole canonical operation instead of wrapping.
+    auto upd = prepare_cached_stmt(
+        bump_mutation_seq_stmt_,
+        "UPDATE mutation_state SET mutation_seq = mutation_seq + 1 WHERE id = 1 AND mutation_seq < 9223372036854775807");
+    if (!upd) {
+        return tl::unexpected {upd.error()};
+    }
+    auto const step_rc = sqlite3_step(*upd);
+    reset_stmt(*upd);
+    if (step_rc != SQLITE_DONE) {
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+    }
+    if (sqlite3_changes(db_) != 1) {
+        return tl::unexpected {error {error_code::io_failure, "mutation sequence is missing or exhausted"}};
+    }
+    return {};
+}
+
+auto game_writer::impl::record_canonical_change() -> result<void>
+{
+    if (batch_open_) {
+        // One advance per transaction: commit_transaction() bumps once for
+        // however many changes the batch made.
+        canonical_changed_ = true;
+        return {};
+    }
+    // Standalone operation, or one joined to a transaction the caller owns
+    // outside this writer: no commit hook will ever run, so advance now, in
+    // that same transaction.
+    return bump_mutation_seq();
+}
+
+void game_writer::impl::note_failed_operation() noexcept
+{
+    // A failed operation inside a writer-owned batch may have left partial
+    // rows in the batch's transaction without the success-path sequence mark.
+    // Committing them would be a silent unindexed mutation, so the batch can
+    // only roll back. Standalone operations roll back their own transaction.
+    if (batch_open_) {
+        batch_poisoned_ = true;
+    }
 }
 
 auto game_writer::impl::commit_transaction() -> result<void>
 {
-    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
-        return tl::unexpected {error_code::io_failure};
+    // The batch ends with this call whether or not COMMIT succeeds. Persisting
+    // the high-water mark and the sequence here, before COMMIT, ties both to
+    // the same transaction as the rows they cover. After a successful COMMIT
+    // the in-memory counter equals the table, so it stays cached; after any
+    // failure it is dropped and reloaded from the table.
+    if (batch_poisoned_) {
+        rollback_transaction();
+        return tl::unexpected {error {error_code::io_failure, "batch contained a failed operation and can only be rolled back"}};
     }
+    auto const fail_commit = [this](error err) -> result<void>
+    {
+        // A COMMIT that fails can leave the transaction open; roll it back
+        // before clearing pending state so nothing can query half-state.
+        rollback_transaction();
+        return tl::unexpected {std::move(err)};
+    };
+    auto const persisted = persist_game_id_counter();
+    if (!persisted) {
+        return fail_commit(persisted.error());
+    }
+    if (canonical_changed_) {
+        if (auto bumped = bump_mutation_seq(); !bumped) {
+            return fail_commit(bumped.error());
+        }
+    }
+    if (fault::inject(fault::point::before_canonical_commit, fault::artifact_kind::none, 0, db_) == fault::fault_action::fail_io) {
+        return fail_commit(error {error_code::io_failure, "injected canonical commit failure"});
+    }
+    auto const commit_rc = sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);
+    if (commit_rc != SQLITE_OK) {
+        return fail_commit(error {error_code::io_failure, sqlite3_errmsg(db_)});
+    }
+    batch_open_ = false;
+    note_data_changed();
+    canonical_changed_ = false;
+    // A hook cannot undo a committed transaction; the point exists for crash tests.
+    static_cast<void>(fault::inject(fault::point::after_canonical_commit));
     return {};
 }
 
 auto game_writer::impl::rollback_transaction() noexcept -> void
 {
-    sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+    if (sqlite3_get_autocommit(db_) == 0) {
+        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+    }
+    // The ids this batch allocated in memory are dropped with it and the
+    // counter is reloaded from the table (which still holds the pre-batch
+    // value), so those ids will be reissued. Only committed ids must be
+    // monotonic; nothing durable references an aborted one.
+    batch_open_ = false;
+    // Rows a reader on this connection could see mid-batch are gone.
+    note_data_changed();
+    canonical_changed_ = false;
+    batch_poisoned_ = false;
+    discard_game_id_counter();
     // The rolled-back transaction may have inserted (and cached the id of) a
     // player/event/tag row that no longer exists; a later insert reusing
     // that stale id would fail its foreign-key check.
@@ -405,7 +697,8 @@ auto game_writer::impl::insert_game_tags(game_id gid, std::vector<std::pair<std:
 
 auto game_writer::impl::insert(game const& src_game) -> result<game_id>
 {
-    txn_guard txn {db_};
+    mutation_scope txn {db_, batch_open_};
+    allocation_scope id_scope {*this};
     if (!txn.began()) {
         return tl::unexpected {error_code::io_failure};
     }
@@ -461,6 +754,10 @@ auto game_writer::impl::insert(game const& src_game) -> result<game_id>
     auto const& moves = src_game.moves;
     auto const blob_bytes = moves.size() * sizeof(std::uint16_t);
     auto const move_hash = XXH3_64bits(moves.data(), blob_bytes);
+    auto const reserved_id = reserve_game_id();
+    if (!reserved_id) {
+        return tl::unexpected {reserved_id.error()};
+    }
 
     auto game_ins = prepare_cached_stmt(insert_game_stmt_, insert_game_sql);
     if (!game_ins) {
@@ -497,6 +794,7 @@ auto game_writer::impl::insert(game const& src_game) -> result<game_id>
     sqlite3_bind_blob(*game_ins, game_ins_param::move_hash, &move_hash, static_cast<int>(sizeof(move_hash)), SQLITE_TRANSIENT);
     bind_optional_int(*game_ins, game_ins_param::white_elo, src_game.white.elo);
     bind_optional_int(*game_ins, game_ins_param::black_elo, src_game.black.elo);
+    sqlite3_bind_int64(*game_ins, game_ins_param::game_row_id, static_cast<std::int64_t>(*reserved_id));
 
     int const ins_rc = sqlite3_step(*game_ins);
     if (ins_rc != SQLITE_DONE) {
@@ -504,30 +802,49 @@ auto game_writer::impl::insert(game const& src_game) -> result<game_id>
     }
     if (sqlite3_changes(db_) == 0) {
         // WHERE NOT EXISTS matched an existing row with the same identity
-        // fields and move blob -- zero rows inserted, not an error.
+        // fields and move blob -- zero rows inserted, not an error. Nothing
+        // was reserved or consumed, so the cached counter stays valid.
+        id_scope.succeeded = true;
         return tl::unexpected {error_code::duplicate};
     }
 
-    auto const new_game_id = game_id {static_cast<std::uint32_t>(sqlite3_last_insert_rowid(db_))};
+    confirm_game_id(*reserved_id);
+    auto const new_game_id = game_id {*reserved_id};
 
     auto tags_rc = insert_game_tags(new_game_id, src_game.extra_tags);
     if (!tags_rc) {
         return tl::unexpected {tags_rc.error()};
     }
 
+    // Standalone insert (or one joined to a foreign transaction): the counter
+    // must reach the table in this same transaction. Inside a writer-owned
+    // batch, commit_transaction() writes the high-water mark once instead.
+    if (auto record_res = record_canonical_change(); !record_res) {
+        return tl::unexpected {record_res.error()};
+    }
+
+    if (!batch_open_) {
+        if (auto persist_res = persist_game_id_counter(); !persist_res) {
+            return tl::unexpected {persist_res.error()};
+        }
+    }
+
     if (!txn.commit()) {
         return tl::unexpected {error_code::io_failure};
     }
     cache_guard.committed = true;
+    id_scope.succeeded = true;
+    note_data_changed();
     return new_game_id;
 }
 
 auto game_writer::impl::insert_raw(game const& src_game) -> result<game_id>
 {
-    txn_guard txn {db_};
+    mutation_scope txn {db_, batch_open_};
     if (!txn.began()) {
         return tl::unexpected {error_code::io_failure};
     }
+    allocation_scope id_scope {*this};
 
     // Same reasoning as insert()'s guard: an early return below rolls back
     // any player/event/tag row find_or_insert_player/event/tag already
@@ -581,6 +898,10 @@ auto game_writer::impl::insert_raw(game const& src_game) -> result<game_id>
     auto const& moves = src_game.moves;
     auto const blob_bytes = moves.size() * sizeof(std::uint16_t);
     auto const move_hash = XXH3_64bits(moves.data(), blob_bytes);
+    auto const reserved_id = reserve_game_id();
+    if (!reserved_id) {
+        return tl::unexpected {reserved_id.error()};
+    }
 
     auto game_ins = prepare_cached_stmt(insert_game_raw_stmt_, insert_game_raw_sql);
     if (!game_ins) {
@@ -617,22 +938,36 @@ auto game_writer::impl::insert_raw(game const& src_game) -> result<game_id>
     sqlite3_bind_blob(*game_ins, game_ins_param::move_hash, &move_hash, static_cast<int>(sizeof(move_hash)), SQLITE_TRANSIENT);
     bind_optional_int(*game_ins, game_ins_param::white_elo, src_game.white.elo);
     bind_optional_int(*game_ins, game_ins_param::black_elo, src_game.black.elo);
+    sqlite3_bind_int64(*game_ins, game_ins_param::game_row_id, static_cast<std::int64_t>(*reserved_id));
 
     if (sqlite3_step(*game_ins) != SQLITE_DONE) {
         return tl::unexpected {error_code::io_failure};
     }
 
-    auto const new_game_id = game_id {static_cast<std::uint32_t>(sqlite3_last_insert_rowid(db_))};
+    confirm_game_id(*reserved_id);
+    auto const new_game_id = game_id {*reserved_id};
 
     auto tags_rc = insert_game_tags(new_game_id, src_game.extra_tags);
     if (!tags_rc) {
         return tl::unexpected {tags_rc.error()};
     }
 
+    if (auto record_res = record_canonical_change(); !record_res) {
+        return tl::unexpected {record_res.error()};
+    }
+
+    if (!batch_open_) {
+        if (auto persist_res = persist_game_id_counter(); !persist_res) {
+            return tl::unexpected {persist_res.error()};
+        }
+    }
+
     if (!txn.commit()) {
         return tl::unexpected {error_code::io_failure};
     }
     cache_guard.committed = true;
+    id_scope.succeeded = true;
+    note_data_changed();
     return new_game_id;
 }
 
@@ -648,10 +983,39 @@ auto game_writer::impl::identity_index_exists() -> result<bool>
 
 auto game_writer::impl::deduplicate() -> result<dedup_summary>
 {
-    txn_guard txn {db_};
+    // Dedup is several statements (delete, reassign, recreate index, sequence
+    // advance). Any failure must undo all of them: the scope rolls back a
+    // local transaction or the operation savepoint of a joined one (always
+    // taken here, even in a writer-owned batch, because dedup is rare and a
+    // savepoint leaves the batch consistent), and a writer-owned batch is
+    // additionally poisoned so it can only roll back as a whole.
+    mutation_scope txn {db_, /*in_writer_batch=*/false};
     if (!txn.began()) {
         return tl::unexpected {error_code::io_failure};
     }
+
+    struct failure_scope
+    {
+        impl& owner;
+        bool succeeded {false};
+
+        explicit failure_scope(impl& owning_impl) noexcept
+            : owner {owning_impl}
+        {
+        }
+
+        failure_scope(failure_scope const&) = delete;
+        auto operator=(failure_scope const&) -> failure_scope& = delete;
+        failure_scope(failure_scope&&) = delete;
+        auto operator=(failure_scope&&) -> failure_scope& = delete;
+
+        ~failure_scope() noexcept
+        {
+            if (!succeeded) {
+                owner.note_failed_operation();
+            }
+        }
+    } failure_guard {*this};
 
     if (sqlite3_exec(db_, dedup_delete_sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
@@ -661,14 +1025,26 @@ auto game_writer::impl::deduplicate() -> result<dedup_summary>
     if (sqlite3_exec(db_, dedup_reassign_collision_sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
         return tl::unexpected {error_code::io_failure};
     }
+    auto const reassigned = static_cast<std::size_t>(sqlite3_changes(db_));
 
     if (auto index_res = schema::create_identity_index(db_); !index_res) {
         return tl::unexpected {index_res.error()};
     }
 
+    // Dropping and recreating the identity index is structural maintenance and
+    // does not advance the sequence. Deleted rows or changed collision slots
+    // change the canonical game set the indexes cover, so they advance it once.
+    if (removed != 0U || reassigned != 0U) {
+        if (auto record_res = record_canonical_change(); !record_res) {
+            return tl::unexpected {record_res.error()};
+        }
+    }
+
     if (!txn.commit()) {
         return tl::unexpected {error_code::io_failure};
     }
+    failure_guard.succeeded = true;
+    note_data_changed();
     return dedup_summary {.removed = removed};
 }
 

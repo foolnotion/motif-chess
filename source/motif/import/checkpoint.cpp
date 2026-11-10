@@ -72,7 +72,7 @@ auto read_checkpoint(std::filesystem::path const& db_dir) -> result<import_check
     }
 
     import_checkpoint checkpoint;
-    auto const read_err = glz::read_json(checkpoint, oss.str());
+    auto const read_err = glz::read<glz::opts {.error_on_unknown_keys = false}>(checkpoint, oss.str());
     if (read_err) {
         return tl::unexpected {error_code::io_failure};
     }

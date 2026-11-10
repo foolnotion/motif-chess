@@ -1171,6 +1171,48 @@ TEST_CASE("server: position search limit zero returns empty array", "[motif-http
     CHECK(res->body == "[]");
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- each Catch2 REQUIRE/CHECK expands to a branch; one linear scenario
+TEST_CASE("server: position search limit zero still fails when the position index is stale", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"pos_limit_zero_stale"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "limit-zero-stale-db");
+    REQUIRE(db_res.has_value());
+    auto const page_hash = seed_positions(*db_res, /*count=*/3);
+    // One more canonical game without a rebuild: the published postings no
+    // longer cover the database.
+    auto extra = motif::db::game {
+        .white = {.name = "Stale White", .elo = std::nullopt, .title = std::nullopt, .country = std::nullopt},
+        .black = {.name = "Stale Black", .elo = std::nullopt, .title = std::nullopt, .country = std::nullopt},
+        .event_details = std::nullopt,
+        .date = std::nullopt,
+        .result = "1-0",
+        .eco = std::nullopt,
+        .moves = encode_moves_for_game({"d4"}),
+        .extra_tags = {},
+        .provenance = {},
+    };
+    REQUIRE(db_res->insert_game(extra).has_value());
+
+    constexpr std::uint16_t test_port {18169};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const zero_limit = cli.Get(fmt::format("/api/positions/{}?limit=0", page_hash));
+    auto const nonzero_limit = cli.Get(fmt::format("/api/positions/{}?limit=5", page_hash));
+
+    srv.stop();
+    server_thread.join();
+
+    // The same stale-index failure for both: an empty page is still an answer
+    // about the index and must not be a way around the coverage check.
+    REQUIRE(nonzero_limit != nullptr);
+    CHECK(nonzero_limit->status == 500);
+    REQUIRE(zero_limit != nullptr);
+    CHECK(zero_limit->status == 500);
+}
+
 TEST_CASE("server: position search invalid offset returns 400", "[motif-http]")
 {
     auto const tdir = tmp_dir {"pos_badoffset"};
@@ -3599,6 +3641,288 @@ TEST_CASE("server: PATCH/DELETE imported game returns 409", "[motif-http]")
     CHECK(del_res->status == 409);
 }
 
+namespace
+{
+
+constexpr std::int32_t default_white_elo = 2000;
+constexpr std::int32_t default_black_elo = 1900;
+
+// A bundle with one imported game (real moves), postings published, and a server.
+struct correction_fixture
+{
+    tmp_dir tdir;
+    motif::db::database_manager db;
+    std::uint32_t imported_id {};
+
+    explicit correction_fixture(std::string const& tag,
+                                std::optional<std::int32_t> const white_elo = default_white_elo,
+                                std::string const& result = "1-0")
+        : tdir {tag}
+        , db {make_db(tdir)}
+    {
+        imported_id = insert_http_game(db,
+                                       {.white = "Imported White",
+                                        .black = "Imported Black",
+                                        .white_elo = white_elo,
+                                        .black_elo = default_black_elo,
+                                        .result = result,
+                                        .event = "Import",
+                                        .date = "2024.01.01",
+                                        .eco = "C20",
+                                        .move_seed = 0,
+                                        .moves = encode_moves_for_game({"e4", "e5", "Nf3"})});
+        REQUIRE(db.rebuild_position_postings().has_value());
+        REQUIRE(db.rebuild_opening_tree_index().has_value());
+    }
+
+    static auto make_db(tmp_dir const& dir) -> motif::db::database_manager
+    {
+        auto created = motif::db::database_manager::create(dir.path, "corrections");
+        REQUIRE(created.has_value());
+        return std::move(*created);
+    }
+};
+
+auto start_stats_url() -> std::string
+{
+    return fmt::format("/api/openings/{}/stats", chesslib::board {}.hash());
+}
+
+}  // namespace
+
+TEST_CASE("server: PATCH corrects result and ratings of an imported game and the explorer reflects it at once", "[motif-http][pr6b]")
+{
+    correction_fixture setup {"http_correct_imported"};
+    constexpr std::uint16_t test_port {18170};
+    motif::http::server srv {setup.db};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+
+    auto const before = cli.Get(start_stats_url());
+    REQUIRE(before != nullptr);
+    REQUIRE(before->status == 200);
+    CHECK(before->body.contains(R"("average_white_elo":2000)"));
+
+    auto const generation = setup.db.derived_index_status()->publication_generation;
+    auto const patched =
+        cli.Patch(fmt::format("/api/games/{}", setup.imported_id), R"({"white_elo":2400,"result":"0-1"})", "application/json");
+    REQUIRE(patched != nullptr);
+    CHECK(patched->status == 200);
+    // The correction did not turn the game into a manual one.
+    CHECK(patched->body.contains(R"("source_type":"imported")"));
+    CHECK(patched->body.contains(R"("result":"0-1")"));
+
+    // One atomic operation: indexes stayed valid and the very next explorer read is the corrected one.
+    CHECK(setup.db.derived_index_status()->postings_usable);
+    CHECK(setup.db.derived_index_status()->tree_usable);
+    CHECK(setup.db.derived_index_status()->publication_generation == generation + 1U);
+    auto const after = cli.Get(start_stats_url());
+    REQUIRE(after != nullptr);
+    CHECK(after->status == 200);
+    CHECK(after->body.contains(R"("average_white_elo":2400)"));
+    CHECK(after->body.contains(R"("black_wins":1)"));
+
+    srv.stop();
+    server_thread.join();
+}
+
+TEST_CASE("server: a rating is omitted, set or cleared; malformed ratings are 400 and change nothing", "[motif-http][pr6b]")
+{
+    correction_fixture setup {"http_correct_nullable"};
+    constexpr std::uint16_t test_port {18171};
+    motif::http::server srv {setup.db};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+    auto const url = fmt::format("/api/games/{}", setup.imported_id);
+    auto const stored = [&]() -> motif::db::game
+    {
+        auto const got = setup.db.store().get(motif::db::game_id {setup.imported_id});
+        REQUIRE(got.has_value());
+        return *got;  // NOLINT(bugprone-unchecked-optional-access)
+    };
+
+    // Omitted: the other rating (and the stored one) is unchanged.
+    auto const omit = cli.Patch(url, R"({"result":"1/2-1/2"})", "application/json");
+    REQUIRE(omit != nullptr);
+    CHECK(omit->status == 200);
+    CHECK(stored().white.elo == 2000);
+    CHECK(stored().black.elo == 1900);
+    // An integer sets, including zero and negatives.
+    for (auto const value : {0, -1, 32767, -32768, 2100}) {
+        auto const set = cli.Patch(url, fmt::format(R"({{"black_elo":{}}})", value), "application/json");
+        REQUIRE(set != nullptr);
+        CHECK(set->status == 200);
+        CHECK(stored().black.elo == value);
+    }
+    // null clears (present -> absent); the other rating stays.
+    auto const cleared = cli.Patch(url, R"({"white_elo":null})", "application/json");
+    REQUIRE(cleared != nullptr);
+    CHECK(cleared->status == 200);
+    CHECK_FALSE(stored().white.elo.has_value());
+    CHECK(stored().black.elo == 2100);
+    // And back (absent -> present).
+    auto const restored = cli.Patch(url, R"({"white_elo":1750})", "application/json");
+    REQUIRE(restored != nullptr);
+    CHECK(restored->status == 200);
+    CHECK(stored().white.elo == 1750);
+
+    // Malformed ratings are 400 and leave the game and the indexes untouched.
+    auto const sequence = setup.db.derived_index_status()->mutation_seq;
+    for (auto const* const bad : {R"({"white_elo":"2300"})",
+                                  R"({"white_elo":2300.5})",
+                                  R"({"white_elo":true})",
+                                  R"({"white_elo":[1]})",
+                                  R"({"white_elo":32768})",
+                                  R"({"black_elo":-32769})",
+                                  R"({"black_elo":99999999999999})",
+                                  R"({"nope":1})"})
+    {
+        auto const rejected = cli.Patch(url, bad, "application/json");
+        INFO(bad);
+        REQUIRE(rejected != nullptr);
+        CHECK(rejected->status == 400);
+    }
+    CHECK(stored().white.elo == 1750);
+    CHECK(setup.db.derived_index_status()->mutation_seq == sequence);
+    CHECK(setup.db.derived_index_status()->postings_usable);
+
+    srv.stop();
+    server_thread.join();
+}
+
+TEST_CASE("server: any other field on an imported game is 409 and applies nothing, even next to a correction", "[motif-http][pr6b]")
+{
+    correction_fixture setup {"http_correct_forbidden"};
+    constexpr std::uint16_t test_port {18172};
+    motif::http::server srv {setup.db};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+    auto const url = fmt::format("/api/games/{}", setup.imported_id);
+    auto const sequence = setup.db.derived_index_status()->mutation_seq;
+
+    for (auto const* const forbidden : {R"({"white":"Someone Else","result":"0-1","white_elo":2500})",
+                                        R"({"black":"Someone Else"})",
+                                        R"({"event":"Other","white_elo":2500})",
+                                        R"({"date":"2000.01.01"})",
+                                        R"({"notes":"x","result":"0-1"})",
+                                        R"({"review_status":"studied"})",
+                                        R"({"eco":"A00"})"})
+    {
+        auto const rejected = cli.Patch(url, forbidden, "application/json");
+        INFO(forbidden);
+        REQUIRE(rejected != nullptr);
+        CHECK(rejected->status == 409);
+        CHECK(rejected->body.contains("imported game"));
+    }
+    auto const stored = setup.db.store().get(motif::db::game_id {setup.imported_id});
+    REQUIRE(stored.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    CHECK(stored->result == "1-0");
+    CHECK(stored->white.elo == 2000);
+    CHECK(stored->white.name == "Imported White");
+    // NOLINTEND(bugprone-unchecked-optional-access)
+    CHECK(setup.db.derived_index_status()->mutation_seq == sequence);
+    // Deleting an imported game stays forbidden.
+    auto const deleted = cli.Delete(url);
+    REQUIRE(deleted != nullptr);
+    CHECK(deleted->status == 409);
+
+    srv.stop();
+    server_thread.join();
+}
+
+TEST_CASE("server: a correction that duplicates another game is 409 duplicate", "[motif-http][pr6b]")
+{
+    correction_fixture setup {"http_correct_duplicate", default_white_elo, "1-0"};
+    // A second game identical except for its result.
+    auto const twin = insert_http_game(setup.db,
+                                       {.white = "Imported White",
+                                        .black = "Imported Black",
+                                        .white_elo = 2000,
+                                        .black_elo = 1900,
+                                        .result = "0-1",
+                                        .event = "Import",
+                                        .date = "2024.01.01",
+                                        .eco = "C20",
+                                        .move_seed = 0,
+                                        .moves = encode_moves_for_game({"e4", "e5", "Nf3"})});
+    REQUIRE(setup.db.rebuild_position_postings().has_value());
+    constexpr std::uint16_t test_port {18173};
+    motif::http::server srv {setup.db};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+    auto const sequence = setup.db.derived_index_status()->mutation_seq;
+
+    auto const collided = cli.Patch(fmt::format("/api/games/{}", twin), R"({"result":"1-0"})", "application/json");
+    REQUIRE(collided != nullptr);
+    CHECK(collided->status == 409);
+    CHECK(collided->body.contains("duplicate"));
+    CHECK(setup.db.derived_index_status()->mutation_seq == sequence);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(setup.db.store().get(motif::db::game_id {twin})->result == "0-1");
+
+    srv.stop();
+    server_thread.join();
+}
+
+TEST_CASE("server: a result correction on a stale index is refused with 503 and changes nothing", "[motif-http][pr6b]")
+{
+    correction_fixture setup {"http_correct_stale"};
+    // An insert the index does not cover makes the baseline stale.
+    insert_http_game(
+        setup.db, {.white = "Late", .black = "Arrival", .result = "1-0", .event = "E", .date = "2024.02.02", .eco = "A00", .move_seed = 1});
+    REQUIRE_FALSE(setup.db.derived_index_status()->postings_usable);
+    constexpr std::uint16_t test_port {18174};
+    motif::http::server srv {setup.db};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+
+    auto const refused = cli.Patch(fmt::format("/api/games/{}", setup.imported_id), R"({"result":"0-1"})", "application/json");
+    REQUIRE(refused != nullptr);
+    CHECK(refused->status == 503);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(setup.db.store().get(motif::db::game_id {setup.imported_id})->result == "1-0");
+
+    srv.stop();
+    server_thread.join();
+}
+
+TEST_CASE("server: a manual game accepts a wide patch through the documented wire names", "[motif-http][pr6b]")
+{
+    tmp_dir const tdir {"http_wide_patch"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "wide-patch-db");
+    REQUIRE(db_res.has_value());
+    constexpr std::uint16_t test_port {18175};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+    // A POST /api/games insert leaves the indexes stale (PR 5); a result correction needs them current.
+    REQUIRE(db_res->rebuild_position_postings().has_value());
+
+    auto const patched = cli.Patch(fmt::format("/api/games/{}", created.id),
+                                   R"({"white":"Renamed White","result":"1/2-1/2","black_elo":2222,"notes":"wide"})",
+                                   "application/json");
+    srv.stop();
+    server_thread.join();
+    REQUIRE(patched != nullptr);
+    CHECK(patched->status == 200);
+    CHECK(patched->body.contains("Renamed White"));
+    CHECK(patched->body.contains(R"("result":"1/2-1/2")"));
+    CHECK(patched->body.contains(R"("source_type":"manual")"));
+}
+
 TEST_CASE("server: DELETE /api/games/{id} removes game from position search", "[motif-http]")
 {
     auto const tdir = tmp_dir {"crud_delete_positions"};
@@ -3922,6 +4246,258 @@ TEST_CASE("server: upload import rejects a second concurrent upload", "[motif-ht
     srv.stop();
     server_thread.join();
     logging.shutdown();
+
+    // A canceled upload may leave its temporary PGN behind for resumption.
+    std::error_code cleanup_err {};
+    std::filesystem::remove(std::filesystem::temp_directory_path() / ("motif_upload_" + import_id + ".pgn"), cleanup_err);
+}
+
+namespace
+{
+
+constexpr std::string_view cancel_next_upload_import_env {"MOTIF_HTTP_TEST_CANCEL_NEXT_UPLOAD_IMPORT"};
+
+auto collect_import_events(httplib::Client& cli, std::string const& import_id) -> std::string
+{
+    std::string events;
+    cli.Get("/api/imports/" + import_id + "/progress",
+            httplib::Headers {},
+            [&events](char const* data, size_t size) -> bool
+            {
+                events.append(data, size);
+                return true;
+            });
+    return events;
+}
+
+auto upload_pgn(httplib::Client& cli, std::string const& content) -> std::string
+{
+    auto const res = cli.Post(
+        "/api/imports/upload",
+        httplib::UploadFormDataItems {{.name = "file", .content = content, .filename = "games.pgn", .content_type = "text/plain"}});
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 202);
+    return extract_import_id(res->body);
+}
+
+auto upload_temp_path(std::string const& import_id) -> std::filesystem::path
+{
+    return std::filesystem::temp_directory_path() / ("motif_upload_" + import_id + ".pgn");
+}
+
+}  // namespace
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: an interrupted upload keeps its temporary PGN while its import checkpoint names it, and the import resumes from it",
+          "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_keeps_checkpointed_file"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-keep");
+    REQUIRE(db_res.has_value());
+
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18176};
+    auto cancel_upload = env_flag_scope {cancel_next_upload_import_env};
+    motif::http::server srv {*db_res};
+    cancel_upload.clear();
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    // The seam stops this upload's import before it starts, so it ends
+    // interrupted with its checkpoint in place, with no timing involved.
+    auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
+    auto const temp_path = upload_temp_path(import_id);
+    CHECK(collect_import_events(cli, import_id).contains("event: complete"));
+
+    // The session is done, so the worker has already settled the file.
+    auto const checkpoint = motif::import::read_checkpoint(db_res->dir());
+    REQUIRE(checkpoint.has_value());
+    CHECK(std::filesystem::path {checkpoint->source_path} == temp_path);
+    CHECK(std::filesystem::exists(temp_path));
+
+    // Resuming by path finishes the import: every game of the upload is stored.
+    // The retained upload is not deleted, even though the checkpoint is gone: only
+    // the current upload's own import cleans up, so the user removes it.
+    auto const resume_res = cli.Post("/api/imports", R"({"path":")" + temp_path.string() + R"("})", "application/json");
+    REQUIRE(resume_res != nullptr);
+    REQUIRE(resume_res->status == 202);
+    CHECK(collect_import_events(cli, extract_import_id(resume_res->body)).contains("total_attempted"));
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
+    CHECK(std::filesystem::exists(temp_path));
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+
+    auto const game_count = db_res->store().count_games();
+    REQUIRE(game_count.has_value());
+    CHECK(*game_count == 3);
+
+    std::error_code cleanup_err {};
+    std::filesystem::remove(temp_path, cleanup_err);
+}
+
+TEST_CASE("server: a completed upload removes its temporary PGN", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_completed_removes_file"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-complete");
+    REQUIRE(db_res.has_value());
+
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18177};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
+    CHECK(collect_import_events(cli, import_id).contains("total_attempted"));
+
+    CHECK_FALSE(std::filesystem::exists(upload_temp_path(import_id)));
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: a later upload never deletes the retained temporary PGN of an earlier interrupted one", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_keeps_earlier_file"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-earlier");
+    REQUIRE(db_res.has_value());
+
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18178};
+    auto cancel_upload = env_flag_scope {cancel_next_upload_import_env};
+    motif::http::server srv {*db_res};
+    cancel_upload.clear();
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    auto const first_id = upload_pgn(cli, std::string {three_game_pgn_content});
+    auto const first_path = upload_temp_path(first_id);
+    CHECK(collect_import_events(cli, first_id).contains("event: complete"));
+    REQUIRE(std::filesystem::exists(first_path));  // interrupted: kept for resumption
+
+    // An ordinary upload completes and clears the checkpoint. Its own file is
+    // removed; the earlier one is not touched.
+    auto const second_id = upload_pgn(cli, std::string {three_game_pgn_content});
+    CHECK(collect_import_events(cli, second_id).contains("total_attempted"));
+
+    CHECK(std::filesystem::exists(first_path));
+    CHECK_FALSE(std::filesystem::exists(upload_temp_path(second_id)));
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+
+    std::error_code cleanup_err {};
+    std::filesystem::remove(first_path, cleanup_err);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("server: a user file that a checkpoint names is never deleted, whether it is resumed by path or a later upload runs",
+          "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_user_file_named_by_checkpoint"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-user-file");
+    REQUIRE(db_res.has_value());
+
+    // A user's own file that happens to carry the upload prefix and sits in the
+    // temp directory, named by the checkpoint of an interrupted import by path.
+    auto const user_file = std::filesystem::temp_directory_path() / "motif_upload_http_test_user_file.pgn";
+    {
+        std::ofstream out {user_file};
+        out << three_game_pgn_content;
+    }
+    REQUIRE(motif::import::write_checkpoint(db_res->dir(),
+                                            {.source_path = user_file.string(), .byte_offset = 0, .games_committed = 0, .last_game_id = 0})
+                .has_value());
+
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18179};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    SECTION("the interrupted import is resumed by path")
+    {
+        auto const res = cli.Post("/api/imports", R"({"path":")" + user_file.string() + R"("})", "application/json");
+        REQUIRE(res != nullptr);
+        REQUIRE(res->status == 202);
+        CHECK(collect_import_events(cli, extract_import_id(res->body)).contains("total_attempted"));
+        CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
+    }
+    SECTION("a later upload completes and replaces the checkpoint")
+    {
+        auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
+        CHECK(collect_import_events(cli, import_id).contains("total_attempted"));
+        CHECK_FALSE(std::filesystem::exists(upload_temp_path(import_id)));
+    }
+
+    CHECK(std::filesystem::exists(user_file));
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+
+    std::error_code cleanup_err {};
+    std::filesystem::remove(user_file, cleanup_err);
+}
+
+TEST_CASE("server: an upload is kept when the import checkpoint cannot be read", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_unreadable_checkpoint"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-unreadable");
+    REQUIRE(db_res.has_value());
+    {
+        std::ofstream out {motif::import::checkpoint_path(db_res->dir())};
+        out << "{not json";
+    }
+
+    auto logging = import_logging_scope {tdir.path / "logs"};
+
+    constexpr std::uint16_t test_port {18180};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    // The import fails on the unreadable checkpoint. Whether that file names this
+    // upload cannot be known, so the upload must not be deleted.
+    auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
+    auto const temp_path = upload_temp_path(import_id);
+    static_cast<void>(collect_import_events(cli, import_id));
+
+    CHECK(std::filesystem::exists(temp_path));
+    CHECK(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
+
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
+
+    std::error_code cleanup_err {};
+    std::filesystem::remove(temp_path, cleanup_err);
 }
 
 // NOLINTEND(readability-function-cognitive-complexity)

@@ -20,6 +20,7 @@
 
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
+#include "motif/db/fault_injection.hpp"
 
 namespace
 {
@@ -190,6 +191,21 @@ auto build_small_valid_artifact(std::filesystem::path const& path) -> void
     REQUIRE(postings.finalize().has_value());
 }
 
+auto fail_every_build(motif::db::fault::point const where, motif::db::fault::artifact_kind /*kind*/, std::uint64_t /*generation*/) noexcept
+    -> motif::db::fault::fault_action
+{
+    return where == motif::db::fault::point::before_build ? motif::db::fault::fault_action::fail_io
+                                                          : motif::db::fault::fault_action::proceed;
+}
+
+auto fail_artifact_rename(motif::db::fault::point const where,
+                          motif::db::fault::artifact_kind /*kind*/,
+                          std::uint64_t /*generation*/) noexcept -> motif::db::fault::fault_action
+{
+    return where == motif::db::fault::point::before_artifact_rename ? motif::db::fault::fault_action::fail_io
+                                                                    : motif::db::fault::fault_action::proceed;
+}
+
 }  // namespace
 
 TEST_CASE("position_postings preserves exact repeated occurrences across external merge", "[motif-db][position_postings]")
@@ -301,11 +317,11 @@ TEST_CASE("database_manager uses persisted position postings for exact position 
     REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
     REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
-    REQUIRE(manager->manifest().position_postings.has_value());
-    CHECK(std::filesystem::exists(bundle_dir
-                                  / manager->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).filename));
-    CHECK(manager->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).source_generation
-          == manager->manifest().source_generation);
+    REQUIRE(manager->manifest().postings() != nullptr);
+    CHECK(std::filesystem::exists(bundle_dir / manager->manifest().postings()->artifact.filename));
+    CHECK(manager->manifest().covered_mutation_seq == manager->derived_index_status()->covered_mutation_seq);
+    CHECK(manager->derived_index_status()->covered_mutation_seq
+          == std::optional<std::uint64_t> {manager->derived_index_status()->mutation_seq});
 
     auto const target_hash = hash_after_sans({"Nf3"});
     auto const matches = manager->query_position_matches(target_hash);
@@ -348,17 +364,23 @@ TEST_CASE("database_manager uses persisted position postings for exact position 
     REQUIRE(manager->set_manual_game_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
     auto patch = motif::db::game_patch {};
     patch.result = "0-1";
-    patch.white_elo = patched_white_elo;
+    patch.white_elo = motif::db::rating_patch::set(patched_white_elo);
     REQUIRE(manager->patch_game_metadata(motif::db::game_id {1U}, patch).has_value());
-    CHECK_FALSE(manager->manifest().position_postings.has_value());
-    CHECK_FALSE(manager->manifest().opening_tree_index.has_value());
+    // The patch is one atomic operation: the sequence advanced and a new snapshot covering it
+    // committed together, so the postings stay available and already report the patched
+    // metadata. The postings occurrence file is the very same artifact.
+    auto const postings_file = manager->manifest().postings()->artifact.filename;
+    CHECK(manager->derived_index_status()->postings_usable);
+    CHECK(manager->manifest().postings()->artifact.filename == postings_file);
     auto const patched_game = manager->store().get(motif::db::game_id {1U});
     REQUIRE(patched_game.has_value());
     CHECK(patched_game->white.elo == std::optional<std::int32_t> {patched_white_elo});
-    auto const stale_matches = manager->query_position_matches(target_hash);
-    REQUIRE_FALSE(stale_matches.has_value());
-    auto const stale_first_matches = manager->query_position_first_matches(target_hash, requested_game_ids);
-    CHECK_FALSE(stale_first_matches.has_value());
+    auto const incremental_matches = manager->query_position_matches(target_hash);
+    REQUIRE(incremental_matches.has_value());
+    CHECK((*incremental_matches)[0].result == -1);
+    CHECK((*incremental_matches)[0].white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_white_elo)});
+    CHECK(manager->query_position_first_matches(target_hash, requested_game_ids).has_value());
+    // A full rebuild of the edited canonical data answers identically.
     REQUIRE(manager->rebuild_position_postings().has_value());
     auto const patched_matches = manager->query_position_matches(target_hash);
     REQUIRE(patched_matches.has_value());
@@ -437,7 +459,8 @@ TEST_CASE("database_manager::position_summary reports valid, stale, and absent p
 
     auto const target_hash = hash_after_sans({"Nf3"});
 
-    // No postings have ever been built: not an error, just no data.
+    // A new bundle publishes an empty postings snapshot at creation, so this
+    // is a valid, current index that simply lacks the hash: success, no data.
     auto const before_build = manager->position_summary(target_hash);
     REQUIRE(before_build.has_value());
     CHECK_FALSE(before_build->has_value());
@@ -445,7 +468,7 @@ TEST_CASE("database_manager::position_summary reports valid, stale, and absent p
     REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
     REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Two", "Black Two", std::nullopt, 2400)).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
-    REQUIRE(manager->manifest().position_postings.has_value());
+    REQUIRE(manager->manifest().postings() != nullptr);
 
     // Valid postings, hash present.
     auto const valid = manager->position_summary(target_hash);
@@ -459,18 +482,20 @@ TEST_CASE("database_manager::position_summary reports valid, stale, and absent p
     REQUIRE(absent.has_value());
     CHECK_FALSE(absent->has_value());
 
-    // Postings now stale: another game lands without a postings rebuild.
+    // Postings now stale: another game lands without a postings rebuild. The
+    // answer is an error, never "hash absent" -- unavailable coverage must not
+    // masquerade as no data.
     REQUIRE(manager->insert_game(make_game({"Nf3"}, "White Three", "Black Three", std::nullopt, std::nullopt)).has_value());
     auto const stale = manager->position_summary(target_hash);
-    REQUIRE(stale.has_value());
-    CHECK_FALSE(stale->has_value());
+    REQUIRE_FALSE(stale.has_value());
+    CHECK(stale.error() == motif::db::error_code::io_failure);
 
     manager->close();
     std::filesystem::remove_all(bundle_dir);
 }
 
 // NOLINTBEGIN(readability-function-cognitive-complexity) -- Catch2 assertions inflate failure-injection setup complexity.
-TEST_CASE("database_manager::rebuild_position_postings leaves the prior generation intact but stale when publish fails",
+TEST_CASE("database_manager::rebuild_position_postings leaves the prior generation intact when publication fails",
           "[motif-db][position_postings]")
 {
     temporary_file const file;
@@ -481,8 +506,9 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
 
     REQUIRE(manager->insert_game(make_game({"Nf3", "Nc6", "Ng1", "Nb8", "Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
-    REQUIRE(manager->manifest().position_postings.has_value());
-    auto const original_filename = manager->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).filename;
+    REQUIRE(manager->manifest().postings() != nullptr);
+    auto const original_filename = manager->manifest().postings()->artifact.filename;
+    auto const original_generation = manager->manifest().publication_generation;
     auto const original_path = bundle_dir / original_filename;
     REQUIRE(std::filesystem::exists(original_path));
 
@@ -491,21 +517,19 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
     REQUIRE(before.has_value());
     REQUIRE(before->size() == 2U);
 
-    // Block the next publication without changing canonical SQLite. The
-    // replacement bytes may be identical, but the generated filename differs,
-    // so the manifest and orphan checks still distinguish success from failure.
-    auto const manifest_tmp_path = bundle_dir / "manifest.json.tmp";
-    std::filesystem::create_directory(manifest_tmp_path);
+    // Fail the next publication at the artifact rename without changing
+    // canonical SQLite.
+    {
+        motif::db::fault::scoped_hook const hook {fail_artifact_rename};
+        auto const rebuild_res = manager->rebuild_position_postings();
+        REQUIRE_FALSE(rebuild_res.has_value());
+    }
 
-    auto const rebuild_res = manager->rebuild_position_postings();
-    REQUIRE_FALSE(rebuild_res.has_value());
-
-    std::filesystem::remove(manifest_tmp_path);
-
-    // The manifest entry, the file it names, and the live in-memory reader
-    // must all still be the original (pre-failure) generation.
-    REQUIRE(manager->manifest().position_postings.has_value());
-    CHECK(manager->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).filename == original_filename);
+    // The snapshot, the file it names, and the live in-memory reader are all
+    // still the original generation.
+    REQUIRE(manager->manifest().postings() != nullptr);
+    CHECK(manager->manifest().postings()->artifact.filename == original_filename);
+    CHECK(manager->manifest().publication_generation == original_generation);
     CHECK(std::filesystem::exists(original_path));
 
     // No orphaned unpublished-generation file left behind.
@@ -521,12 +545,11 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
     REQUIRE(after_failed_publish.has_value());
     CHECK(after_failed_publish->size() == 2U);
 
-    // A retry (build_seq untouched by the failed publish, since manifest_
-    // -- the only thing that advances it -- was never assigned) succeeds and
-    // supersedes the original generation.
+    // A retry uses a fresh unique name, succeeds, and supersedes the original.
     REQUIRE(manager->rebuild_position_postings().has_value());
-    REQUIRE(manager->manifest().position_postings.has_value());
-    CHECK(manager->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).filename != original_filename);
+    REQUIRE(manager->manifest().postings() != nullptr);
+    CHECK(manager->manifest().postings()->artifact.filename != original_filename);
+    CHECK(manager->manifest().publication_generation == original_generation + 1U);
     CHECK_FALSE(std::filesystem::exists(original_path));
     auto const after_retry = manager->query_position_matches(target_hash);
     REQUIRE(after_retry.has_value());
@@ -538,7 +561,8 @@ TEST_CASE("database_manager::rebuild_position_postings leaves the prior generati
 
 // NOLINTEND(readability-function-cognitive-complexity)
 
-TEST_CASE("database_manager::open skips rebuilding when exact postings cover canonical games", "[motif-db][position_postings]")
+TEST_CASE("database_manager::open skips rebuilding when the published snapshot covers the canonical sequence",
+          "[motif-db][position_postings]")
 {
     temporary_file const file;
     auto const bundle_dir = file.path().parent_path() / "motif-postings-skip-rebuild-bundle";
@@ -548,23 +572,21 @@ TEST_CASE("database_manager::open skips rebuilding when exact postings cover can
         REQUIRE(manager.has_value());
         REQUIRE(manager->insert_game(make_game({"Nf3"}, "White One", "Black One", 2700, 2650)).has_value());
         REQUIRE(manager->rebuild_position_postings().has_value());
-        auto const build_seq_before = manager->manifest().derived_index_build_seq;
-        REQUIRE(manager->manifest().position_postings.has_value());
+        auto const generation_before = manager->manifest().publication_generation;
+        auto const filename_before = manager->manifest().postings()->artifact.filename;
         manager->close();
 
-        // Simulate an unclean shutdown: force the in-use dirty flag back on.
-        auto manifest = motif::db::read_manifest(bundle_dir / "manifest.json");
-        REQUIRE(manifest.has_value());
-        manifest->position_index_dirty = true;  // NOLINT(bugprone-unchecked-optional-access)
-        REQUIRE(motif::db::write_manifest(bundle_dir / "manifest.json", *manifest).has_value());
+        // Even with the cache gone (an "unclean shutdown" leaves no marker that
+        // matters), SQLite's snapshot row proves coverage: the reopen must not
+        // build anything. A hook that fails every build makes any replay fatal.
+        REQUIRE(std::filesystem::remove(bundle_dir / "manifest.json"));
+        motif::db::fault::scoped_hook const hook {fail_every_build};
 
         auto reopened = motif::db::database_manager::open(bundle_dir);
         REQUIRE(reopened.has_value());
-        // Dirty recovery recognized the covering postings generation and did
-        // not rebuild: the build sequence counter is unchanged from before
-        // the dirty reopen.
-        CHECK(reopened->manifest().derived_index_build_seq == build_seq_before);
-        REQUIRE(reopened->manifest().position_postings.has_value());
+        CHECK(reopened->manifest().publication_generation == generation_before);
+        REQUIRE(reopened->manifest().postings() != nullptr);
+        CHECK(reopened->manifest().postings()->artifact.filename == filename_before);
         auto const target_hash = hash_after_sans({"Nf3"});
         auto const matches = reopened->query_position_matches(target_hash);
         REQUIRE(matches.has_value());

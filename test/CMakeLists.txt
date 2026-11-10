@@ -17,8 +17,17 @@ add_executable(motif_db_test
     source/motif_db/schema_test.cpp
     source/motif_db/manifest_test.cpp
     source/motif_db/database_manager_test.cpp
+    source/motif_db/database_publication_test.cpp
+    source/motif_db/mutation_sequence_test.cpp
     source/motif_db/position_postings_test.cpp
     source/motif_db/opening_tree_index_test.cpp
+    source/motif_db/resource_governor_test.cpp
+    source/motif_db/opening_tree_raw_test.cpp
+    source/motif_db/opening_tree_patch_test.cpp
+    source/motif_db/postings_metadata_patch_test.cpp
+    source/motif_db/composite_snapshot_test.cpp
+    source/motif_db/edit_publication_test.cpp
+    source/motif_db/edit_failure_test.cpp
 )
 target_link_libraries(motif_db_test PRIVATE motif_db Catch2::Catch2WithMain)
 target_compile_features(motif_db_test PRIVATE cxx_std_23)
@@ -53,6 +62,7 @@ add_executable(motif_search_test
     source/motif_search/position_search_test.cpp
     source/motif_search/opening_stats_test.cpp
     source/motif_search/opening_tree_test.cpp
+    source/motif_search/objectives_repro_test.cpp
 )
 target_link_libraries(motif_search_test PRIVATE motif_search motif_import Catch2::Catch2WithMain)
 target_compile_features(motif_search_test PRIVATE cxx_std_23)
@@ -86,6 +96,24 @@ add_executable(motif_chess_test
 target_link_libraries(motif_chess_test PRIVATE motif_chess Catch2::Catch2WithMain)
 target_compile_features(motif_chess_test PRIVATE cxx_std_23)
 catch_discover_tests(motif_chess_test)
+
+# Benchmark suite (scripts/bench_compare.py). Deliberately not registered with
+# catch_discover_tests: these scenarios import a PGN corpus and run for
+# minutes, so ctest must never pick them up. Run through the script or
+# directly, one test case per process (see BENCHMARKS.md).
+add_executable(motif_bench_test
+    source/motif_bench/bench_import_test.cpp
+    source/motif_bench/bench_open_test.cpp
+    source/motif_bench/bench_insert_test.cpp
+    source/motif_bench/bench_mutate_test.cpp
+    source/motif_bench/bench_multi_open_test.cpp
+)
+target_link_libraries(motif_bench_test PRIVATE motif_search motif_import Catch2::Catch2WithMain)
+target_compile_features(motif_bench_test PRIVATE cxx_std_23)
+target_include_directories(motif_bench_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
+target_compile_definitions(
+    motif_bench_test PRIVATE MOTIF_PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
 
 
 if(motif_ENABLE_SLINT_SPIKE)

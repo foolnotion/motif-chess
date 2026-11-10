@@ -34,14 +34,35 @@ search_presenter::search_presenter(motif::db::database_manager& database)
 {
 }
 
+auto search_presenter::starting_position_cache_is_current() const -> bool
+{
+    if (!starting_position_cache_) {
+        return false;
+    }
+    // The cached page copies canonical data -- including metadata that never
+    // advances the mutation sequence -- and was computed from postings that
+    // must still be usable. Both are checked in one generation scope, so a
+    // hit can never bypass the database's coverage gate.
+    auto const generation_scope = database_->lock_generation();
+    if (database_->data_revision() != starting_position_cache_->data_revision) {
+        return false;
+    }
+    auto const status = database_->derived_index_status();
+    return status.has_value() && status->postings_usable;
+}
+
 auto search_presenter::search(motif::db::zobrist_hash const hash, motif::db::search_filter filter)
     -> search_result<std::optional<search_query>>
 {
     filter.position = hash;
-    auto const cache_hit = hash == starting_position_hash_ && starting_position_cache_ && !has_metadata_filter(filter)
+    auto cache_hit = hash == starting_position_hash_ && starting_position_cache_ && !has_metadata_filter(filter)
         && filter.offset == starting_position_cache_->filter.offset && filter.limit == starting_position_cache_->filter.limit
         && filter.sort_column == starting_position_cache_->filter.sort_column
         && filter.sort_ascending == starting_position_cache_->filter.sort_ascending;
+    if (cache_hit && !starting_position_cache_is_current()) {
+        starting_position_cache_.reset();
+        cache_hit = false;
+    }
     if (cache_hit) {
         ++state_.query_generation;
         auto cached_page = *starting_position_cache_;
@@ -68,6 +89,13 @@ auto search_presenter::search(motif::db::zobrist_hash const hash, motif::db::sea
 
 auto search_presenter::execute_query(search_query const& query) const -> search_result<search_page>
 {
+    // One generation scope across all three reads (metadata page, postings
+    // join, opening statistics): no rebuild or canonical mutation can land
+    // between them, so the page describes a single generation. The manager's
+    // own per-call locks nest harmlessly (the mutex is recursive). The revision
+    // is read inside the same scope, so it names exactly the data read here.
+    auto const generation_scope = database_->lock_generation();
+    auto const revision = database_->data_revision();
     auto games_result = database_->find_games(query.filter);
     if (!games_result) {
         return tl::unexpected {from_database_error(games_result.error())};
@@ -115,6 +143,7 @@ auto search_presenter::execute_query(search_query const& query) const -> search_
         .total_matches = games_result->total_count,
         .continuations = std::move(*stats_result),
         .filter = query.filter,
+        .data_revision = revision,
     };
 }
 

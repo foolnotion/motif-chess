@@ -2,6 +2,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -39,10 +40,21 @@ constexpr auto magic = std::array<char, 8> {'M', 'O', 'T', 'I', 'F', 'O', 'T', '
 // v4 -> v5: each node header gained a trailing "complete" varint flag. A
 // complete node's continuations were aggregated from every occurrence of its
 // hash in every game (not capped to max_root_ply), so its edge root_ply may
-// legitimately exceed max_root_ply -- read_continuation's upper-bound check
-// is relaxed per-node accordingly. Only the canonical starting position is
+// legitimately exceed max_root_ply -- the per-edge upper-bound check is
+// relaxed per-node accordingly. Only the canonical starting position is
 // ever marked complete (see full_coverage_root_hash below).
-constexpr auto format_version = std::uint32_t {5};
+// v5 -> v6: Elo sums are zigzag signed varints (a v5 writer cast signed sums
+// to u64, which its own reader rejected for any negative sum), the two
+// weighted double fields became exact doubled integer sums (zigzag), and each
+// edge gained a validity-flag varint (min ply exact / sample bounds exact /
+// cached child frequency present). v5 files are still read and converted.
+constexpr auto format_version = opening_tree_index_format_version;
+constexpr auto legacy_format_version = opening_tree_index_legacy_format_version;
+constexpr auto edge_flag_min_ply_valid = std::uint64_t {1};
+constexpr auto edge_flag_samples_valid = std::uint64_t {2};
+constexpr auto edge_flag_child_frequency = std::uint64_t {4};
+constexpr auto edge_flag_mask = std::uint64_t {7};
+constexpr auto header_node_count_offset = std::streamoff {22};
 constexpr auto byte_bits = std::size_t {8};
 constexpr auto byte_mask = std::uint64_t {0xff};
 constexpr auto fixed_header_size = std::uintmax_t {30};
@@ -50,6 +62,10 @@ constexpr auto fixed_header_size = std::uintmax_t {30};
 constexpr auto minimum_node_size = std::uintmax_t {11};
 constexpr auto final_write_buffer_size = std::size_t {1U << 16U};
 constexpr auto per_game_scratch_reserve = std::size_t {32};
+// Checkpoint reads: one bulk read per buffer instead of one istream::get() per
+// byte. Point queries touch a single node, so they use a small buffer.
+constexpr auto read_buffer_size = std::size_t {1U << 16U};
+constexpr auto point_read_buffer_size = std::size_t {1U << 12U};
 
 class buffered_tree_writer
 {
@@ -125,6 +141,52 @@ class buffered_tree_writer
     std::size_t size_ {};
 };
 
+// Sequential byte reader over a checkpoint file. Replaces std::ifstream::get()
+// (a sentry construction per byte) and tellg() (an lseek per call) on the decode
+// paths. A truncated file or read error surfaces as end of input, exactly as an
+// eof from get() did.
+class buffered_tree_reader
+{
+  public:
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- a file offset and a buffer size; both call sites pass named constants.
+    buffered_tree_reader(std::ifstream input, std::uint64_t const start_offset, std::size_t const capacity)
+        : input_ {std::move(input)}
+        , buffer_(capacity)
+        , buffer_offset_ {start_offset}
+    {
+    }
+
+    auto get() -> std::optional<std::uint8_t>
+    {
+        if (cursor_ == filled_ && !refill()) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint8_t>(buffer_[cursor_++]);
+    }
+
+    // File offset of the next unread byte.
+    [[nodiscard]] auto position() const noexcept -> std::uint64_t { return buffer_offset_ + cursor_; }
+
+    auto at_end() -> bool { return cursor_ == filled_ && !refill(); }
+
+  private:
+    auto refill() -> bool
+    {
+        buffer_offset_ += filled_;
+        cursor_ = 0;
+        filled_ = 0;
+        input_.read(buffer_.data(), static_cast<std::streamsize>(buffer_.size()));
+        filled_ = static_cast<std::size_t>(input_.gcount());
+        return filled_ != 0U;
+    }
+
+    std::ifstream input_;
+    std::vector<char> buffer_;
+    std::uint64_t buffer_offset_;
+    std::size_t cursor_ {};
+    std::size_t filled_ {};
+};
+
 template<typename Integer>
 auto write_little_endian(std::ofstream& output, Integer value) -> bool
 {
@@ -155,12 +217,23 @@ auto read_little_endian(std::ifstream& input, Integer& value) -> bool
     return true;
 }
 
-auto write_f64(std::ofstream& output, double value) -> bool
+template<typename Integer>
+auto read_little_endian(buffered_tree_reader& input, Integer& value) -> bool
 {
-    return write_little_endian(output, std::bit_cast<std::uint64_t>(value));
+    static_assert(std::is_unsigned_v<Integer>);
+    auto raw_value = std::uint64_t {0};
+    for (std::size_t index = 0; index < sizeof(Integer); ++index) {
+        auto const byte = input.get();
+        if (!byte) {
+            return false;
+        }
+        raw_value |= static_cast<std::uint64_t>(*byte) << (index * byte_bits);
+    }
+    value = static_cast<Integer>(raw_value);
+    return true;
 }
 
-auto read_f64(std::ifstream& input, double& value) -> bool
+auto read_f64(buffered_tree_reader& input, double& value) -> bool
 {
     std::uint64_t raw {};
     if (!read_little_endian(input, raw)) {
@@ -170,37 +243,14 @@ auto read_f64(std::ifstream& input, double& value) -> bool
     return true;
 }
 
-auto read_varint(std::ifstream& input, std::uint64_t& value) -> bool
+auto read_varint(buffered_tree_reader& input, std::uint64_t& value) -> bool
 {
-    constexpr auto continuation_bit = std::uint8_t {0x80};
-    constexpr auto payload_mask = std::uint8_t {0x7F};
-    constexpr auto payload_bits = 7U;
-    constexpr auto max_shift = 63U;
-    // At shift 63 only bit 0 of a payload fits in a u64; reject a 10th byte
-    // that sets any other bit instead of silently shifting it out.
-    constexpr auto max_shift_payload_limit = std::uint8_t {0x01};
-
-    value = 0;
-    auto shift = 0U;
-    while (true) {
-        auto const byte = input.get();
-        if (byte == std::char_traits<char>::eof()) {
-            return false;
-        }
-        if (shift > max_shift) {
-            return false;
-        }
-        auto const payload = static_cast<std::uint8_t>(byte);
-        auto const payload_bits_value = static_cast<std::uint8_t>(payload & payload_mask);
-        if (shift == max_shift && payload_bits_value > max_shift_payload_limit) {
-            return false;
-        }
-        value |= static_cast<std::uint64_t>(payload_bits_value) << shift;
-        if ((payload & continuation_bit) == 0U) {
-            return true;
-        }
-        shift += payload_bits;
+    auto const decoded = decode_uleb128([&input]() -> std::optional<std::uint8_t> { return input.get(); });
+    if (!decoded) {
+        return false;
     }
+    value = *decoded;
+    return true;
 }
 
 // (root_hash, encoded_move, child_hash) -- one entry per distinct edge.
@@ -237,79 +287,82 @@ struct edge_agg
     std::uint32_t white_wins {};
     std::uint32_t draws {};
     std::uint32_t black_wins {};
-    std::int64_t white_elo_sum {};
     std::uint32_t white_elo_count {};
-    std::int64_t black_elo_sum {};
     std::uint32_t black_elo_count {};
-    double weighted_contrib_sum {0.0};
-    double elo_weight_sum {0.0};
+    std::int64_t white_elo_sum {};
+    std::int64_t black_elo_sum {};
+    std::int64_t numerator2 {};
+    std::int64_t weight2 {};
     std::uint32_t eco_sample_min {std::numeric_limits<std::uint32_t>::max()};
     std::uint32_t eco_sample_max {0};
 };
 
-// Mirrors database_manager.cpp's local map_result: draws and unrecognized
-// result strings both map to 0. Duplicated rather than shared because that
-// function is anonymous-namespace, file-local to database_manager.cpp.
-auto map_result(std::string const& pgn_result) -> std::int8_t
+auto stats_to_agg(raw_edge_stats const& stats, std::uint16_t const root_ply, std::uint32_t const sample) -> edge_agg
 {
-    if (pgn_result == "1-0") {
-        return 1;
-    }
-    if (pgn_result == "0-1") {
-        return -1;
-    }
-    return 0;
+    // One game's contribution: every field is 0 or 1 except the signed sums.
+    return edge_agg {.root_ply = root_ply,
+                     .frequency = static_cast<std::uint32_t>(stats.frequency),
+                     .white_wins = static_cast<std::uint32_t>(stats.white_wins),
+                     .draws = static_cast<std::uint32_t>(stats.draws),
+                     .black_wins = static_cast<std::uint32_t>(stats.black_wins),
+                     .white_elo_count = static_cast<std::uint32_t>(stats.white_count),
+                     .black_elo_count = static_cast<std::uint32_t>(stats.black_count),
+                     .white_elo_sum = stats.white_sum,
+                     .black_elo_sum = stats.black_sum,
+                     .numerator2 = stats.numerator2,
+                     .weight2 = stats.weight2,
+                     .eco_sample_min = sample,
+                     .eco_sample_max = sample};
 }
 
-// Mirrors note_result/note_elo in source/motif/search/opening_tree.cpp,
-// duplicated for the same reason (file-local there).
-void note_result(edge_agg& agg, std::int8_t const result)
+auto agg_to_stats(edge_agg const& agg) -> raw_edge_stats
 {
-    if (result > 0) {
-        ++agg.white_wins;
-        return;
-    }
-    if (result < 0) {
-        ++agg.black_wins;
-        return;
-    }
-    ++agg.draws;
+    return raw_edge_stats {.frequency = agg.frequency,
+                           .white_wins = agg.white_wins,
+                           .draws = agg.draws,
+                           .black_wins = agg.black_wins,
+                           .white_sum = agg.white_elo_sum,
+                           .white_count = agg.white_elo_count,
+                           .black_sum = agg.black_elo_sum,
+                           .black_count = agg.black_elo_count,
+                           .numerator2 = agg.numerator2,
+                           .weight2 = agg.weight2};
 }
 
-void note_elo(edge_agg& agg,
-              std::int8_t const result,
-              std::optional<std::int32_t> const& white_elo,
-              std::optional<std::int32_t> const& black_elo)
+auto corrupt(char const* what) -> tl::unexpected<error>
 {
-    if (white_elo.has_value()) {
-        agg.white_elo_sum += *white_elo;
-        ++agg.white_elo_count;
-    }
-    if (black_elo.has_value()) {
-        agg.black_elo_sum += *black_elo;
-        ++agg.black_elo_count;
-    }
-    if (white_elo.has_value() && black_elo.has_value()) {
-        auto const avg_elo = (static_cast<double>(*white_elo) + static_cast<double>(*black_elo)) / 2.0;
-        agg.weighted_contrib_sum += static_cast<double>(result) * avg_elo;
-        agg.elo_weight_sum += avg_elo;
-    }
+    return tl::unexpected {error {error_code::io_failure, what}};
 }
 
-auto average_elo(std::int64_t const sum, std::uint32_t const count) -> std::optional<double>
+// The v5 writer stored signed sums as unsigned varints (two's complement), so a
+// value above INT64_MAX is a negative sum; the population bound in
+// validate_merged_edge rejects anything implausible.
+auto v5_signed(std::uint64_t const raw) noexcept -> std::int64_t
 {
-    if (count == 0U) {
+    return static_cast<std::int64_t>(raw);
+}
+
+// A v5 weighted double is accepted only when 2x is a finite, integral, in-range
+// value whose int64 round trip is exact; anything else is corruption, never
+// silently rounded.
+auto v5_doubled(double const value) noexcept -> std::optional<std::int64_t>
+{
+    constexpr auto two_pow_63 = 9223372036854775808.0;
+    auto const doubled = value * 2.0;
+    if (!std::isfinite(doubled) || doubled != std::trunc(doubled) || doubled >= two_pow_63 || doubled < -two_pow_63) {
         return std::nullopt;
     }
-    return static_cast<double>(sum) / static_cast<double>(count);
+    auto const integer = static_cast<std::int64_t>(doubled);
+    if (static_cast<double>(integer) != doubled) {
+        return std::nullopt;
+    }
+    return integer;
 }
 
-// max_root_ply_for_validation is the per-node effective cap: max_root_ply()
-// for a normal node, or numeric_limits<uint16_t>::max() (root_ply's own
-// representable range, i.e. no cap) for a node marked complete.
-auto read_continuation(std::ifstream& input,
-                       std::uint16_t const max_root_ply_for_validation,
-                       std::uint32_t const root_game_count = std::numeric_limits<std::uint32_t>::max()) -> result<opening_stat_agg_row>
+constexpr auto u32_limit = std::uint64_t {std::numeric_limits<std::uint32_t>::max()};
+
+// Reads and fully validates one v5 continuation, converting it to the raw row.
+auto read_continuation_v5(buffered_tree_reader& input, merged_edge_context const& context) -> result<raw_edge>
 {
     std::uint16_t encoded_move {};
     std::uint64_t child_hash {};
@@ -332,32 +385,143 @@ auto read_continuation(std::ifstream& input,
         && read_varint(input, white_elo_sum) && read_varint(input, white_elo_count) && read_varint(input, black_elo_sum)
         && read_varint(input, black_elo_count) && read_f64(input, weighted_contrib_sum) && read_f64(input, elo_weight_sum)
         && read_varint(input, eco_sample_min) && read_varint(input, eco_sample_max) && read_varint(input, transposition_frequency);
-    if (!read_ok || root_ply > max_root_ply_for_validation || frequency == 0U || frequency > root_game_count
-        || frequency > std::numeric_limits<std::uint32_t>::max() || white_wins > frequency || draws > frequency || black_wins > frequency
-        || white_wins + draws + black_wins != frequency
-        || white_elo_sum > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
-        || black_elo_sum > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || white_elo_count > frequency
-        || black_elo_count > frequency || eco_sample_min == 0U || eco_sample_min > eco_sample_max
-        || eco_sample_max > std::numeric_limits<std::uint32_t>::max() || transposition_frequency < frequency
-        || transposition_frequency > std::numeric_limits<std::uint32_t>::max())
+    auto const numerator2 = v5_doubled(weighted_contrib_sum);
+    auto const weight2 = v5_doubled(elo_weight_sum);
+    if (!read_ok || !numerator2 || !weight2 || root_ply > std::numeric_limits<std::uint16_t>::max() || frequency > u32_limit
+        || white_wins > u32_limit || draws > u32_limit || black_wins > u32_limit || white_elo_count > u32_limit
+        || black_elo_count > u32_limit || eco_sample_min > u32_limit || eco_sample_max > u32_limit || transposition_frequency > u32_limit)
     {
-        return tl::unexpected {error {error_code::io_failure, "invalid continuation record"}};
+        return corrupt("invalid continuation record");
     }
-    return opening_stat_agg_row {
-        .cont_encoded_move = encoded_move,
-        .cont_hash = zobrist_hash {child_hash},
-        .root_ply = static_cast<std::uint16_t>(root_ply),
-        .frequency = static_cast<std::uint32_t>(frequency),
-        .transposition_frequency = static_cast<std::uint32_t>(transposition_frequency),
-        .white_wins = static_cast<std::uint32_t>(white_wins),
-        .draws = static_cast<std::uint32_t>(draws),
-        .black_wins = static_cast<std::uint32_t>(black_wins),
-        .avg_white_elo = average_elo(static_cast<std::int64_t>(white_elo_sum), static_cast<std::uint32_t>(white_elo_count)),
-        .avg_black_elo = average_elo(static_cast<std::int64_t>(black_elo_sum), static_cast<std::uint32_t>(black_elo_count)),
-        .eco_sample_min = game_id {static_cast<std::uint32_t>(eco_sample_min)},
-        .eco_sample_max = game_id {static_cast<std::uint32_t>(eco_sample_max)},
-        .elo_weighted_score = elo_weight_sum > 0.0 ? std::optional<double> {weighted_contrib_sum / elo_weight_sum} : std::nullopt,
+    auto edge = raw_edge {
+        .key = {.encoded_move = encoded_move, .child_hash = child_hash},
+        .stats = {.frequency = static_cast<std::int64_t>(frequency),
+                  .white_wins = static_cast<std::int64_t>(white_wins),
+                  .draws = static_cast<std::int64_t>(draws),
+                  .black_wins = static_cast<std::int64_t>(black_wins),
+                  .white_sum = v5_signed(white_elo_sum),
+                  .white_count = static_cast<std::int64_t>(white_elo_count),
+                  .black_sum = v5_signed(black_elo_sum),
+                  .black_count = static_cast<std::int64_t>(black_elo_count),
+                  .numerator2 = *numerator2,
+                  .weight2 = *weight2},
+        .min_root_ply = static_cast<std::uint16_t>(root_ply),
+        .min_root_ply_valid = true,
+        .sample_min = static_cast<std::uint32_t>(eco_sample_min),
+        .sample_max = static_cast<std::uint32_t>(eco_sample_max),
+        .sample_bounds_valid = true,
+        .child_frequency = static_cast<std::uint32_t>(transposition_frequency),
     };
+    if (auto valid = validate_merged_edge(edge, context); !valid) {
+        return tl::unexpected {valid.error()};
+    }
+    return edge;
+}
+
+// Reads and fully validates one v6 continuation.
+auto read_continuation_v6(buffered_tree_reader& input, merged_edge_context const& context) -> result<raw_edge>
+{
+    std::uint16_t encoded_move {};
+    std::uint64_t child_hash {};
+    std::uint64_t flags {};
+    std::uint64_t root_ply {};
+    std::uint64_t frequency {};
+    std::uint64_t white_wins {};
+    std::uint64_t draws {};
+    std::uint64_t black_wins {};
+    std::uint64_t white_sum {};
+    std::uint64_t white_count {};
+    std::uint64_t black_sum {};
+    std::uint64_t black_count {};
+    std::uint64_t numerator2 {};
+    std::uint64_t weight2 {};
+    std::uint64_t sample_min {};
+    std::uint64_t sample_max {};
+    std::uint64_t child_frequency {};
+    auto const read_ok = read_little_endian(input, encoded_move) && read_little_endian(input, child_hash) && read_varint(input, flags)
+        && read_varint(input, root_ply) && read_varint(input, frequency) && read_varint(input, white_wins) && read_varint(input, draws)
+        && read_varint(input, black_wins) && read_varint(input, white_sum) && read_varint(input, white_count)
+        && read_varint(input, black_sum) && read_varint(input, black_count) && read_varint(input, numerator2) && read_varint(input, weight2)
+        && read_varint(input, sample_min) && read_varint(input, sample_max) && read_varint(input, child_frequency);
+    if (!read_ok || (flags & ~edge_flag_mask) != 0U || root_ply > std::numeric_limits<std::uint16_t>::max() || frequency > u32_limit
+        || white_wins > u32_limit || draws > u32_limit || black_wins > u32_limit || white_count > u32_limit || black_count > u32_limit
+        || sample_min > u32_limit || sample_max > u32_limit || child_frequency > u32_limit)
+    {
+        return corrupt("invalid continuation record");
+    }
+    auto const min_ply_valid = (flags & edge_flag_min_ply_valid) != 0U;
+    auto const samples_valid = (flags & edge_flag_samples_valid) != 0U;
+    auto const has_child_frequency = (flags & edge_flag_child_frequency) != 0U;
+    // Canonical form: a field whose flag is clear is zero.
+    if ((!min_ply_valid && root_ply != 0U) || (!samples_valid && (sample_min != 0U || sample_max != 0U))
+        || (!has_child_frequency && child_frequency != 0U))
+    {
+        return corrupt("non-canonical continuation record");
+    }
+    auto edge = raw_edge {
+        .key = {.encoded_move = encoded_move, .child_hash = child_hash},
+        .stats = {.frequency = static_cast<std::int64_t>(frequency),
+                  .white_wins = static_cast<std::int64_t>(white_wins),
+                  .draws = static_cast<std::int64_t>(draws),
+                  .black_wins = static_cast<std::int64_t>(black_wins),
+                  .white_sum = zigzag_decode(white_sum),
+                  .white_count = static_cast<std::int64_t>(white_count),
+                  .black_sum = zigzag_decode(black_sum),
+                  .black_count = static_cast<std::int64_t>(black_count),
+                  .numerator2 = zigzag_decode(numerator2),
+                  .weight2 = zigzag_decode(weight2)},
+        .min_root_ply = static_cast<std::uint16_t>(root_ply),
+        .min_root_ply_valid = min_ply_valid,
+        .sample_min = static_cast<std::uint32_t>(sample_min),
+        .sample_max = static_cast<std::uint32_t>(sample_max),
+        .sample_bounds_valid = samples_valid,
+        .child_frequency = has_child_frequency ? std::optional<std::uint32_t> {static_cast<std::uint32_t>(child_frequency)} : std::nullopt,
+    };
+    if (auto valid = validate_merged_edge(edge, context); !valid) {
+        return tl::unexpected {valid.error()};
+    }
+    return edge;
+}
+
+auto read_continuation(buffered_tree_reader& input, std::uint32_t const version, merged_edge_context const& context) -> result<raw_edge>
+{
+    return version == legacy_format_version ? read_continuation_v5(input, context) : read_continuation_v6(input, context);
+}
+
+// Whether every field of an edge fits the v6 record (counts are u32, signed
+// sums are i64). Checked before writing so a bad row can never be stored.
+auto edge_is_encodable(raw_edge const& edge) noexcept -> bool
+{
+    auto const& stats = edge.stats;
+    auto const in_u32 = [](std::int64_t const value) noexcept -> bool { return value >= 0 && std::cmp_less_equal(value, u32_limit); };
+    return in_u32(stats.frequency) && in_u32(stats.white_wins) && in_u32(stats.draws) && in_u32(stats.black_wins)
+        && in_u32(stats.white_count) && in_u32(stats.black_count);
+}
+
+auto write_continuation(buffered_tree_writer& output, raw_edge const& edge) -> bool
+{
+    auto const& stats = edge.stats;
+    auto flags = std::uint64_t {0};
+    if (edge.min_root_ply_valid) {
+        flags |= edge_flag_min_ply_valid;
+    }
+    if (edge.sample_bounds_valid) {
+        flags |= edge_flag_samples_valid;
+    }
+    if (edge.child_frequency) {
+        flags |= edge_flag_child_frequency;
+    }
+    return output.write_fixed(edge.key.encoded_move) && output.write_fixed(edge.key.child_hash) && output.write_varint(flags)
+        && output.write_varint(edge.min_root_ply_valid ? edge.min_root_ply : std::uint64_t {0})
+        && output.write_varint(static_cast<std::uint64_t>(stats.frequency))
+        && output.write_varint(static_cast<std::uint64_t>(stats.white_wins)) && output.write_varint(static_cast<std::uint64_t>(stats.draws))
+        && output.write_varint(static_cast<std::uint64_t>(stats.black_wins)) && output.write_varint(zigzag_encode(stats.white_sum))
+        && output.write_varint(static_cast<std::uint64_t>(stats.white_count)) && output.write_varint(zigzag_encode(stats.black_sum))
+        && output.write_varint(static_cast<std::uint64_t>(stats.black_count)) && output.write_varint(zigzag_encode(stats.numerator2))
+        && output.write_varint(zigzag_encode(stats.weight2))
+        && output.write_varint(edge.sample_bounds_valid ? edge.sample_min : std::uint64_t {0})
+        && output.write_varint(edge.sample_bounds_valid ? edge.sample_max : std::uint64_t {0})
+        && output.write_varint(edge.child_frequency.value_or(0U));
 }
 
 // Bounded-memory external-merge counter: counts distinct-game visits per
@@ -662,8 +826,9 @@ auto write_edge_record(std::ofstream& output, edge_record const& record) -> bool
         && write_little_endian(output, agg.draws) && write_little_endian(output, agg.black_wins)
         && write_little_endian(output, static_cast<std::uint64_t>(agg.white_elo_sum)) && write_little_endian(output, agg.white_elo_count)
         && write_little_endian(output, static_cast<std::uint64_t>(agg.black_elo_sum)) && write_little_endian(output, agg.black_elo_count)
-        && write_f64(output, agg.weighted_contrib_sum) && write_f64(output, agg.elo_weight_sum)
-        && write_little_endian(output, agg.eco_sample_min) && write_little_endian(output, agg.eco_sample_max);
+        && write_little_endian(output, static_cast<std::uint64_t>(agg.numerator2))
+        && write_little_endian(output, static_cast<std::uint64_t>(agg.weight2)) && write_little_endian(output, agg.eco_sample_min)
+        && write_little_endian(output, agg.eco_sample_max);
 }
 
 auto read_edge_record(std::ifstream& input, edge_record& record) -> bool
@@ -671,22 +836,28 @@ auto read_edge_record(std::ifstream& input, edge_record& record) -> bool
     auto& agg = record.agg;
     std::uint64_t white_elo_sum {};
     std::uint64_t black_elo_sum {};
+    std::uint64_t numerator2 {};
+    std::uint64_t weight2 {};
     if (!read_little_endian(input, record.key.root_hash) || !read_little_endian(input, record.key.encoded_move)
         || !read_little_endian(input, record.key.child_hash) || !read_little_endian(input, agg.root_ply)
         || !read_little_endian(input, agg.frequency) || !read_little_endian(input, agg.white_wins) || !read_little_endian(input, agg.draws)
         || !read_little_endian(input, agg.black_wins) || !read_little_endian(input, white_elo_sum)
         || !read_little_endian(input, agg.white_elo_count) || !read_little_endian(input, black_elo_sum)
-        || !read_little_endian(input, agg.black_elo_count) || !read_f64(input, agg.weighted_contrib_sum)
-        || !read_f64(input, agg.elo_weight_sum) || !read_little_endian(input, agg.eco_sample_min)
-        || !read_little_endian(input, agg.eco_sample_max))
+        || !read_little_endian(input, agg.black_elo_count) || !read_little_endian(input, numerator2) || !read_little_endian(input, weight2)
+        || !read_little_endian(input, agg.eco_sample_min) || !read_little_endian(input, agg.eco_sample_max))
     {
         return false;
     }
     agg.white_elo_sum = static_cast<std::int64_t>(white_elo_sum);
     agg.black_elo_sum = static_cast<std::int64_t>(black_elo_sum);
+    agg.numerator2 = static_cast<std::int64_t>(numerator2);
+    agg.weight2 = static_cast<std::int64_t>(weight2);
     return true;
 }
 
+// Spill-run merge of two partial aggregates of the same edge. Sums stay within
+// i64 by the supported-domain bound (|sum| <= 2^17 * 2^32 games), so no
+// checked arithmetic is needed on this trusted scratch path.
 void merge_edge_agg(edge_agg& target, edge_agg const& source)
 {
     target.root_ply = std::min(target.root_ply, source.root_ply);
@@ -698,8 +869,8 @@ void merge_edge_agg(edge_agg& target, edge_agg const& source)
     target.white_elo_count += source.white_elo_count;
     target.black_elo_sum += source.black_elo_sum;
     target.black_elo_count += source.black_elo_count;
-    target.weighted_contrib_sum += source.weighted_contrib_sum;
-    target.elo_weight_sum += source.elo_weight_sum;
+    target.numerator2 += source.numerator2;
+    target.weight2 += source.weight2;
     target.eco_sample_min = std::min(target.eco_sample_min, source.eco_sample_min);
     target.eco_sample_max = std::max(target.eco_sample_max, source.eco_sample_max);
 }
@@ -1024,119 +1195,43 @@ auto build_spills::merge_edges(std::filesystem::path const& output_path) -> resu
     return {};
 }
 
-// Replays one game into `state` and `visits`: `visits`
-// (transposition_frequency) is uncapped, `state.edges` is capped at
+// Replays one game into `spills` and `visits`: `visits`
+// (transposition_frequency) is uncapped, the edge set is capped at
 // max_root_ply because root positions at the boundary still contribute their
-// immediate continuation. The one
-// exception is full_coverage_root_hash (the canonical starting position):
-// edges taken from that exact hash are captured at every occurrence in the
-// game, not only within max_root_ply, so its continuations stay complete
-// even for a game that transposes back to the start position later and
-// keeps playing from there.
-struct replay_scratch
-{
-    std::optional<gtl::flat_hash_set<std::uint64_t>> visited;
-    gtl::flat_hash_map<edge_key, std::uint16_t, edge_key_hash> edges;
-    gtl::flat_hash_set<std::uint64_t> roots;
-};
-
-// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- one replay pass updates dedup, edge, and full-coverage state per ply.
+// immediate continuation, except the canonical starting position (see
+// tree_contribution_enumerator for the exact rule, shared with patch producers).
 auto accumulate_game(replay_game_record const& current_game,
-                     std::uint16_t const max_root_ply,
-                     std::uint64_t const full_coverage_root_hash,
+                     tree_contribution_enumerator& enumerator,
                      hash_visit_counter* const visits,
-                     replay_scratch& scratch,
                      build_spills& spills) -> result<void>
 {
-    auto const result_code = map_result(current_game.result);
-    auto const& white_elo = current_game.white_elo;
-    auto const& black_elo = current_game.black_elo;
-
-    auto board = motif::chess::board {};
-    auto prev_hash = board.hash();
-
-    if (scratch.visited) {
-        scratch.visited->clear();
+    auto const stats = make_game_stats(encode_result_code(current_game.result), current_game.white_elo, current_game.black_elo);
+    if (!stats) {
+        return tl::unexpected {stats.error()};
     }
-    scratch.edges.clear();
-    scratch.roots.clear();
-    // Per-game dedup + min-root-ply-within-this-game tracking, matching
-    // edge_deduped's "GROUP BY p_root.game_id, ..." + MIN(p_root.ply).
-
-    if (scratch.visited && scratch.visited->insert(prev_hash).second) {
-        if (auto visit_res = visits->visit(prev_hash); !visit_res) {
-            return visit_res;
-        }
+    if (auto enumerated = enumerator.enumerate(current_game.moves); !enumerated) {
+        return enumerated;
     }
-    scratch.roots.insert(prev_hash);
-
-    for (std::size_t root_ply = 0; root_ply < current_game.moves.size(); ++root_ply) {
-        if (root_ply > std::numeric_limits<std::uint16_t>::max()) {
-            return tl::unexpected {error {error_code::io_failure, "game exceeds max representable ply"}};
-        }
-
-        auto const encoded_move = current_game.moves[root_ply];
-        motif::chess::apply_encoded_move(board, encoded_move);
-        auto const child_hash = board.hash();
-
-        if (scratch.visited && scratch.visited->insert(child_hash).second) {
-            if (auto visit_res = visits->visit(child_hash); !visit_res) {
+    if (visits != nullptr) {
+        for (auto const hash : enumerator.visited()) {
+            if (auto visit_res = visits->visit(hash); !visit_res) {
                 return visit_res;
             }
         }
-
-        if (root_ply <= max_root_ply || prev_hash == full_coverage_root_hash) {
-            auto const key = edge_key {.root_hash = prev_hash, .encoded_move = encoded_move, .child_hash = child_hash};
-            auto const ply16 = static_cast<std::uint16_t>(root_ply);
-            auto [entry, inserted] = scratch.edges.try_emplace(key, ply16);
-            if (!inserted && ply16 < entry->second) {
-                entry->second = ply16;
-            }
-        }
-
-        if (root_ply + 1U <= max_root_ply) {
-            scratch.roots.insert(child_hash);
-        }
-
-        prev_hash = child_hash;
     }
-
-    for (auto const root_hash : scratch.roots) {
+    for (auto const root_hash : enumerator.roots()) {
         if (auto result = spills.add_root(root_hash); !result) {
             return result;
         }
     }
-
-    for (auto const& [key, min_ply_this_game] : scratch.edges) {
-        auto record = edge_record {.key = key, .agg = {}};
-        record.agg.root_ply = min_ply_this_game;
-        record.agg.frequency = 1;
-        note_result(record.agg, result_code);
-        note_elo(record.agg, result_code, white_elo, black_elo);
-        record.agg.eco_sample_min = current_game.id.value;
-        record.agg.eco_sample_max = current_game.id.value;
+    for (auto const& edge : enumerator.edges()) {
+        auto record = edge_record {.key = {.root_hash = edge.root_hash, .encoded_move = edge.encoded_move, .child_hash = edge.child_hash},
+                                   .agg = stats_to_agg(*stats, edge.min_root_ply, current_game.id.value)};
         if (auto result = spills.add_edge(record); !result) {
             return result;
         }
     }
-
     return {};
-}
-
-auto write_continuation(buffered_tree_writer& output, edge_key const& key, edge_agg const& agg, std::uint32_t const transposition_frequency)
-    -> bool
-{
-    // white_elo_sum/black_elo_sum only ever accumulate non-negative int32
-    // elo values (see note_elo), so they fit an unsigned varint without a
-    // zigzag scheme. weighted_contrib_sum/elo_weight_sum are genuinely
-    // fractional/signed doubles with no natural varint mapping -- left fixed.
-    return output.write_fixed(key.encoded_move) && output.write_fixed(key.child_hash) && output.write_varint(agg.root_ply)
-        && output.write_varint(agg.frequency) && output.write_varint(agg.white_wins) && output.write_varint(agg.draws)
-        && output.write_varint(agg.black_wins) && output.write_varint(static_cast<std::uint64_t>(agg.white_elo_sum))
-        && output.write_varint(agg.white_elo_count) && output.write_varint(static_cast<std::uint64_t>(agg.black_elo_sum))
-        && output.write_varint(agg.black_elo_count) && output.write_f64(agg.weighted_contrib_sum) && output.write_f64(agg.elo_weight_sum)
-        && output.write_varint(agg.eco_sample_min) && output.write_varint(agg.eco_sample_max)
-        && output.write_varint(transposition_frequency);
 }
 
 struct child_frequency_record
@@ -1284,92 +1379,55 @@ auto write_index_file(std::filesystem::path const& path,
     {
         return tl::unexpected {error {error_code::io_failure, "spill read failed"}};
     }
-    auto const temp_path = std::filesystem::path {path.string() + ".tmp"};
-    std::ofstream output {temp_path, std::ios::binary | std::ios::trunc};
-    if (!output) {
-        return tl::unexpected {error {error_code::io_failure, "cannot open output file"}};
-    }
-    auto remove_temp = [&output, &temp_path]() -> void
-    {
-        output.close();
-        std::error_code remove_error;
-        std::filesystem::remove(temp_path, remove_error);
-    };
-    auto writer = buffered_tree_writer {output};
-
-    if (!writer.write_bytes(magic) || !writer.write_fixed(format_version) || !writer.write_fixed(opts.max_root_ply)
-        || !writer.write_fixed(source_game_count) || !writer.write_fixed(root_count))
-    {
-        remove_temp();
-        return tl::unexpected {error {error_code::io_failure, "write failed"}};
+    auto writer = opening_tree_checkpoint_writer::create(path, opts.max_root_ply, source_game_count);
+    if (!writer) {
+        return tl::unexpected {writer.error()};
     }
 
     auto child_frequencies =
         load_referenced_child_frequencies(edges_path, child_counts, child_count, edge_count, child_frequency_memory_limit_bytes, metrics);
     if (!child_frequencies) {
-        remove_temp();
         return tl::unexpected {child_frequencies.error()};
     }
     edge_record current {};
     auto has_edge = edge_count != 0U && read_edge_record(edges, current);
     if (edge_count != 0U && !has_edge) {
-        remove_temp();
         return tl::unexpected {error {error_code::io_failure, "spill read failed"}};
     }
     for (std::uint64_t root_index = 0; root_index < root_count; ++root_index) {
         std::uint64_t root_hash {};
         std::uint32_t game_count {};
         if (!read_little_endian(roots, root_hash) || !read_little_endian(roots, game_count)) {
-            remove_temp();
             return tl::unexpected {error {error_code::io_failure, "spill read failed"}};
         }
-        auto continuations = std::vector<edge_record> {};
+        auto node =
+            raw_node {.root_hash = root_hash, .game_count = game_count, .complete = root_hash == full_coverage_root_hash, .edges = {}};
         while (has_edge && current.key.root_hash == root_hash) {
-            continuations.push_back(current);
+            auto const frequency = child_frequencies->hashes.empty()
+                ? child_frequency(child_counts, child_count, current.key.child_hash, metrics)
+                : referenced_child_frequency(*child_frequencies, current.key.child_hash);
+            if (!frequency || *frequency < current.agg.frequency) {
+                return tl::unexpected {error {error_code::io_failure, "write failed"}};
+            }
+            node.edges.push_back(raw_edge {.key = {.encoded_move = current.key.encoded_move, .child_hash = current.key.child_hash},
+                                           .stats = agg_to_stats(current.agg),
+                                           .min_root_ply = current.agg.root_ply,
+                                           .min_root_ply_valid = true,
+                                           .sample_min = current.agg.eco_sample_min,
+                                           .sample_max = current.agg.eco_sample_max,
+                                           .sample_bounds_valid = true,
+                                           .child_frequency = *frequency});
             --edge_count;
             has_edge = edge_count != 0U && read_edge_record(edges, current);
             if (edge_count != 0U && !has_edge) {
-                remove_temp();
                 return tl::unexpected {error {error_code::io_failure, "spill read failed"}};
             }
         }
-        auto const is_complete = root_hash == full_coverage_root_hash;
-        if (!writer.write_fixed(root_hash) || !writer.write_varint(game_count)
-            || !writer.write_varint(static_cast<std::uint64_t>(continuations.size()))
-            || !writer.write_varint(is_complete ? std::uint64_t {1} : std::uint64_t {0}))
-        {
-            remove_temp();
-            return tl::unexpected {error {error_code::io_failure, "write failed"}};
-        }
-        for (auto const& continuation : continuations) {
-            auto const frequency = child_frequencies->hashes.empty()
-                ? child_frequency(child_counts, child_count, continuation.key.child_hash, metrics)
-                : referenced_child_frequency(*child_frequencies, continuation.key.child_hash);
-            if (!frequency || *frequency < continuation.agg.frequency
-                || !write_continuation(writer, continuation.key, continuation.agg, *frequency))
-            {
-                remove_temp();
-                return tl::unexpected {error {error_code::io_failure, "write failed"}};
-            }
+        if (auto written = writer->write_node(node); !written) {
+            return written;
         }
     }
-
-    if (!writer.flush()) {
-        remove_temp();
-        return tl::unexpected {error {error_code::io_failure, "write failed"}};
-    }
-    output.close();
-    if (!output) {
-        remove_temp();
-        return tl::unexpected {error {error_code::io_failure, "write failed"}};
-    }
-    std::error_code rename_error;
-    std::filesystem::rename(temp_path, path, rename_error);
-    if (rename_error) {
-        remove_temp();
-        return tl::unexpected {error {error_code::io_failure, "publish failed"}};
-    }
-    return {};
+    return writer->finish();
 }
 
 // NOLINTEND(readability-function-cognitive-complexity,bugprone-easily-swappable-parameters)
@@ -1383,11 +1441,11 @@ struct opening_tree_index_builder::state
     opening_tree_index_build_metrics metrics;
     hash_visit_counter visits;
     opening_tree_child_count_stream child_counts;
-    replay_scratch scratch;
+    tree_contribution_enumerator enumerator;
     build_spills spills;
     // The only node aggregated past max_root_ply -- see the format_version
-    // comment above and accumulate_game's full_coverage_root_hash parameter.
-    std::uint64_t full_coverage_root_hash {motif::chess::board {}.hash()};
+    // comment above and tree_contribution_enumerator.
+    std::uint64_t full_coverage_root_hash {opening_tree_start_hash()};
     std::uint64_t source_game_count {};
     std::optional<error> failure;
     bool finalized {false};
@@ -1399,14 +1457,10 @@ struct opening_tree_index_builder::state
         , options {build_options}
         , visits {std::filesystem::path {path.string() + ".childfreq"}, options.spill_threshold, &metrics}
         , child_counts {std::move(external_child_counts)}
+        , enumerator {options.max_root_ply, opening_tree_start_hash(), !child_counts}
         , spills {std::filesystem::path {path.string() + ".build"}, options.spill_threshold, &metrics}
     {
         metrics.child_counts_external = static_cast<bool>(child_counts);
-        scratch.edges.reserve(per_game_scratch_reserve);
-        scratch.roots.reserve(per_game_scratch_reserve);
-        if (!child_counts) {
-            scratch.visited.emplace();
-        }
     }
 };
 
@@ -1433,8 +1487,7 @@ auto opening_tree_index_builder::accumulate(replay_game_record const& game) -> r
         return tl::unexpected {error_code::invalid_argument};
     }
     auto* const visits = state_->child_counts ? nullptr : &state_->visits;
-    auto accumulated =
-        accumulate_game(game, state_->options.max_root_ply, state_->full_coverage_root_hash, visits, state_->scratch, state_->spills);
+    auto accumulated = accumulate_game(game, state_->enumerator, visits, state_->spills);
     if (!accumulated) {
         state_->failure = accumulated.error();
         return accumulated;
@@ -1565,6 +1618,342 @@ auto opening_tree_index::build(game_store const& store,
     return {};
 }
 
+// ── Contribution enumerator ──────────────────────────────────────────────────
+
+auto opening_tree_start_hash() -> std::uint64_t
+{
+    return motif::chess::board {}.hash();
+}
+
+struct tree_contribution_enumerator::state
+{
+    std::uint16_t max_root_ply {};
+    std::uint64_t full_coverage_root_hash {};
+    bool collect_visited {false};
+    gtl::flat_hash_set<std::uint64_t> visited_set;
+    gtl::flat_hash_map<edge_key, std::uint16_t, edge_key_hash> edge_map;
+    gtl::flat_hash_set<std::uint64_t> root_set;
+    std::vector<std::uint64_t> visited_out;
+    std::vector<std::uint64_t> roots_out;
+    std::vector<game_tree_edge> edges_out;
+};
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- a ply horizon and a root hash; every caller passes named values in this order.
+tree_contribution_enumerator::tree_contribution_enumerator(std::uint16_t const max_root_ply,
+                                                           std::uint64_t const full_coverage_root_hash,
+                                                           bool const collect_visited)
+    : state_ {std::make_unique<state>()}
+{
+    state_->max_root_ply = max_root_ply;
+    state_->full_coverage_root_hash = full_coverage_root_hash;
+    state_->collect_visited = collect_visited;
+    state_->edge_map.reserve(per_game_scratch_reserve);
+    state_->root_set.reserve(per_game_scratch_reserve);
+}
+
+tree_contribution_enumerator::~tree_contribution_enumerator() = default;
+tree_contribution_enumerator::tree_contribution_enumerator(tree_contribution_enumerator&&) noexcept = default;
+auto tree_contribution_enumerator::operator=(tree_contribution_enumerator&&) noexcept -> tree_contribution_enumerator& = default;
+
+auto tree_contribution_enumerator::enumerate(std::span<std::uint16_t const> const moves) -> result<void>
+{
+    auto& scratch = *state_;
+    scratch.visited_set.clear();
+    scratch.edge_map.clear();
+    scratch.root_set.clear();
+    scratch.visited_out.clear();
+    scratch.roots_out.clear();
+    scratch.edges_out.clear();
+
+    auto board = motif::chess::board {};
+    auto prev_hash = board.hash();
+    if (scratch.collect_visited && scratch.visited_set.insert(prev_hash).second) {
+        scratch.visited_out.push_back(prev_hash);
+    }
+    scratch.root_set.insert(prev_hash);
+
+    for (std::size_t root_ply = 0; root_ply < moves.size(); ++root_ply) {
+        if (root_ply > std::numeric_limits<std::uint16_t>::max()) {
+            return tl::unexpected {error {error_code::io_failure, "game exceeds max representable ply"}};
+        }
+        auto const encoded_move = moves[root_ply];
+        motif::chess::apply_encoded_move(board, encoded_move);
+        auto const child_hash = board.hash();
+
+        if (scratch.collect_visited && scratch.visited_set.insert(child_hash).second) {
+            scratch.visited_out.push_back(child_hash);
+        }
+        if (root_ply <= scratch.max_root_ply || prev_hash == scratch.full_coverage_root_hash) {
+            auto const key = edge_key {.root_hash = prev_hash, .encoded_move = encoded_move, .child_hash = child_hash};
+            auto const ply16 = static_cast<std::uint16_t>(root_ply);
+            auto [entry, inserted] = scratch.edge_map.try_emplace(key, ply16);
+            if (!inserted && ply16 < entry->second) {
+                entry->second = ply16;
+            }
+        }
+        if (root_ply + 1U <= scratch.max_root_ply) {
+            scratch.root_set.insert(child_hash);
+        }
+        prev_hash = child_hash;
+    }
+
+    scratch.roots_out.assign(scratch.root_set.begin(), scratch.root_set.end());
+    scratch.edges_out.reserve(scratch.edge_map.size());
+    for (auto const& [key, min_ply] : scratch.edge_map) {
+        scratch.edges_out.push_back(game_tree_edge {
+            .root_hash = key.root_hash, .encoded_move = key.encoded_move, .child_hash = key.child_hash, .min_root_ply = min_ply});
+    }
+    return {};
+}
+
+auto tree_contribution_enumerator::roots() const noexcept -> std::span<std::uint64_t const>
+{
+    return state_->roots_out;
+}
+
+auto tree_contribution_enumerator::edges() const noexcept -> std::span<game_tree_edge const>
+{
+    return state_->edges_out;
+}
+
+auto tree_contribution_enumerator::visited() const noexcept -> std::span<std::uint64_t const>
+{
+    return state_->visited_out;
+}
+
+// ── Checkpoint node reading ──────────────────────────────────────────────────
+
+namespace
+{
+
+struct node_header
+{
+    std::uint64_t hash {};
+    std::uint32_t game_count {};
+    std::uint32_t continuation_count {};
+    bool complete {false};
+};
+
+// Ranges only; ordering and the complete-node rule are the caller's.
+auto read_node_header(buffered_tree_reader& input) -> std::optional<node_header>
+{
+    std::uint64_t hash {};
+    std::uint64_t game_count_raw {};
+    std::uint64_t continuation_count {};
+    std::uint64_t complete_raw {};
+    if (!read_little_endian(input, hash) || !read_varint(input, game_count_raw) || !read_varint(input, continuation_count)
+        || !read_varint(input, complete_raw) || game_count_raw == 0U || game_count_raw > u32_limit || continuation_count > u32_limit
+        || complete_raw > 1U)
+    {
+        return std::nullopt;
+    }
+    return node_header {.hash = hash,
+                        .game_count = static_cast<std::uint32_t>(game_count_raw),
+                        .continuation_count = static_cast<std::uint32_t>(continuation_count),
+                        .complete = complete_raw == 1U};
+}
+
+// Reads a node's continuations (validating every one, and that keys strictly
+// ascend); appends them to *out when out is non-null.
+auto read_node_edges(buffered_tree_reader& input,
+                     std::uint32_t const version,
+                     node_header const& header,
+                     std::uint16_t const max_root_ply,
+                     std::vector<raw_edge>* const out) -> result<void>
+{
+    auto const context =
+        merged_edge_context {.node_game_count = header.game_count, .max_root_ply = max_root_ply, .node_complete = header.complete};
+    if (out != nullptr) {
+        out->reserve(header.continuation_count);
+    }
+    auto previous = std::optional<tree_edge_key> {};
+    for (std::uint32_t index = 0; index < header.continuation_count; ++index) {
+        auto edge = read_continuation(input, version, context);
+        if (!edge) {
+            return tl::unexpected {edge.error()};
+        }
+        if (previous && !(*previous < edge->key)) {
+            return corrupt("continuations are not strictly ascending");
+        }
+        previous = edge->key;
+        if (out != nullptr) {
+            out->push_back(*edge);
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
+struct opening_tree_node_stream::state
+{
+    std::optional<buffered_tree_reader> reader;
+    std::uint64_t remaining {};
+    std::uint32_t version {};
+    std::uint16_t max_root_ply {};
+    std::uint64_t source_game_count {};
+    std::optional<std::uint64_t> previous_hash;
+};
+
+opening_tree_node_stream::opening_tree_node_stream(std::unique_ptr<state> stream_state) noexcept
+    : state_ {std::move(stream_state)}
+{
+}
+
+opening_tree_node_stream::opening_tree_node_stream(opening_tree_node_stream&&) noexcept = default;
+auto opening_tree_node_stream::operator=(opening_tree_node_stream&&) noexcept -> opening_tree_node_stream& = default;
+opening_tree_node_stream::~opening_tree_node_stream() = default;
+
+auto opening_tree_node_stream::next() -> result<std::optional<raw_node>>
+{
+    if (state_->remaining == 0U) {
+        return std::optional<raw_node> {};
+    }
+    if (!state_->reader) {
+        return corrupt("node stream has no open reader");
+    }
+    auto& reader = *state_->reader;
+    auto const header = read_node_header(reader);
+    if (!header || (state_->previous_hash && *state_->previous_hash >= header->hash)
+        || (header->complete && (header->hash != opening_tree_start_hash() || header->game_count != state_->source_game_count)))
+    {
+        return corrupt("invalid node header");
+    }
+    auto node = raw_node {.root_hash = header->hash, .game_count = header->game_count, .complete = header->complete, .edges = {}};
+    if (auto edges = read_node_edges(reader, state_->version, *header, state_->max_root_ply, &node.edges); !edges) {
+        return tl::unexpected {edges.error()};
+    }
+    state_->previous_hash = header->hash;
+    --state_->remaining;
+    return std::optional<raw_node> {std::move(node)};
+}
+
+// ── Checkpoint writer ────────────────────────────────────────────────────────
+
+struct opening_tree_checkpoint_writer::state
+{
+    std::filesystem::path path;
+    std::filesystem::path temp_path;
+    std::ofstream output;
+    buffered_tree_writer writer;
+    std::uint64_t node_count {};
+    std::optional<std::uint64_t> previous_hash;
+    bool finished {false};
+
+    state(std::filesystem::path final_path, std::filesystem::path staging_path)
+        : path {std::move(final_path)}
+        , temp_path {std::move(staging_path)}
+        , output {temp_path, std::ios::binary | std::ios::trunc}
+        , writer {output}
+    {
+    }
+
+    ~state()
+    {
+        if (!finished) {
+            output.close();
+            std::error_code ignored;
+            std::filesystem::remove(temp_path, ignored);
+        }
+    }
+
+    state(state const&) = delete;
+    auto operator=(state const&) -> state& = delete;
+    state(state&&) = delete;
+    auto operator=(state&&) -> state& = delete;
+};
+
+opening_tree_checkpoint_writer::opening_tree_checkpoint_writer(std::unique_ptr<state> writer_state) noexcept
+    : state_ {std::move(writer_state)}
+{
+}
+
+opening_tree_checkpoint_writer::opening_tree_checkpoint_writer(opening_tree_checkpoint_writer&&) noexcept = default;
+auto opening_tree_checkpoint_writer::operator=(opening_tree_checkpoint_writer&&) noexcept -> opening_tree_checkpoint_writer& = default;
+opening_tree_checkpoint_writer::~opening_tree_checkpoint_writer() = default;
+
+auto opening_tree_checkpoint_writer::create(std::filesystem::path path,
+                                            std::uint16_t const max_root_ply,
+                                            std::uint64_t const source_game_count) -> result<opening_tree_checkpoint_writer>
+{
+    auto temp_path = std::filesystem::path {path.string() + ".tmp"};
+    auto writer_state = std::make_unique<state>(std::move(path), std::move(temp_path));
+    if (!writer_state->output) {
+        return tl::unexpected {error {error_code::io_failure, "cannot open output file"}};
+    }
+    if (!writer_state->writer.write_bytes(magic) || !writer_state->writer.write_fixed(format_version)
+        || !writer_state->writer.write_fixed(max_root_ply) || !writer_state->writer.write_fixed(source_game_count)
+        || !writer_state->writer.write_fixed(std::uint64_t {0}))
+    {
+        return tl::unexpected {error {error_code::io_failure, "write failed"}};
+    }
+    return opening_tree_checkpoint_writer {std::move(writer_state)};
+}
+
+auto opening_tree_checkpoint_writer::write_node(raw_node const& node) -> result<void>
+{
+    auto& self = *state_;
+    if (self.finished || (self.previous_hash && *self.previous_hash >= node.root_hash) || node.game_count == 0U
+        || node.edges.size() > u32_limit)
+    {
+        return corrupt("invalid node for checkpoint");
+    }
+    auto previous = std::optional<tree_edge_key> {};
+    for (auto const& edge : node.edges) {
+        if (!edge_is_encodable(edge) || (previous && !(*previous < edge.key))) {
+            return corrupt("invalid edge for checkpoint");
+        }
+        previous = edge.key;
+    }
+    if (!self.writer.write_fixed(node.root_hash) || !self.writer.write_varint(node.game_count)
+        || !self.writer.write_varint(static_cast<std::uint64_t>(node.edges.size()))
+        || !self.writer.write_varint(node.complete ? std::uint64_t {1} : std::uint64_t {0}))
+    {
+        return corrupt("write failed");
+    }
+    for (auto const& edge : node.edges) {
+        if (!write_continuation(self.writer, edge)) {
+            return corrupt("write failed");
+        }
+    }
+    self.previous_hash = node.root_hash;
+    ++self.node_count;
+    return {};
+}
+
+auto opening_tree_checkpoint_writer::finish() -> result<void>
+{
+    auto& self = *state_;
+    if (self.finished) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    if (!self.writer.flush()) {
+        return corrupt("write failed");
+    }
+    self.output.seekp(header_node_count_offset);
+    if (!write_little_endian(self.output, self.node_count)) {
+        return corrupt("write failed");
+    }
+    self.output.close();
+    if (!self.output) {
+        return corrupt("write failed");
+    }
+    std::error_code rename_error;
+    std::filesystem::rename(self.temp_path, self.path, rename_error);
+    if (rename_error) {
+        return corrupt("publish failed");
+    }
+    self.finished = true;
+    return {};
+}
+
+auto opening_tree_checkpoint_writer::node_count() const noexcept -> std::uint64_t
+{
+    return state_->node_count;
+}
+
+// ── Checkpoint reader ────────────────────────────────────────────────────────
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- validates every untrusted binary field before narrowing or allocation.
 auto opening_tree_index::open(std::filesystem::path const& path) -> result<opening_tree_index>
 {
@@ -1588,17 +1977,19 @@ auto opening_tree_index::open(std::filesystem::path const& path) -> result<openi
     std::uint16_t max_root_ply {};
     std::uint64_t source_game_count {};
     std::uint64_t node_count {};
-    if (!read_little_endian(input, version) || version != format_version || !read_little_endian(input, max_root_ply)
-        || !read_little_endian(input, source_game_count) || !read_little_endian(input, node_count)
-        || node_count > (file_size - fixed_header_size) / minimum_node_size)
+    if (!read_little_endian(input, version) || (version != format_version && version != legacy_format_version)
+        || !read_little_endian(input, max_root_ply) || !read_little_endian(input, source_game_count)
+        || !read_little_endian(input, node_count) || node_count > (file_size - fixed_header_size) / minimum_node_size)
     {
         return tl::unexpected {error {error_code::io_failure, "bad header"}};
     }
+    auto reader = buffered_tree_reader {std::move(input), fixed_header_size, read_buffer_size};
 
     opening_tree_index index;
     index.path_ = path;
     index.source_game_count_ = source_game_count;
     index.max_root_ply_ = max_root_ply;
+    index.format_version_ = version;
     index.node_hashes_.reserve(static_cast<std::size_t>(node_count));
     index.node_game_counts_.reserve(static_cast<std::size_t>(node_count));
     index.node_data_offsets_.reserve(static_cast<std::size_t>(node_count));
@@ -1607,69 +1998,83 @@ auto opening_tree_index::open(std::filesystem::path const& path) -> result<openi
     auto complete_node_count = std::size_t {0};
 
     for (std::uint64_t node_index = 0; node_index < node_count; ++node_index) {
-        std::uint64_t node_hash {};
-        std::uint64_t game_count_raw {};
-        std::uint64_t continuation_count {};
-        std::uint64_t complete_raw {};
-        if (!read_little_endian(input, node_hash) || !read_varint(input, game_count_raw) || !read_varint(input, continuation_count)
-            || !read_varint(input, complete_raw) || game_count_raw == 0U || game_count_raw > std::numeric_limits<std::uint32_t>::max()
-            || continuation_count > std::numeric_limits<std::uint32_t>::max() || complete_raw > 1U
-            || (!index.node_hashes_.empty() && index.node_hashes_.back() >= node_hash))
-        {
+        auto const header = read_node_header(reader);
+        if (!header || (!index.node_hashes_.empty() && index.node_hashes_.back() >= header->hash)) {
             return tl::unexpected {error {error_code::io_failure, "truncated node header"}};
         }
-        index.node_hashes_.push_back(node_hash);
-        index.node_game_counts_.push_back(static_cast<std::uint32_t>(game_count_raw));
-        auto const data_offset = input.tellg();
-        if (data_offset < 0) {
-            return tl::unexpected {error {error_code::io_failure, "invalid node offset"}};
-        }
-        index.node_data_offsets_.push_back(static_cast<std::uint64_t>(data_offset));
-        index.node_continuation_counts_.push_back(static_cast<std::uint32_t>(continuation_count));
-        auto const is_complete = complete_raw == 1U;
-        if (is_complete && (node_hash != motif::chess::board {}.hash() || game_count_raw != source_game_count || complete_node_count != 0U))
+        index.node_hashes_.push_back(header->hash);
+        index.node_game_counts_.push_back(header->game_count);
+        index.node_data_offsets_.push_back(reader.position());
+        index.node_continuation_counts_.push_back(header->continuation_count);
+        if (header->complete
+            && (header->hash != opening_tree_start_hash() || header->game_count != source_game_count || complete_node_count != 0U))
         {
             return tl::unexpected {error {error_code::io_failure, "invalid complete node"}};
         }
-        complete_node_count += is_complete ? 1U : 0U;
-        index.node_complete_.push_back(is_complete ? std::uint8_t {1} : std::uint8_t {0});
+        complete_node_count += header->complete ? 1U : 0U;
+        index.node_complete_.push_back(header->complete ? std::uint8_t {1} : std::uint8_t {0});
 
-        auto const max_ply_for_validation = is_complete ? std::numeric_limits<std::uint16_t>::max() : max_root_ply;
-        for (std::uint64_t cont_index = 0; cont_index < continuation_count; ++cont_index) {
-            if (auto continuation = read_continuation(input, max_ply_for_validation, static_cast<std::uint32_t>(game_count_raw));
-                !continuation)
-            {
-                return tl::unexpected {continuation.error()};
-            }
+        if (auto edges = read_node_edges(reader, version, *header, max_root_ply, nullptr); !edges) {
+            return tl::unexpected {edges.error()};
         }
     }
 
-    if (input.peek() != std::char_traits<char>::eof()) {
+    if (!reader.at_end()) {
         return tl::unexpected {error {error_code::io_failure, "trailing data"}};
     }
 
     return index;
 }
 
-auto opening_tree_index::query_opening_stats(zobrist_hash const hash) const -> result<std::vector<opening_stat_agg_row>>
+auto opening_tree_index::node_index(std::uint64_t const hash) const noexcept -> std::optional<std::size_t>
 {
-    auto const lower = std::ranges::lower_bound(node_hashes_, hash.value);
-    auto const node_index = static_cast<std::size_t>(lower - node_hashes_.begin());
-    if (node_index >= node_hashes_.size() || node_hashes_[node_index] != hash.value) {
-        return std::vector<opening_stat_agg_row> {};
+    auto const lower = std::ranges::lower_bound(node_hashes_, hash);
+    if (lower == node_hashes_.end() || *lower != hash) {
+        return std::nullopt;
     }
+    return static_cast<std::size_t>(lower - node_hashes_.begin());
+}
 
+auto opening_tree_index::query_raw_node(zobrist_hash const hash) const -> result<std::optional<raw_node>>
+{
+    auto const index = node_index(hash.value);
+    if (!index) {
+        return std::optional<raw_node> {};
+    }
     std::ifstream input {path_, std::ios::binary};
-    input.seekg(static_cast<std::streamoff>(node_data_offsets_[node_index]));
+    input.seekg(static_cast<std::streamoff>(node_data_offsets_[*index]));
     if (!input) {
         return tl::unexpected {error {error_code::io_failure, "cannot seek node"}};
     }
-    auto const max_ply_for_validation =
-        node_complete_[node_index] == std::uint8_t {1} ? std::numeric_limits<std::uint16_t>::max() : max_root_ply_;
+    auto reader = buffered_tree_reader {std::move(input), node_data_offsets_[*index], point_read_buffer_size};
+    auto const header = node_header {.hash = hash.value,
+                                     .game_count = node_game_counts_[*index],
+                                     .continuation_count = node_continuation_counts_[*index],
+                                     .complete = node_complete_[*index] == std::uint8_t {1}};
+    auto node = raw_node {.root_hash = hash.value, .game_count = header.game_count, .complete = header.complete, .edges = {}};
+    if (auto edges = read_node_edges(reader, format_version_, header, max_root_ply_, &node.edges); !edges) {
+        return tl::unexpected {edges.error()};
+    }
+    return std::optional<raw_node> {std::move(node)};
+}
+
+auto opening_tree_index::query_opening_stats(zobrist_hash const hash) const -> result<std::vector<opening_stat_agg_row>>
+{
+    auto node = query_raw_node(hash);
+    if (!node) {
+        return tl::unexpected {node.error()};
+    }
     auto rows = std::vector<opening_stat_agg_row> {};
-    rows.reserve(node_continuation_counts_[node_index]);
-    for (std::uint32_t index = 0; index < node_continuation_counts_[node_index]; ++index) {
-        auto row = read_continuation(input, max_ply_for_validation, node_game_counts_[node_index]);
+    auto const& live = *node;
+    if (!live) {
+        return rows;
+    }
+    rows.reserve(live->edges.size());
+    for (auto const& edge : live->edges) {
+        if (!edge.child_frequency) {
+            return corrupt("checkpoint edge has no cached child frequency");
+        }
+        auto row = to_opening_stat_row(edge, *edge.child_frequency);
         if (!row) {
             return tl::unexpected {row.error()};
         }
@@ -1678,24 +2083,32 @@ auto opening_tree_index::query_opening_stats(zobrist_hash const hash) const -> r
     return rows;
 }
 
+auto opening_tree_index::stream_nodes() const -> result<opening_tree_node_stream>
+{
+    auto stream_state = std::make_unique<opening_tree_node_stream::state>();
+    auto input = std::ifstream {path_, std::ios::binary};
+    input.seekg(static_cast<std::streamoff>(fixed_header_size));
+    if (!input) {
+        return tl::unexpected {error {error_code::io_failure, "cannot open input file"}};
+    }
+    stream_state->reader.emplace(std::move(input), fixed_header_size, read_buffer_size);
+    stream_state->remaining = node_hashes_.size();
+    stream_state->version = format_version_;
+    stream_state->max_root_ply = max_root_ply_;
+    stream_state->source_game_count = source_game_count_;
+    return opening_tree_node_stream {std::move(stream_state)};
+}
+
 auto opening_tree_index::game_count(zobrist_hash const hash) const -> result<std::uint32_t>
 {
-    auto const lower = std::ranges::lower_bound(node_hashes_, hash.value);
-    auto const node_index = static_cast<std::size_t>(lower - node_hashes_.begin());
-    if (node_index >= node_hashes_.size() || node_hashes_[node_index] != hash.value) {
-        return std::uint32_t {0};
-    }
-    return node_game_counts_[node_index];
+    auto const index = node_index(hash.value);
+    return index ? node_game_counts_[*index] : std::uint32_t {0};
 }
 
 auto opening_tree_index::is_complete(zobrist_hash const hash) const -> bool
 {
-    auto const lower = std::ranges::lower_bound(node_hashes_, hash.value);
-    auto const node_index = static_cast<std::size_t>(lower - node_hashes_.begin());
-    if (node_index >= node_hashes_.size() || node_hashes_[node_index] != hash.value) {
-        return false;
-    }
-    return node_complete_[node_index] == std::uint8_t {1};
+    auto const index = node_index(hash.value);
+    return index && node_complete_[*index] == std::uint8_t {1};
 }
 
 auto opening_tree_index::source_game_count() const noexcept -> std::uint64_t
@@ -1706,6 +2119,16 @@ auto opening_tree_index::source_game_count() const noexcept -> std::uint64_t
 auto opening_tree_index::max_root_ply() const noexcept -> std::uint16_t
 {
     return max_root_ply_;
+}
+
+auto opening_tree_index::checkpoint_format_version() const noexcept -> std::uint32_t
+{
+    return format_version_;
+}
+
+auto opening_tree_index::node_count() const noexcept -> std::uint64_t
+{
+    return node_hashes_.size();
 }
 
 }  // namespace motif::db

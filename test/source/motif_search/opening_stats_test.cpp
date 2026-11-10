@@ -1644,7 +1644,7 @@ TEST_CASE("opening_stats::query unfiltered total_games and continuations match h
                                          .black_elo = black_elo_other,
                                          .eco = std::string {"C25"},
                                          .opening_name = std::string {"Vienna Game"}})});
-    REQUIRE(manager->manifest().position_postings.has_value());
+    REQUIRE(manager->manifest().postings() != nullptr);
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
     auto const after_e4e5 = hash_after_sans({"e4", "e5"});
@@ -1690,7 +1690,7 @@ TEST_CASE("opening_stats::query with valid postings reports zero total_games for
                                          .black_elo = black_elo_sicilian,
                                          .eco = std::string {"B20"},
                                          .opening_name = std::string {"Sicilian Defense"}})});
-    REQUIRE(manager->manifest().position_postings.has_value());
+    REQUIRE(manager->manifest().postings() != nullptr);
 
     auto const unindexed_hash = hash_after_sans({"c4", "e5", "Nc3"});
     auto const summary = manager->position_summary(unindexed_hash);
@@ -1722,7 +1722,7 @@ TEST_CASE("opening_stats::query fails closed once postings go stale and recovers
                                          .black_elo = black_elo_high,
                                          .eco = {},
                                          .opening_name = {}})});
-    REQUIRE(manager->manifest().position_postings.has_value());
+    REQUIRE(manager->manifest().postings() != nullptr);
 
     auto const stats_before = motif::search::opening_stats::query(*manager, start_hash);
     REQUIRE(stats_before.has_value());
@@ -1733,11 +1733,11 @@ TEST_CASE("opening_stats::query fails closed once postings go stale and recovers
     REQUIRE(second_game_id.has_value());
 
     // SQLite now has 2 games but postings still describe 1 (their old
-    // generation): a query trusting the stale postings summary would report
-    // 1; the correct behavior is to fail closed until an explicit rebuild.
+    // coverage): the summary must be an error, not "hash absent", and the
+    // unfiltered query must fail closed rather than reporting the outdated total.
     auto const stale_summary = manager->position_summary(start_hash);
-    REQUIRE(stale_summary.has_value());
-    CHECK_FALSE(stale_summary->has_value());
+    REQUIRE_FALSE(stale_summary.has_value());
+    CHECK(stale_summary.error() == motif::db::error_code::io_failure);
 
     auto const stats_stale = motif::search::opening_stats::query(*manager, start_hash);
     REQUIRE_FALSE(stats_stale.has_value());
@@ -1768,16 +1768,15 @@ TEST_CASE("a canonical mutation invalidates same-count postings after replacemen
     REQUIRE(old_summary.has_value());
     REQUIRE(old_summary->has_value());
 
-    // remove_game() marks postings stale (bumping source_generation)
-    // immediately; the replacement game below brings the canonical game
-    // count back to 1 -- the same count the still-published (but now
-    // superseded) postings generation had -- so a same-count check alone
-    // would wrongly consider them valid. The manifest already has no
-    // postings entry at all: has_valid_derived_index()'s
-    // source_generation check on the *next* published generation ensures
-    // this can never be fooled either, once a rebuild does happen.
+    // remove_game() advances the mutation sequence immediately; the replacement
+    // game below brings the canonical game count back to 1 -- the same count the
+    // still-published (but now superseded) postings generation had -- so a
+    // count check alone would wrongly consider them valid. The snapshot keeps
+    // describing the old files, but its covered sequence is behind, so every
+    // position query is refused until a rebuild.
     REQUIRE(manager->remove_game(*old_game).has_value());
-    CHECK_FALSE(manager->manifest().position_postings.has_value());
+    CHECK(manager->manifest().postings() != nullptr);
+    CHECK_FALSE(manager->derived_index_status()->postings_usable);
     REQUIRE(manager
                 ->insert_game(make_game({.sans = {"d4", "d5", "c4"},
                                          .result = "0-1",
@@ -1830,7 +1829,7 @@ TEST_CASE("opening_stats::query unfiltered total_games scales with occurrence co
         REQUIRE(manager->insert_game(game).has_value());
     }
     REQUIRE(manager->rebuild_position_postings().has_value());
-    REQUIRE(manager->manifest().position_postings.has_value());
+    REQUIRE(manager->manifest().postings() != nullptr);
 
     auto const after_e4e5 = hash_after_sans({"e4", "e5"});
     auto const summary = manager->position_summary(after_e4e5);

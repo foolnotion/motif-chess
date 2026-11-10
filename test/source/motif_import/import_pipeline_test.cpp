@@ -18,10 +18,12 @@
 #include <fmt/base.h>
 #include <pgnlib/pgnlib.hpp>
 #include <pgnlib/types.hpp>
+#include <sqlite3.h>
 #include <tl/expected.hpp>
 
 #include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
+#include "motif/db/fault_injection.hpp"
 #include "motif/db/types.hpp"
 #include "motif/import/checkpoint.hpp"
 #include "motif/import/error.hpp"
@@ -158,6 +160,92 @@ constexpr auto k_duplicate_and_invalid_pgn = R"pgn(
 [Result "0-1"]
 
 1. NotAMove 0-1
+)pgn";
+
+// Runs SQL against the bundle's games.db on a short-lived second connection,
+// for injecting and lifting faults while the manager's connection is idle.
+void exec_on_bundle(std::filesystem::path const& bundle_dir, char const* sql)
+{
+    sqlite3* conn = nullptr;
+    REQUIRE(sqlite3_open((bundle_dir / "games.db").c_str(), &conn) == SQLITE_OK);
+    char* err = nullptr;
+    auto const result_code = sqlite3_exec(conn, sql, nullptr, nullptr, &err);
+    INFO((err != nullptr ? err : "no error"));
+    sqlite3_free(err);
+    sqlite3_close(conn);
+    REQUIRE(result_code == SQLITE_OK);
+}
+
+// Reads one integer from the bundle's games.db through a second, read-only
+// connection, so it sees only what has been committed.
+auto committed_scalar(std::filesystem::path const& bundle_dir, char const* sql) -> std::int64_t
+{
+    sqlite3* conn = nullptr;
+    REQUIRE(sqlite3_open_v2((bundle_dir / "games.db").c_str(), &conn, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(conn, sql, -1, &stmt, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    auto const value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    sqlite3_close(conn);
+    return value;
+}
+
+// The allocator invariant that must hold at every transaction boundary: the
+// persisted counter exceeds every committed game id (so none can be reissued).
+void check_allocator_above_committed_ids(std::filesystem::path const& bundle_dir)
+{
+    auto const next_id = committed_scalar(bundle_dir, "SELECT next_game_id FROM bundle_meta WHERE id = 1");
+    auto const max_id = committed_scalar(bundle_dir, "SELECT COALESCE(MAX(id), 0) FROM game");
+    CHECK(next_id > max_id);
+}
+
+constexpr auto k_pgn_game_one = R"pgn(
+[Event "Allocator"]
+[Site "?"]
+[Date "2024.02.01"]
+[Round "1"]
+[White "Alloc One W"]
+[Black "Alloc One B"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 1-0
+)pgn";
+
+constexpr auto k_pgn_game_two = R"pgn(
+[Event "Allocator"]
+[Site "?"]
+[Date "2024.02.02"]
+[Round "2"]
+[White "Alloc Two W"]
+[Black "Alloc Two B"]
+[Result "0-1"]
+
+1. d4 d5 2. c4 c6 0-1
+)pgn";
+
+constexpr auto k_pgn_game_three = R"pgn(
+[Event "Allocator"]
+[Site "?"]
+[Date "2024.02.03"]
+[Round "3"]
+[White "Alloc Three W"]
+[Black "Alloc Three B"]
+[Result "1/2-1/2"]
+
+1. Nf3 Nf6 2. g3 g6 1/2-1/2
+)pgn";
+
+constexpr auto k_pgn_game_four = R"pgn(
+[Event "Allocator"]
+[Site "?"]
+[Date "2024.02.04"]
+[Round "4"]
+[White "Alloc Four W"]
+[Black "Alloc Four B"]
+[Result "1-0"]
+
+1. c4 e5 2. Nc3 Nf6 1-0
 )pgn";
 
 constexpr motif::import::import_config k_single_worker {
@@ -499,7 +587,12 @@ TEST_CASE("import_pipeline: run imports games and deletes checkpoint on success"
     CHECK(summary->skipped == 0);
     CHECK(summary->position_postings_metrics.has_value());
     CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
-    REQUIRE(mgr->manifest().position_postings.has_value());
+    REQUIRE(mgr->manifest().postings() != nullptr);
+    // The final rebuild captured the post-dedup sequence: coverage is current.
+    auto const status = mgr->derived_index_status();
+    REQUIRE(status.has_value());
+    CHECK(status->postings_usable);
+    CHECK(status->covered_mutation_seq == std::optional<std::uint64_t> {status->mutation_seq});
     CHECK(start_position_matches(*mgr) == 3U);
 
     mgr->close();
@@ -524,7 +617,7 @@ TEST_CASE("import_pipeline: default postings path matches an explicit postings r
     motif::import::import_pipeline pipeline_a {*mgr_a};
     auto summary_a = pipeline_a.run(pgn_file, motif::import::import_config {});
     REQUIRE(summary_a.has_value());
-    REQUIRE(mgr_a->manifest().position_postings.has_value());
+    REQUIRE(mgr_a->manifest().postings() != nullptr);
     auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
     auto const matches_a = mgr_a->query_position_matches(start_hash);
     REQUIRE(matches_a.has_value());
@@ -626,13 +719,9 @@ TEST_CASE("import_pipeline: resume skips already-committed games (duplicate poli
     CHECK(first_run->committed == 3);
 
     // Write a checkpoint at offset 0 (forces resume to re-read from start)
-    motif::import::import_checkpoint const fake_chk {
-        .source_path = pgn_file.string(),
-        .byte_offset = 0,
-        .games_committed = 0,
-        .last_game_id = 0,
-    };
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(), fake_chk).has_value());
+    REQUIRE(motif::import::write_checkpoint(mgr->dir(),
+                                            {.source_path = pgn_file.string(), .byte_offset = 0, .games_committed = 0, .last_game_id = 0})
+                .has_value());
 
     // Resume: all 3 games are duplicates → none newly committed
     auto second_run = pipeline.resume(pgn_file, big_batch);
@@ -641,7 +730,7 @@ TEST_CASE("import_pipeline: resume skips already-committed games (duplicate poli
     CHECK(second_run->skipped == 3);
 
     // The resume's own postings rebuild republished the exact index.
-    REQUIRE(mgr->manifest().position_postings.has_value());
+    REQUIRE(mgr->manifest().postings() != nullptr);
     CHECK(start_position_matches(*mgr) == 3U);
 
     mgr->close();
@@ -710,13 +799,12 @@ TEST_CASE("import_pipeline: resume repairs an interrupted raw import", "[motif-i
     REQUIRE(interrupted_id.has_value());
     REQUIRE_FALSE(*mgr->writer().identity_index_exists());
 
-    motif::import::import_checkpoint const checkpoint {
-        .source_path = pgn_file.string(),
-        .byte_offset = 0,
-        .games_committed = 1,
-        .last_game_id = static_cast<std::int64_t>(interrupted_id->value),
-    };
-    REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
+    REQUIRE(motif::import::write_checkpoint(mgr->dir(),
+                                            {.source_path = pgn_file.string(),
+                                             .byte_offset = 0,
+                                             .games_committed = 1,
+                                             .last_game_id = static_cast<std::int64_t>(interrupted_id->value)})
+                .has_value());
 
     motif::import::import_pipeline pipeline {*mgr};
     auto const summary = pipeline.resume(pgn_file, k_single_worker);
@@ -738,7 +826,370 @@ TEST_CASE("import_pipeline: resume repairs an interrupted raw import", "[motif-i
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: cancellation leaves the position table dirty, and reopen repairs it", "[motif-import]")
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: resume re-reads the source from offset 0 whatever the checkpoint claims, so no game is skipped",
+          "[motif-import][checkpoint]")
+{
+    // The JSON checkpoint is written after its batch's SQLite COMMIT; a NORMAL
+    // commit lost to a power failure leaves the file ahead of the database, and
+    // unrelated writes afterwards can make any counter recorded in it look
+    // satisfied. Nothing in the file proves a batch survived, so its cursor must
+    // never be used: reading from it would skip the lost games for good.
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_ckpt_restart";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const partial_pgn = tmp / "partial.pgn";  // what SQLite actually kept: games one and two
+    auto const full_pgn = tmp / "full.pgn";
+    {
+        std::ofstream out {partial_pgn};
+        out << k_pgn_game_one << k_pgn_game_two;
+    }
+    {
+        std::ofstream out {full_pgn};
+        out << k_pgn_game_one << k_pgn_game_two << k_pgn_game_three << k_pgn_game_four;
+    }
+    auto const after_two = std::string_view {k_pgn_game_one}.size() + std::string_view {k_pgn_game_two}.size();
+    auto const after_three = after_two + std::string_view {k_pgn_game_three}.size();
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const kept = pipeline.run(partial_pgn, k_single_worker);
+        REQUIRE(kept.has_value());
+        REQUIRE(kept->committed == 2);
+    }
+
+    std::int64_t unrelated = 0;
+    auto checkpoint = motif::import::import_checkpoint {
+        .source_path = full_pgn.string(), .byte_offset = after_three, .games_committed = 3, .last_game_id = 3};
+    SECTION("the cursor is ahead of the recovered database")
+    {
+        // The lost third game's batch: the file claims it, the database lacks it.
+    }
+    SECTION("the cursor is ahead and unrelated writes have grown the database past everything it records")
+    {
+        REQUIRE(mgr->writer().insert(game_from_sans("Unrelated One W", "Unrelated B", "1-0", {"e4", "e5"})).has_value());
+        REQUIRE(mgr->writer().insert(game_from_sans("Unrelated Two W", "Unrelated B", "1-0", {"e4", "e5"})).has_value());
+        unrelated = 2;
+    }
+    SECTION("the cursor describes the database exactly")
+    {
+        checkpoint.byte_offset = after_two;
+        checkpoint.games_committed = 2;
+        checkpoint.last_game_id = 2;
+    }
+    SECTION("the cursor lies beyond the end of the file")
+    {
+        constexpr std::uintmax_t bytes_past_end = 100;
+        checkpoint.byte_offset = std::filesystem::file_size(full_pgn) + bytes_past_end;
+    }
+    REQUIRE(motif::import::write_checkpoint(mgr->dir(), checkpoint).has_value());
+
+    motif::import::import_pipeline pipeline {*mgr};
+    auto const resumed = pipeline.resume(full_pgn, k_single_worker);
+    REQUIRE(resumed.has_value());
+    // Restarted at offset 0: games one and two were re-read as duplicates and
+    // game three (the one a trusted cursor would have skipped) was imported.
+    CHECK(resumed->committed == 2);
+    CHECK(resumed->skipped == 2);
+    auto const count = mgr->store().count_games();
+    REQUIRE(count.has_value());
+    CHECK(*count == 4 + unrelated);
+    CHECK(committed_scalar(mgr->dir(), "SELECT COUNT(*) FROM game WHERE white_id = (SELECT id FROM player WHERE name = 'Alloc Three W')")
+          == 1);
+    CHECK_FALSE(motif::import::read_checkpoint(mgr->dir()).has_value());
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: a failed identity index restore is reported as recovery_required and resume repairs it",
+          "[motif-import][recovery]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_restore_failure";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    auto const& bundle_dir = mgr->dir();
+
+    constexpr motif::import::import_config two_per_batch {
+        .num_workers = 1,
+        .num_lines = 4,
+        .batch_size = 2,
+    };
+    // Dedup's DELETE of the duplicate row is refused.
+    auto const block_dedup = [&]() -> void
+    {
+        exec_on_bundle(
+            bundle_dir,
+            "CREATE TRIGGER reject_dedup_delete BEFORE DELETE ON game " "BEGIN SELECT RAISE(ABORT, 'injected dedup failure'); END;");
+    };
+
+    SECTION("after the ordinary end of ingest (the cancel path is the same code)")
+    {
+        {
+            std::ofstream out {pgn_file};
+            out << k_pgn_game_one << k_pgn_game_one;
+        }
+        block_dedup();
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const failed = pipeline.run(pgn_file, two_per_batch);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error() == motif::import::error_code::recovery_required);
+    }
+    SECTION("after a fatal ingest error")
+    {
+        {
+            std::ofstream out {pgn_file};
+            out << k_pgn_game_one << k_pgn_game_one << k_pgn_game_three;
+        }
+        block_dedup();
+        exec_on_bundle(bundle_dir,
+                       "CREATE TRIGGER reject_alloc_three BEFORE INSERT ON game "
+                       "WHEN (SELECT name FROM player WHERE id = NEW.white_id) = 'Alloc Three W' "
+                       "BEGIN SELECT RAISE(ABORT, 'injected failure'); END;");
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const failed = pipeline.run(pgn_file, two_per_batch);
+        REQUIRE_FALSE(failed.has_value());
+        // Not the original io_failure: the database still lacks its identity
+        // index, and that is what the caller must act on.
+        CHECK(failed.error() == motif::import::error_code::recovery_required);
+    }
+
+    // Nothing of the failed dedup is committed and the index is still absent.
+    REQUIRE(mgr->writer().identity_index_exists().has_value());
+    CHECK_FALSE(*mgr->writer().identity_index_exists());
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 2);
+
+    exec_on_bundle(bundle_dir, "DROP TRIGGER reject_dedup_delete;");
+    exec_on_bundle(bundle_dir, "DROP TRIGGER IF EXISTS reject_alloc_three;");
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const resumed = pipeline.resume(pgn_file, two_per_batch);
+        REQUIRE(resumed.has_value());
+    }
+    CHECK(*mgr->writer().identity_index_exists());
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game WHERE white_id = (SELECT id FROM player WHERE name = 'Alloc One W')")
+          == 1);
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("import_pipeline: resume reports recovery_required when it cannot repair an interrupted raw import", "[motif-import][recovery]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_resume_repair_failure";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    auto const& bundle_dir = mgr->dir();
+
+    // An interrupted raw import: identity index gone, an exact duplicate pair
+    // committed that only dedup can remove.
+    auto const interrupted = game_from_sans("Interrupted W", "Interrupted B", "1-0", {"e4", "e5"});
+    REQUIRE(mgr->writer().drop_identity_index().has_value());
+    REQUIRE(mgr->writer().insert_raw(interrupted).has_value());
+    auto const second_id = mgr->writer().insert_raw(interrupted);
+    REQUIRE(second_id.has_value());
+    REQUIRE(motif::import::write_checkpoint(bundle_dir,
+                                            {.source_path = pgn_file.string(),
+                                             .byte_offset = 0,
+                                             .games_committed = 2,
+                                             .last_game_id = static_cast<std::int64_t>(second_id->value)})
+                .has_value());
+
+    exec_on_bundle(bundle_dir,
+                   "CREATE TRIGGER reject_dedup_delete BEFORE DELETE ON game " "BEGIN SELECT RAISE(ABORT, 'injected dedup failure'); END;");
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const failed = pipeline.resume(pgn_file, k_single_worker);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error() == motif::import::error_code::recovery_required);
+    }
+    CHECK_FALSE(*mgr->writer().identity_index_exists());
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 2);
+    // The checkpoint survives for the retry.
+    CHECK(motif::import::read_checkpoint(bundle_dir).has_value());
+
+    exec_on_bundle(bundle_dir, "DROP TRIGGER reject_dedup_delete;");
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const resumed = pipeline.resume(pgn_file, k_single_worker);
+        REQUIRE(resumed.has_value());
+        CHECK(resumed->committed == 3);
+    }
+    CHECK(*mgr->writer().identity_index_exists());
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 4);  // one survivor of the pair + the file's three
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: a raw import failing after a committed batch keeps the allocator above every committed id and resumes cleanly",
+          "[motif-import][allocator]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_raw_fail_allocator";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_pgn_game_one << k_pgn_game_two << k_pgn_game_three << k_pgn_game_four;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    auto const& bundle_dir = mgr->dir();
+
+    // Fresh bundle: the allocator starts at 1 with no games.
+    check_allocator_above_committed_ids(bundle_dir);
+    CHECK(committed_scalar(bundle_dir, "SELECT next_game_id FROM bundle_meta WHERE id = 1") == 1);
+
+    // batch_size 2: games one and two commit as a batch, then the third game's
+    // raw insert fails and its (rolled-back) batch must leave nothing behind.
+    constexpr motif::import::import_config two_per_batch {
+        .num_workers = 1,
+        .num_lines = 4,
+        .batch_size = 2,
+    };
+    // Inject the SQLite-side failure: a trigger refusing the third game.
+    exec_on_bundle(bundle_dir,
+                   "CREATE TRIGGER reject_alloc_three BEFORE INSERT ON game "
+                   "WHEN (SELECT name FROM player WHERE id = NEW.white_id) = 'Alloc Three W' "
+                   "BEGIN SELECT RAISE(ABORT, 'injected failure'); END;");
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const failed = pipeline.run(pgn_file, two_per_batch);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error() == motif::import::error_code::io_failure);
+    }
+
+    // Rollback boundary: exactly the committed batch is durable, and the
+    // persisted counter is above its ids (no id from the aborted batch leaked
+    // into the table, none of the committed ones can be reissued).
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 2);
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(DISTINCT id) FROM game") == 2);
+    check_allocator_above_committed_ids(bundle_dir);
+    CHECK(committed_scalar(bundle_dir, "SELECT next_game_id FROM bundle_meta WHERE id = 1")
+          == committed_scalar(bundle_dir, "SELECT MAX(id) FROM game") + 1);
+    // The raw window was closed on the way out: duplicate detection works again.
+    REQUIRE(mgr->writer().identity_index_exists().has_value());
+    CHECK(*mgr->writer().identity_index_exists());
+
+    // Lift the injected fault. Resume re-reads the source from the start: games
+    // one and two are duplicates, the failed game and the one after it are new.
+    exec_on_bundle(bundle_dir, "DROP TRIGGER reject_alloc_three;");
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const resumed = pipeline.resume(pgn_file, two_per_batch);
+        REQUIRE(resumed.has_value());
+        CHECK(resumed->committed == 2);
+        CHECK(resumed->errors == 0);
+    }
+
+    // Commit boundary after the resume: four distinct ids, counter above them,
+    // and nothing needed to reissue (or collide with) an aborted batch's id.
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 4);
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(DISTINCT id) FROM game") == 4);
+    check_allocator_above_committed_ids(bundle_dir);
+    CHECK(committed_scalar(bundle_dir, "SELECT next_game_id FROM bundle_meta WHERE id = 1")
+          == committed_scalar(bundle_dir, "SELECT MAX(id) FROM game") + 1);
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: a raw import keeps the allocator above every surviving id when dedup removes rows", "[motif-import][allocator]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_raw_dedup_allocator";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        // Game one appears twice: raw ingest inserts both, dedup removes one.
+        std::ofstream out {pgn_file};
+        out << k_pgn_game_one << k_pgn_game_two << k_pgn_game_one << k_pgn_game_four;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+
+    constexpr motif::import::import_config two_per_batch {
+        .num_workers = 1,
+        .num_lines = 4,
+        .batch_size = 2,
+    };
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const summary = pipeline.run(pgn_file, two_per_batch);
+        REQUIRE(summary.has_value());
+        CHECK(summary->committed == 3);
+        CHECK(summary->duplicates_removed == 1);
+    }
+
+    auto const& bundle_dir = mgr->dir();
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 3);
+    // Four ids were handed out; the removed duplicate leaves a gap, never a reuse.
+    check_allocator_above_committed_ids(bundle_dir);
+    CHECK(committed_scalar(bundle_dir, "SELECT next_game_id FROM bundle_meta WHERE id = 1") == 5);
+
+    // A game added after the import continues above everything ever allocated.
+    auto const manual = game_from_sans("Alloc Five W", "Alloc Five B", "1-0", {"e4", "e5"});
+    auto const added = mgr->insert_game(manual);
+    REQUIRE(added.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(added->value == 5U);
+    check_allocator_above_committed_ids(bundle_dir);
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+namespace
+{
+
+// The fault seam is a plain function pointer, so the pipeline the hook cancels
+// lives at namespace scope.
+// NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables) -- a plain function pointer cannot capture, so the hook reaches its state
+// only through namespace-scope variables.
+motif::import::import_pipeline* g_cancel_pipeline {nullptr};
+std::uint64_t g_canonical_commits_seen {0};
+
+// NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
+
+auto cancel_after_first_canonical_commit(motif::db::fault::point const where,
+                                         motif::db::fault::artifact_kind /*kind*/,
+                                         std::uint64_t /*generation*/) noexcept -> motif::db::fault::fault_action
+{
+    if (where == motif::db::fault::point::after_canonical_commit) {
+        ++g_canonical_commits_seen;
+        if (g_cancel_pipeline != nullptr) {
+            g_cancel_pipeline->request_stop();
+        }
+    }
+    return motif::db::fault::fault_action::proceed;
+}
+
+}  // namespace
+
+TEST_CASE("import_pipeline: a run canceled before it commits anything leaves the published snapshot usable", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_cancel_repair";
     std::filesystem::remove_all(tmp);
@@ -761,38 +1212,146 @@ TEST_CASE("import_pipeline: cancellation leaves the position table dirty, and re
         // Default config publishes postings that serve exact matches.
         CHECK(start_position_matches(*mgr) == 3U);
     }
+    auto const before = mgr->derived_index_status();
+    REQUIRE(before.has_value());
 
-    // A second run against the same source is canceled before the worker
-    // starts (request_stop() called ahead of run(), mirroring a UI cancel
-    // that lands before any line is read). commit_sqlite_batch() still opens
-    // and commits the (empty) SQLite transaction and, per its real code
-    // path, calls mark_position_table_dirty() unconditionally -- the run
-    // returns early without a rebuild, so that dirty state must survive into
-    // the on-disk manifest.
+    // A second run against the same source is canceled before the worker starts
+    // (request_stop() called ahead of run(), mirroring a UI cancel that lands
+    // before any line is read). Nothing is committed, so the mutation sequence
+    // does not move and no invalidation happens: a failed or empty import never
+    // makes the index stale.
     {
         motif::import::import_pipeline pipeline {*mgr};
         pipeline.request_stop();
         auto const summary = pipeline.run(pgn_file, k_single_worker);
         REQUIRE(summary.has_value());
     }
+    auto const after = mgr->derived_index_status();
+    REQUIRE(after.has_value());
+    CHECK(after->mutation_seq == before->mutation_seq);
+    CHECK(after->postings_usable);
+    CHECK(start_position_matches(*mgr) == 3U);
 
     mgr->close();
+    std::filesystem::remove_all(tmp);
+}
 
-    auto const manifest_after_cancel = motif::db::read_manifest(mgr->dir() / "manifest.json");
-    REQUIRE(manifest_after_cancel.has_value());
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("import_pipeline: cancel after a committed batch blocks queries until resume rebuilds at the final sequence", "[motif-import]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_cancel_resume_seq";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    auto const empty_status = mgr->derived_index_status();
+    REQUIRE(empty_status.has_value());
+
+    constexpr motif::import::import_config one_game_batches {
+        .num_workers = 1,
+        .num_lines = 4,
+        .build_position_postings_after_import = true,
+        .batch_size = 1,
+    };
+
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        g_cancel_pipeline = &pipeline;
+        g_canonical_commits_seen = 0;
+        motif::db::fault::scoped_hook const hook {cancel_after_first_canonical_commit};
+        auto const summary = pipeline.run(pgn_file, one_game_batches);
+        g_cancel_pipeline = nullptr;
+        REQUIRE(summary.has_value());
+        // Canceled: no rebuild ran.
+        CHECK_FALSE(summary->position_postings_metrics.has_value());
+    }
+
+    // Committed rows are visible canonically but the old snapshot no longer
+    // covers them: exact position queries fail closed until a rebuild.
+    auto const canceled = mgr->derived_index_status();
+    REQUIRE(canceled.has_value());
+    CHECK(canceled->mutation_seq > empty_status->mutation_seq);
+    CHECK_FALSE(canceled->postings_usable);
+    CHECK(canceled->covered_mutation_seq == empty_status->covered_mutation_seq);
+    CHECK_FALSE(mgr->query_position_matches(motif::db::zobrist_hash {motif::chess::board {}.hash()}).has_value());
+    auto const partial = mgr->store().count_games();
+    REQUIRE(partial.has_value());
+    CHECK(*partial >= 1);
+    CHECK(*partial < 3);
+    // The cancel left a checkpoint naming this source.
+    auto const saved = motif::import::read_checkpoint(mgr->dir());
+    REQUIRE(saved.has_value());
+    CHECK(saved->source_path == pgn_file.string());
+
+    // Resume finishes the import, deduplicates, and its rebuild captures the
+    // sequence AFTER the final dedup, so the published coverage is current.
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const resumed = pipeline.resume(pgn_file, one_game_batches);
+        REQUIRE(resumed.has_value());
+        CHECK(resumed->position_postings_metrics.has_value());
+        // Re-read from the start: the games already stored come back as duplicates.
+        CHECK(std::cmp_equal(resumed->skipped, *partial));
+        CHECK(std::cmp_equal(resumed->committed, 3 - *partial));
+    }
+    auto const finished = mgr->derived_index_status();
+    REQUIRE(finished.has_value());
+    CHECK(finished->postings_usable);
+    CHECK(finished->covered_mutation_seq == std::optional<std::uint64_t> {finished->mutation_seq});
+    CHECK(start_position_matches(*mgr) == 3U);
+
+    mgr->close();
+    auto reopened = motif::db::database_manager::open(tmp / "db");
+    REQUIRE(reopened.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(manifest_after_cancel->position_index_dirty);
+    CHECK(start_position_matches(*reopened) == 3U);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    reopened->close();
+    std::filesystem::remove_all(tmp);
+}
 
-    // The canceled run invalidated the postings generation. Reopen repairs
-    // directly from canonical SQLite.
+TEST_CASE("import_pipeline: an import without a rebuild leaves position queries blocked and one open repairs them", "[motif-import]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_norebuild_stale";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    constexpr motif::import::import_config ingest_only {
+        .num_workers = 1,
+        .num_lines = 4,
+        .build_position_postings_after_import = false,
+        .batch_size = 2,
+    };
+    motif::import::import_pipeline pipeline {*mgr};
+    REQUIRE(pipeline.run(pgn_file, ingest_only).has_value());
+
+    auto const status = mgr->derived_index_status();
+    REQUIRE(status.has_value());
+    CHECK_FALSE(status->postings_usable);
+    CHECK_FALSE(mgr->query_position_matches(motif::db::zobrist_hash {motif::chess::board {}.hash()}).has_value());
+    mgr->close();
 
     auto reopened = motif::db::database_manager::open(tmp / "db");
     REQUIRE(reopened.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(start_position_matches(*reopened) == 3U);
-
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     reopened->close();
-    mgr->close();
     std::filesystem::remove_all(tmp);
 }
 
@@ -1071,7 +1630,7 @@ TEST_CASE("import_pipeline: raw ingest + dedup leaves no dangling position rows"
     REQUIRE(games->games.size() == 1);
     auto const survivor = games->games.front().id;
 
-    REQUIRE(mgr->manifest().position_postings.has_value());
+    REQUIRE(mgr->manifest().postings() != nullptr);
     auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
     auto const matches = mgr->query_position_matches(start_hash);
     REQUIRE(matches.has_value());
@@ -1136,7 +1695,7 @@ TEST_CASE("import_pipeline: run can skip position writes", "[motif-import]")
     REQUIRE(summary.has_value());
     CHECK(summary->committed == 3);
     CHECK_FALSE(summary->position_postings_metrics.has_value());
-    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    CHECK_FALSE(mgr->derived_index_status()->postings_usable);
 
     auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
     auto const matches = mgr->query_position_matches(start_hash);
@@ -1251,7 +1810,9 @@ TEST_CASE("import_pipeline: disabled postings build leaves exact queries unavail
     REQUIRE(summary.has_value());
     CHECK(summary->committed == 3);
 
-    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    // The imported rows advanced the sequence; the creation-time snapshot is
+    // still referenced but stale.
+    CHECK_FALSE(mgr->derived_index_status()->postings_usable);
     auto const matches = mgr->query_position_matches(motif::db::zobrist_hash {motif::chess::board {}.hash()});
     REQUIRE_FALSE(matches.has_value());
     CHECK(matches.error() == motif::db::error_code::io_failure);
@@ -1284,9 +1845,8 @@ TEST_CASE("import_pipeline: literal default serves every position path from post
     CHECK(summary->position_postings_metrics.value_or(motif::db::position_postings_build_metrics {}).game_count == 3U);
 
     // The exact postings index is the published derived artifact.
-    REQUIRE(mgr->manifest().position_postings.has_value());
-    CHECK(std::filesystem::exists(tmp / "db"
-                                  / mgr->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).filename));
+    REQUIRE(mgr->manifest().postings() != nullptr);
+    CHECK(std::filesystem::exists(tmp / "db" / mgr->manifest().postings()->artifact.filename));
 
     auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
     auto const after_e4e5 = [&]() -> motif::db::zobrist_hash
@@ -1389,20 +1949,22 @@ TEST_CASE("import_pipeline: literal-default bundle reopens from postings", "[mot
         mgr->close();
     }
 
-    // Checksum-verified postings that cover canonical SQLite are a clean
-    // position-index state.
+    // The published snapshot covers canonical SQLite, and the cache mirrors
+    // exactly that SQLite row.
     {
         auto const manifest_after_close = motif::db::read_manifest(tmp / "db" / "manifest.json");
         REQUIRE(manifest_after_close.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        CHECK_FALSE(manifest_after_close->position_index_dirty);
+        CHECK(manifest_after_close->covered_mutation_seq.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(manifest_after_close->canonical_game_count == 3U);
     }
 
     {
         auto reopened = motif::db::database_manager::open(tmp / "db");
         REQUIRE(reopened.has_value());
         // Reopen recognizes the covering postings generation.
-        REQUIRE(reopened->manifest().position_postings.has_value());
+        REQUIRE(reopened->manifest().postings() != nullptr);
         CHECK(start_position_matches(*reopened) == 3U);
 
         // Canonical growth without a postings rebuild makes exact queries
@@ -1423,7 +1985,7 @@ TEST_CASE("import_pipeline: literal-default bundle reopens from postings", "[mot
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("import_pipeline: mutation on a postings-only bundle fails closed and reopens repaired", "[motif-import]")
+TEST_CASE("import_pipeline: a result correction on a postings-only bundle stays incremental and survives a reopen", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_default_mutation";
     std::filesystem::remove_all(tmp);
@@ -1435,34 +1997,39 @@ TEST_CASE("import_pipeline: mutation on a postings-only bundle fails closed and 
         out << k_three_game_pgn;
     }
 
+    std::uint64_t published_generation = 0;
     {
         auto mgr = motif::db::database_manager::create(tmp / "db", "test");
         REQUIRE(mgr.has_value());
         motif::import::import_pipeline pipeline {*mgr};
         REQUIRE(pipeline.run(pgn_file, motif::import::import_config {}).has_value());
 
-        REQUIRE(mgr->set_manual_game_provenance(motif::db::game_id {1U}, std::nullopt, "new").has_value());
+        // Imported games may have their result corrected (no provenance flip needed).
         auto patch = motif::db::game_patch {};
         patch.result = "0-1";
         REQUIRE(mgr->patch_game_metadata(motif::db::game_id {1U}, patch).has_value());
-        CHECK_FALSE(mgr->manifest().position_postings.has_value());
+        // One atomic operation: the snapshot stays current, the postings occurrence file is
+        // unchanged, and the exact queries already serve the corrected result.
+        CHECK(mgr->manifest().postings() != nullptr);
+        CHECK(mgr->derived_index_status()->postings_usable);
+        published_generation = mgr->derived_index_status()->publication_generation;
 
-        // The mutation invalidated postings, so exact queries fail closed
-        // instead of serving stale data.
         auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
-        auto const refused = mgr->query_position_matches(start_hash);
-        REQUIRE_FALSE(refused.has_value());
-        CHECK(refused.error() == motif::db::error_code::io_failure);
+        auto const served = mgr->query_position_matches(start_hash);
+        REQUIRE(served.has_value());
+        REQUIRE(served->size() == 3U);
+        CHECK((*served)[0].result == -1);
 
         mgr->close();
     }
 
     {
-        // Reopen repairs postings directly from canonical SQLite, then serves
-        // the patched result.
+        // Reopen loads the published metadata chain: no rebuild (same generation), and the
+        // corrected result is served.
         auto reopened = motif::db::database_manager::open(tmp / "db");
         REQUIRE(reopened.has_value());
-        REQUIRE(reopened->manifest().position_postings.has_value());
+        REQUIRE(reopened->manifest().postings() != nullptr);
+        CHECK(reopened->derived_index_status()->publication_generation == published_generation);
         auto const start_hash = motif::db::zobrist_hash {motif::chess::board {}.hash()};
         auto const matches = reopened->query_position_matches(start_hash);
         REQUIRE(matches.has_value());

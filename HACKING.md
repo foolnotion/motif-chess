@@ -201,6 +201,21 @@ Recommended cadence:
 - `full` after major feature completion and before updating `BENCHMARKS.md`
 - `exhaustive` when doing dedicated performance work
 
+### Benchmark suite
+
+`scripts/bench_compare.py` runs the scenario suite (`motif_bench_test`, import, open,
+insert, mutate, multi-open, segments) from a Release build and compares two result
+files with per-metric tolerances. Use it before and after each PR in the
+incremental-index sequence:
+
+```sh
+scripts/run_perf_benchmarks.sh --mode bench-quick --build-dir /tmp/mc-rel \
+    --compare docs/bench-baselines/quick-twic-100k.json
+```
+
+Baselines are stored in `docs/bench-baselines/`; see the top of `BENCHMARKS.md` for the
+scenarios, tolerances, and when to refresh a baseline.
+
 ### Developer mode targets
 
 These are targets you may invoke using the build command from above, with an

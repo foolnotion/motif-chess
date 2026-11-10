@@ -196,15 +196,64 @@ struct game
     game_provenance provenance;
 };
 
+// A three-state rating edit: leave the stored rating alone, set it to a value,
+// or clear it (store NULL). A bare optional cannot say "clear", and a rating
+// correction must be able to remove a rating that was entered by mistake.
+struct rating_patch
+{
+    enum class action : std::uint8_t
+    {
+        unchanged,
+        set,
+        clear,
+    };
+
+    action kind {action::unchanged};
+    // Meaningful only for action::set.
+    std::int32_t value {};
+
+    [[nodiscard]] static constexpr auto set(std::int32_t const rating) noexcept -> rating_patch
+    {
+        return rating_patch {.kind = action::set, .value = rating};
+    }
+
+    [[nodiscard]] static constexpr auto clear() noexcept -> rating_patch { return rating_patch {.kind = action::clear, .value = 0}; }
+
+    [[nodiscard]] constexpr auto changes() const noexcept -> bool { return kind != action::unchanged; }
+
+    // The rating that results from applying this edit to `current`.
+    [[nodiscard]] constexpr auto applied_to(std::optional<std::int32_t> const& current) const noexcept -> std::optional<std::int32_t>
+    {
+        switch (kind) {
+            case action::set:
+                return value;
+            case action::clear:
+                return std::nullopt;
+            case action::unchanged:
+                break;
+        }
+        return current;
+    }
+
+    auto operator==(rating_patch const&) const -> bool = default;
+};
+
 // Fields that may be updated via PATCH /api/games/{id}.
-// Only user-added (manual) games can be patched.
-// nullopt fields are left unchanged.
+//
+// Editability policy: result, white_elo and black_elo may be corrected on ANY
+// game, imported ones included. Every other field is editable only on a
+// manually added game; a patch that supplies any other field for an imported
+// game is rejected as a whole (error_code::not_editable) and applies nothing.
+// Corrections overwrite the canonical value: no original value is kept and
+// there is no undo.
+//
+// A nullopt string field is left unchanged; a rating field is a rating_patch.
 struct game_patch
 {
     std::optional<std::string> white_name;
-    std::optional<std::int32_t> white_elo;
+    rating_patch white_elo;
     std::optional<std::string> black_name;
-    std::optional<std::int32_t> black_elo;
+    rating_patch black_elo;
     std::optional<std::string> event;
     std::optional<std::string> site;
     std::optional<std::string> date;

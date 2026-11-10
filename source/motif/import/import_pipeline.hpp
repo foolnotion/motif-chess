@@ -97,14 +97,21 @@ class import_pipeline
     void request_stop() noexcept;
 
   private:
+    // The one recovery path for a dropped identity index: fatal error, cancel,
+    // normal completion and resume all reconcile raw rows through it. Returns
+    // how many exact duplicates were removed, or recovery_required when
+    // deduplicate() failed and the index is still absent.
+    [[nodiscard]] auto restore_identity_index() -> result<std::size_t>;
+
+    // Resumes an interrupted import: the checkpoint only identifies the source;
+    // the source is re-read from offset 0 with checked inserts (see checkpoint.hpp).
     [[nodiscard]] auto resume_from_checkpoint(std::filesystem::path const& pgn_path,
                                               import_checkpoint const& checkpoint,
                                               import_config const& config) -> result<import_summary>;
 
     [[nodiscard]] auto run_from(std::filesystem::path const& pgn_path,
-                                std::size_t start_offset,
                                 std::int64_t pre_committed,
-                                std::int64_t pre_last_game_id,
+                                bool resumed,
                                 import_config const& config) -> result<import_summary>;
 
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)

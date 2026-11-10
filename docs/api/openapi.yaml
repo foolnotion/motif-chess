@@ -392,8 +392,15 @@ paths:
       description: |-
         Accepts a `multipart/form-data` POST with a single field named `file`
         containing the PGN file bytes. The backend writes the bytes to a
-        temporary file, runs the same import pipeline as `POST /api/imports`,
-        and cleans up the temporary file when the import completes or fails.
+        temporary file (`motif_upload_<import_id>.pgn` in the system temporary
+        directory) and runs the same import pipeline as `POST /api/imports`.
+        The temporary file is removed when the import completes. If the import
+        is canceled or fails and leaves an import checkpoint naming the file,
+        the file is kept so the import can be resumed by calling
+        `POST /api/imports` with that path. A retained file is never deleted
+        afterwards, neither when that resume completes nor when a later upload
+        runs: remove it manually. If the checkpoint cannot be read, the file is
+        also kept.
 
         Use this endpoint from browser frontends where the full filesystem path
         of a user-selected file is not accessible.
@@ -1024,13 +1031,29 @@ paths:
 
     patch:
       operationId: patchGame
-      summary: Update metadata of a user-added game
+      summary: Update metadata of a game, or correct its result and ratings
       description: |-
-        Partially updates the metadata of a `manual` game. Only fields present
-        in the request body are changed; absent fields are left unchanged.
+        Partially updates the metadata of a game. Only fields present in the
+        request body are changed; absent fields are left unchanged.
 
-        - Only games with `source_type: manual` may be patched; attempting to
-          patch an `imported` game returns HTTP 409.
+        - `result`, `white_elo` and `black_elo` may be corrected on **any** game,
+          imported games included. Every other field may be edited only on a game
+          with `source_type: manual`; a patch for an `imported` game that supplies
+          any other field returns HTTP 409 and applies nothing (the correction it
+          also carries is not applied either). Deleting an imported game stays
+          forbidden.
+        - A result or rating correction updates the canonical game, the position
+          index and the opening statistics in one atomic operation: opening
+          explorer, Elo distribution and game-list answers reflect it immediately,
+          without a rebuild. It requires the position index to be current (HTTP
+          503 otherwise; rebuild and retry).
+        - Corrections overwrite the stored value. The original is not kept and
+          there is no undo. Re-importing the original PGN skips a game whose only
+          difference is a corrected rating (rating is not part of a game's
+          identity), but adds the original-result record as a second game after a
+          result correction.
+        - `white_elo` / `black_elo`: omit to leave unchanged, an integer to set,
+          `null` to clear. The signed 16-bit range is enforced (HTTP 400).
         - All string fields are trimmed; empty strings are rejected with HTTP 400.
         - `result` must be one of `1-0`, `0-1`, `1/2-1/2`, or `*`.
         - `review_status` must be one of `new`, `needs_review`, `studied`, or `archived`.
@@ -1038,7 +1061,7 @@ paths:
         - name: id
           in: path
           required: true
-          description: Game ID of the manual game to update
+          description: Game ID of the game to update
           schema:
             type: integer
             minimum: 1
@@ -1102,7 +1125,11 @@ paths:
                   value:
                     error: white name must not be empty
         '409':
-          description: Game is not user-added (source_type is not manual) or patch would create a duplicate
+          description: |-
+            The patch supplies a field other than `result`, `white_elo` or
+            `black_elo` for an imported game (nothing is applied), or the patch
+            would create a duplicate game (same players, event, date, result and
+            moves as another game).
           content:
             application/json:
               schema:
@@ -1110,10 +1137,19 @@ paths:
               examples:
                 not_editable:
                   value:
-                    error: game is not user-added and cannot be modified
+                    error: this field cannot be edited on an imported game; only result, white_elo and black_elo can be corrected
                 duplicate:
                   value:
                     error: patch would create a duplicate game
+        '503':
+          description: |-
+            A result or rating correction needs the position index to cover the
+            bundle, and an earlier insert or removal left it stale. Nothing was
+            changed; rebuild the index (`POST /api/positions/rebuild`) and retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Game not found
           content:
@@ -1456,32 +1492,66 @@ components:
     PatchGameRequest:
       type: object
       description: |-
-        All fields are optional. Only fields present in the body are updated.
-        Only `manual` games may be patched.
+        All fields are optional. Only fields present in the body are updated;
+        an unknown field is rejected with HTTP 400.
+
+        **Editability.** `result`, `white_elo` and `black_elo` may be corrected on
+        any game, imported games included. Every other field may be edited only on
+        a `manual` game. A patch for an `imported` game that supplies any other
+        field is rejected as a whole (HTTP 409) and applies nothing.
+
+        **Corrections overwrite.** The corrected value replaces the canonical one;
+        the original is not retained and there is no undo. Keep the source PGN (or
+        a backup) if the original must be recoverable.
       properties:
         white:
           type: string
-          description: White player name; must be non-empty when provided
+          description: White player name; must be non-empty when provided (manual games only)
         black:
           type: string
-          description: Black player name; must be non-empty when provided
+          description: Black player name; must be non-empty when provided (manual games only)
+        white_elo:
+          type: [integer, 'null']
+          minimum: -32768
+          maximum: 32767
+          description: |-
+            White rating for this game. Omit to leave it unchanged, send an integer
+            to set it, send `null` to clear it. Outside the signed 16-bit range is
+            rejected with HTTP 400 (floats and strings are 400 as well).
+        black_elo:
+          type: [integer, 'null']
+          minimum: -32768
+          maximum: 32767
+          description: Black rating for this game; same omit / integer / `null` semantics as `white_elo`
         event:
           type: string
-          description: Event name; must be non-empty when provided
+          description: Event name; must be non-empty when provided (manual games only)
+        site:
+          type: string
+          description: Event site (manual games only)
         date:
           type: string
-          description: Game date in YYYY.MM.DD format; must be non-empty when provided
+          description: Game date in YYYY.MM.DD format; must be non-empty when provided (manual games only)
         result:
           type: string
           enum: ['1-0', '0-1', '1/2-1/2', '*']
-          description: Game result
+          description: |-
+            Game result. Correctable on any game. `1/2-1/2` and `*` are different
+            canonical values (a change between them is a real edit) even though
+            statistics count both as a draw.
+        eco:
+          type: string
+          description: ECO code (manual games only)
+        source_label:
+          type: string
+          description: Free-form source label (manual games only)
         notes:
           type: string
-          description: Personal notes stored as a reserved PGN tag
+          description: Personal notes stored as a reserved PGN tag (manual games only)
         review_status:
           type: string
           enum: [new, needs_review, studied, archived]
-          description: Review status to set
+          description: Review status to set (manual games only)
 
     GameListEntry:
       type: object

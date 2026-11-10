@@ -10,6 +10,17 @@
 namespace motif::import
 {
 
+// Marks an interrupted import of source_path. It is NOT a resume cursor: it is
+// written after a batch's SQLite COMMIT, and SQLite commits at
+// synchronous=NORMAL can roll back to an earlier WAL prefix after a power loss
+// while this file survives. No value in the file can prove that the batch it
+// describes is still in the database (counters and fingerprints can be
+// recreated by unrelated writes after a lost batch), so resume never seeks to
+// byte_offset. It re-reads the source from the start with checked
+// (deduplicating) inserts: games that survived are skipped as duplicates, lost
+// ones are imported, and no game is skipped. byte_offset, games_committed and
+// last_game_id only report how far the interrupted run got. Reading ignores
+// unknown keys, so files written by builds with more fields still load.
 struct import_checkpoint
 {
     std::string source_path;

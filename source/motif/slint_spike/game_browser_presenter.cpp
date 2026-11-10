@@ -23,7 +23,12 @@ auto game_browser_presenter::load_games() -> result<void>
     auto filter = motif::db::search_filter {};
     filter.limit = motif::db::max_search_limit;
 
-    auto result = database_->store().find_games(filter);
+    // store() is unlocked; hold the generation scope for the read so it cannot straddle a mutation or index publish.
+    auto result = [&]() -> decltype(database_->store().find_games(filter))
+    {
+        auto const scope = database_->lock_generation();
+        return database_->store().find_games(filter);
+    }();
     if (!result) {
         return fail_database(result.error());
     }
@@ -41,7 +46,11 @@ auto game_browser_presenter::select_game(std::size_t const row) -> result<void>
     }
 
     auto const& entry = state_.games[row];
-    auto game = database_->store().get(entry.id);
+    auto game = [&]() -> decltype(database_->store().get(entry.id))
+    {
+        auto const scope = database_->lock_generation();
+        return database_->store().get(entry.id);
+    }();
     if (!game) {
         return fail_database(game.error());
     }

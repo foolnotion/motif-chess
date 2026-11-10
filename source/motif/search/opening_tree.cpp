@@ -18,6 +18,7 @@
 
 #include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
+#include "motif/db/opening_tree_stats.hpp"
 #include "motif/db/types.hpp"
 #include "motif/search/error.hpp"
 #include "motif/search/opening_stats.hpp"
@@ -79,8 +80,8 @@ struct tree_continuation_aggregate
     std::uint32_t white_elo_count {};
     std::int64_t black_elo_sum {};
     std::uint32_t black_elo_count {};
-    double weighted_contrib_sum {0.0};  // Σ (result × avg_elo)
-    double elo_weight_sum {0.0};  // Σ avg_elo
+    std::int64_t weighted_numerator2 {0};  // Σ result × (white + black); twice Σ result × avg_elo
+    std::int64_t weight2 {0};  // Σ (white + black); twice Σ avg_elo
     std::optional<std::string> eco;
     std::optional<std::string> opening_name;
     motif::db::game_id sample_game_id {};  // one game that took this continuation, for eco lookup
@@ -123,9 +124,9 @@ void note_elo(tree_continuation_aggregate& aggregate,
         ++aggregate.black_elo_count;
     }
     if (white_elo.has_value() && black_elo.has_value()) {
-        auto const avg_elo = (static_cast<double>(*white_elo) + static_cast<double>(*black_elo)) / 2.0;
-        aggregate.weighted_contrib_sum += static_cast<double>(result) * avg_elo;
-        aggregate.elo_weight_sum += avg_elo;
+        auto const paired = static_cast<std::int64_t>(*white_elo) + static_cast<std::int64_t>(*black_elo);
+        aggregate.weighted_numerator2 += static_cast<std::int64_t>(result) * paired;
+        aggregate.weight2 += paired;
     }
 }
 
@@ -161,9 +162,88 @@ auto build_continuation(tree_continuation_aggregate const& aggregate,
         .average_black_elo = average_elo(aggregate.black_elo_sum, aggregate.black_elo_count),
         .eco = aggregate.eco,
         .opening_name = aggregate.opening_name,
-        .elo_weighted_score = aggregate.elo_weight_sum > 0.0 ? aggregate.weighted_contrib_sum / aggregate.elo_weight_sum : 0.0,
+        .elo_weighted_score = motif::db::weighted_score(aggregate.weighted_numerator2, aggregate.weight2).value_or(0.0),
         .subtree = std::move(child_node),
     };
+}
+
+// Several parents at the same depth can reach one position by transposition, and each must own a
+// complete copy of that position's subtree; moving a single built node would leave all but the first
+// parent with an empty subtree. The copy walks the subtree with an explicit work list rather than
+// recursion, so its stack use does not depend on the tree depth.
+auto clone_node(motif::search::opening_tree::node const& source) -> std::unique_ptr<motif::search::opening_tree::node>
+{
+    using motif::search::opening_tree::node;
+    auto const shallow_copy = [](node const& original) -> std::unique_ptr<node>
+    {
+        auto copy = std::make_unique<node>(node {
+            .zobrist_hash = original.zobrist_hash,
+            .continuations = {},
+            .is_expanded = original.is_expanded,
+        });
+        copy->continuations.reserve(original.continuations.size());
+        return copy;
+    };
+
+    auto root = shallow_copy(source);
+    auto pending = std::vector<std::pair<node const*, node*>> {{&source, root.get()}};
+    while (!pending.empty()) {
+        auto const [original, copy] = pending.back();
+        pending.pop_back();
+        for (auto const& cont : original->continuations) {
+            auto child = cont.subtree ? shallow_copy(*cont.subtree) : nullptr;
+            if (child) {
+                pending.emplace_back(cont.subtree.get(), child.get());
+            }
+            copy->continuations.push_back(motif::search::opening_tree::node_continuation {
+                .san = cont.san,
+                .result_hash = cont.result_hash,
+                .frequency = cont.frequency,
+                .white_wins = cont.white_wins,
+                .draws = cont.draws,
+                .black_wins = cont.black_wins,
+                .average_white_elo = cont.average_white_elo,
+                .average_black_elo = cont.average_black_elo,
+                .eco = cont.eco,
+                .opening_name = cont.opening_name,
+                .elo_weighted_score = cont.elo_weighted_score,
+                .subtree = std::move(child),
+            });
+        }
+    }
+    return root;
+}
+
+using built_node_map = gtl::flat_hash_map<node_key, std::unique_ptr<motif::search::opening_tree::node>, node_key_hash>;
+using child_use_map = gtl::flat_hash_map<node_key, std::size_t, node_key_hash>;
+
+// Number of continuations that will want each (depth, position) child node, so the common
+// single-parent case can move the built node and only transposed positions pay for a copy.
+auto count_child_uses(gtl::flat_hash_map<node_key, node_aggregate, node_key_hash> const& aggregates) -> child_use_map
+{
+    auto uses = child_use_map {};
+    for (auto const& [nkey, nag] : aggregates) {
+        for (auto const& [encoded_move, aggregate] : nag.continuations) {
+            ++uses[node_key {.depth = static_cast<std::uint16_t>(nkey.depth + 1U), .parent_hash = aggregate.result_hash}];
+        }
+    }
+    return uses;
+}
+
+// Hands out the built child for `key`: a copy while other parents still need it, the node itself on
+// its last use. Returns null when no node was built for the key (boundary or leaf).
+auto take_built_child(built_node_map& built, child_use_map& uses, node_key const& key) -> std::unique_ptr<motif::search::opening_tree::node>
+{
+    auto const built_it = built.find(key);
+    if (built_it == built.end()) {
+        return nullptr;
+    }
+    auto const use_it = uses.find(key);
+    if (use_it != uses.end() && use_it->second > 1U) {
+        --use_it->second;
+        return clone_node(*built_it->second);
+    }
+    return std::move(built_it->second);
 }
 
 void sort_continuations(std::vector<motif::search::opening_tree::node_continuation>& conts)
@@ -201,6 +281,9 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
     }
 
     auto const max_depth = static_cast<std::uint16_t>(prefetch_depth);
+
+    // One generation for the tree-slice query and the sample-context store() read below.
+    auto const scope = database.lock_generation();
 
     auto rows_res = database.query_tree_slice(root_hash, max_depth);
     if (!rows_res) {
@@ -355,7 +438,8 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
     }
 
     // Build nodes bottom-up (max_depth → 1).
-    auto built_nodes = gtl::flat_hash_map<node_key, std::unique_ptr<node>, node_key_hash> {};
+    auto built_nodes = built_node_map {};
+    auto pending_child_uses = count_child_uses(node_aggregates);
 
     for (auto const& nkey : all_keys | std::views::reverse) {
         auto const nag_it = node_aggregates.find(nkey);
@@ -377,9 +461,8 @@ auto open(motif::db::database_manager const& database, motif::db::zobrist_hash c
             auto const is_boundary = nkey.depth >= max_depth;
             auto cont = build_continuation(aggregate, parent_board, !is_boundary, aggregate.result_hash);
 
-            auto const child_it = built_nodes.find(child_key);
-            if (child_it != built_nodes.end()) {
-                cont.subtree = std::move(child_it->second);
+            if (auto subtree = take_built_child(built_nodes, pending_child_uses, child_key)) {
+                cont.subtree = std::move(subtree);
             }
 
             current_node->continuations.push_back(std::move(cont));
@@ -429,6 +512,9 @@ auto open(motif::db::database_manager const& database,
     }
 
     auto const max_depth = static_cast<std::uint16_t>(prefetch_depth);
+
+    // One generation for the index queries and store() reads below; mutations cannot interleave.
+    auto const scope = database.lock_generation();
 
     auto all_ids_res = database.position_game_ids(root_hash);
     if (!all_ids_res) {
@@ -593,7 +679,8 @@ auto open(motif::db::database_manager const& database,
         }
     }
 
-    auto built_nodes = gtl::flat_hash_map<node_key, std::unique_ptr<node>, node_key_hash> {};
+    auto built_nodes = built_node_map {};
+    auto pending_child_uses = count_child_uses(node_aggregates);
 
     for (auto const& nkey : all_keys | std::views::reverse) {
         auto const nag_it = node_aggregates.find(nkey);
@@ -615,9 +702,8 @@ auto open(motif::db::database_manager const& database,
             auto const is_boundary = nkey.depth >= max_depth;
             auto cont = build_continuation(aggregate, parent_board, !is_boundary, aggregate.result_hash);
 
-            auto const child_it = built_nodes.find(child_key);
-            if (child_it != built_nodes.end()) {
-                cont.subtree = std::move(child_it->second);
+            if (auto subtree = take_built_child(built_nodes, pending_child_uses, child_key)) {
+                cont.subtree = std::move(subtree);
             }
 
             current_node->continuations.push_back(std::move(cont));

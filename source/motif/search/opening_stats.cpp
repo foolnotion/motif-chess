@@ -168,6 +168,9 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
 {
     auto const started = std::chrono::steady_clock::now();
 
+    // One generation for the summary/aggregate postings queries and the build_stats() store() read.
+    auto const scope = database.lock_generation();
+
     // A postings directory entry only exists for a hash with at least one
     // occurrence, so a present summary always yields a positive game count
     // without decoding that hash's posting block. Absence covers both "no
@@ -239,6 +242,9 @@ auto query(motif::db::database_manager const& database, motif::db::zobrist_hash 
     if (!has_metadata) {
         return query(database, hash);
     }
+
+    // One generation for the postings query, store() filter and context reads below.
+    auto const scope = database.lock_generation();
 
     auto all_ids_res = database.position_game_ids(hash);
     if (!all_ids_res) {

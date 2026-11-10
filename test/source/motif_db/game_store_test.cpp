@@ -537,7 +537,7 @@ TEST_CASE("game_store: elo-only patch does not mutate a player row shared by ano
     REQUIRE(fix.store.set_manual_provenance(*game1_id, {}, "new").has_value());
 
     auto patch = motif::db::game_patch {};
-    patch.white_elo = patched_white_elo;
+    patch.white_elo = motif::db::rating_patch::set(patched_white_elo);
     REQUIRE(fix.store.patch_metadata(*game1_id, patch).has_value());
 
     // Game 1 is the patch target and must show the new elo.
@@ -919,4 +919,58 @@ TEST_CASE("game_store: game with no moves round-trips correctly", "[motif_db][ga
     auto const get_res = fix.store.get(*ins_res);
     REQUIRE(get_res.has_value());
     CHECK(get_res->moves.empty());
+}
+
+// ── Durable game-ID allocator ────────────────────────────────────────────────
+
+TEST_CASE("game_store: create_schema creates the allocator row and content_revision column", "[motif_db][game_store][allocator]")
+{
+    db_fixture fix;
+    CHECK(fix.count_rows("bundle_meta") == 1);
+
+    REQUIRE(fix.store.insert(make_game()).has_value());
+    sqlite3_stmt* raw = nullptr;
+    REQUIRE(sqlite3_prepare_v2(fix.db.get(), "SELECT content_revision FROM game", -1, &raw, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(raw) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(raw, 0) == 1);
+    sqlite3_finalize(raw);
+}
+
+TEST_CASE("game_store: insert after deleting the highest id yields a greater id", "[motif_db][game_store][allocator]")
+{
+    db_fixture fix;
+
+    auto const first = fix.store.insert(make_game("Alpha", "Beta"));
+    auto const second = fix.store.insert(make_game("Gamma", "Delta"));
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    REQUIRE(fix.store.remove(*second).has_value());
+
+    auto const third = fix.store.insert(make_game("Epsilon", "Zeta"));
+    REQUIRE(third.has_value());
+    CHECK(third->value > second->value);
+
+    // Deleting everything must not rewind the allocator either.
+    REQUIRE(fix.store.remove(*first).has_value());
+    REQUIRE(fix.store.remove(*third).has_value());
+    auto const fourth = fix.store.insert(make_game("Eta", "Theta"));
+    REQUIRE(fourth.has_value());
+    CHECK(fourth->value > third->value);
+}
+
+TEST_CASE("game_store: a batch rolled back through the store leaves later inserts collision-free", "[motif_db][game_store][allocator]")
+{
+    db_fixture fix;
+
+    auto const kept = fix.store.insert(make_game("Alpha", "Beta"));
+    REQUIRE(kept.has_value());
+
+    REQUIRE(fix.store.begin_transaction().has_value());
+    REQUIRE(fix.store.insert(make_game("Gamma", "Delta")).has_value());
+    fix.store.rollback_transaction();
+
+    auto const after = fix.store.insert(make_game("Epsilon", "Zeta"));
+    REQUIRE(after.has_value());
+    CHECK(after->value > kept->value);
+    CHECK(fix.count_rows("game") == 2);
 }
