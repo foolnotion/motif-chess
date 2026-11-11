@@ -1650,7 +1650,7 @@ auto game_store::resolve_patched_player(std::optional<std::string> const& name,
 // Applies the patched event to target. An empty event name leaves the game's
 // event untouched. Event rows are shared and keyed by name (event.name is
 // UNIQUE), so the site is a property of the event row, not of the game: a
-// patched site is honoured only where the schema can represent it, i.e. when
+// patched site is honored only where the schema can represent it, i.e. when
 // the event row is created by this patch or already has that site. Every
 // other site change (a different site on an existing, possibly shared row, or a
 // site for a game without an event) is refused with invalid_argument; it is
