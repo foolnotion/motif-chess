@@ -10,6 +10,7 @@
 #include <glaze/json/write.hpp>
 #include <tl/expected.hpp>
 
+#include "motif/db/manifest.hpp"
 #include "motif/import/error.hpp"
 
 namespace motif::import
@@ -36,15 +37,29 @@ auto write_checkpoint(std::filesystem::path const& db_dir, import_checkpoint con
             return tl::unexpected {error_code::io_failure};
         }
         file << buffer;
-        if (!file) {
+        file.close();
+        if (file.fail()) {
+            std::error_code cleanup_err;
+            std::filesystem::remove(temp_path, cleanup_err);
             return tl::unexpected {error_code::io_failure};
         }
+    }
+
+    // Sync the completed file before replacing the marker, then sync its parent
+    // directory. The directory operation is best-effort on Windows.
+    if (!motif::db::sync_filesystem_path(temp_path, /*directory=*/false)) {
+        std::error_code cleanup_err;
+        std::filesystem::remove(temp_path, cleanup_err);
+        return tl::unexpected {error_code::io_failure};
     }
 
     std::error_code fserr;
     std::filesystem::rename(temp_path, path, fserr);
     if (fserr) {
         std::filesystem::remove(temp_path, fserr);
+        return tl::unexpected {error_code::io_failure};
+    }
+    if (!motif::db::sync_filesystem_path(db_dir, /*directory=*/true)) {
         return tl::unexpected {error_code::io_failure};
     }
     return {};
@@ -82,8 +97,12 @@ auto read_checkpoint(std::filesystem::path const& db_dir) -> result<import_check
 auto delete_checkpoint(std::filesystem::path const& db_dir) noexcept -> void
 {
     std::error_code fserr;
-    std::filesystem::remove(checkpoint_path(db_dir), fserr);
-    // ignore fserr — silently succeed if absent
+    auto const removed = std::filesystem::remove(checkpoint_path(db_dir), fserr);
+    // Persist the removal where directory sync is supported. Callers deleting
+    // an uploaded source must also handle sync failure conservatively.
+    if (removed && !fserr) {
+        static_cast<void>(motif::db::sync_filesystem_path(db_dir, /*directory=*/true));
+    }
 }
 
 }  // namespace motif::import

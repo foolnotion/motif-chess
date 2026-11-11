@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <ios>
 #include <limits>
 #include <optional>
@@ -345,6 +346,12 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         return tl::unexpected {error_code::invalid_state};
     }
 
+    // An unreadable source is rejected before anything is changed -- no
+    // checkpoint, no dropped identity index.
+    if (!std::ifstream {pgn_path, std::ios::binary}.is_open()) {
+        return tl::unexpected {error_code::io_failure};
+    }
+
     auto log = spdlog::get("motif.import");
 
     // Deliberately not resetting stop_requested_ here: request_stop() can be
@@ -434,7 +441,7 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     // Writes the cursor the last successful COMMIT made durable, never the
     // in-flight position, so the file never claims games a rollback discarded.
     // It marks the import as interrupted; resume does not seek to it.
-    auto write_progress_checkpoint = [&]() -> void
+    auto write_progress_checkpoint = [&]() -> bool
     {
         import_checkpoint const chk {
             .source_path = pgn_path.string(),
@@ -446,7 +453,9 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             if (log) {
                 log->error("checkpoint write failed");
             }
+            return false;
         }
+        return true;
     };
 
     // Once drop_identity_index() below succeeds, every remaining early-return
@@ -476,6 +485,14 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         }
         return removed;
     };
+
+    // Write the marker before the first canonical commit and retain it through
+    // dedup and rebuild. If it cannot be written the database is untouched.
+    // On POSIX it is also synchronized for power-loss recovery; see the
+    // checkpoint contract for the Windows directory-sync limitation.
+    if (!write_progress_checkpoint()) {
+        return tl::unexpected {error_code::io_failure};
+    }
 
     if (raw_mode) {
         if (auto drop_res = db_.writer().drop_identity_index(); !drop_res) {
@@ -678,6 +695,9 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
         }
         return tl::unexpected {error_code::io_failure};
     }
+    // The initial marker remains until success; this updates its reported
+    // cursor after the final batch.
+    write_progress_checkpoint();
     auto const ingest_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ingest_started);
     auto position_postings_metrics = motif::db::position_postings_build_metrics {};
     auto opening_tree_index_metrics = motif::db::opening_tree_index_build_metrics {};

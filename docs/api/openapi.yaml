@@ -391,16 +391,17 @@ paths:
       summary: Start a PGN import from uploaded file bytes
       description: |-
         Accepts a `multipart/form-data` POST with a single field named `file`
-        containing the PGN file bytes. The backend writes the bytes to a
-        temporary file (`motif_upload_<import_id>.pgn` in the system temporary
-        directory) and runs the same import pipeline as `POST /api/imports`.
-        The temporary file is removed when the import completes. If the import
-        is canceled or fails and leaves an import checkpoint naming the file,
-        the file is kept so the import can be resumed by calling
-        `POST /api/imports` with that path. A retained file is never deleted
-        afterwards, neither when that resume completes nor when a later upload
-        runs: remove it manually. If the checkpoint cannot be read, the file is
-        also kept.
+        containing the PGN file bytes. Before import, the backend writes
+        `motif_upload_<import_id>.pgn` inside the database bundle and syncs it,
+        then runs the same pipeline as `POST /api/imports`. On POSIX the file
+        and bundle directory are synced before import; Windows directory-entry
+        durability across power loss is not guaranteed. A completed upload is
+        removed after checkpoint removal is synced where supported. If an
+        import is canceled or fails, its source is kept; a checkpoint naming it
+        permits resume by calling `POST /api/imports` with that path. Retained
+        files are not deleted by a later resume or upload and must be removed
+        manually. If a checkpoint cannot be read or directory sync fails, the
+        source is kept.
 
         Use this endpoint from browser frontends where the full filesystem path
         of a user-selected file is not accessible.

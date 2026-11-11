@@ -29,6 +29,7 @@
 #include <stdlib.h>
 
 #include "motif/db/database_manager.hpp"
+#include "motif/db/fault_injection.hpp"
 #include "motif/db/types.hpp"
 #include "motif/http/server.hpp"
 #include "motif/import/checkpoint.hpp"
@@ -4247,9 +4248,9 @@ TEST_CASE("server: upload import rejects a second concurrent upload", "[motif-ht
     server_thread.join();
     logging.shutdown();
 
-    // A canceled upload may leave its temporary PGN behind for resumption.
+    // A canceled upload may leave its PGN in the bundle for resumption.
     std::error_code cleanup_err {};
-    std::filesystem::remove(std::filesystem::temp_directory_path() / ("motif_upload_" + import_id + ".pgn"), cleanup_err);
+    std::filesystem::remove(db_res->dir() / ("motif_upload_" + import_id + ".pgn"), cleanup_err);
 }
 
 namespace
@@ -4280,16 +4281,15 @@ auto upload_pgn(httplib::Client& cli, std::string const& content) -> std::string
     return extract_import_id(res->body);
 }
 
-auto upload_temp_path(std::string const& import_id) -> std::filesystem::path
+auto upload_temp_path(std::filesystem::path const& db_dir, std::string const& import_id) -> std::filesystem::path
 {
-    return std::filesystem::temp_directory_path() / ("motif_upload_" + import_id + ".pgn");
+    return db_dir / ("motif_upload_" + import_id + ".pgn");
 }
 
 }  // namespace
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-TEST_CASE("server: an interrupted upload keeps its temporary PGN while its import checkpoint names it, and the import resumes from it",
-          "[motif-http]")
+TEST_CASE("server: an interrupted upload survives bundle reopen and resumes from its retained source", "[motif-http]")
 {
     auto const tdir = tmp_dir {"upload_keeps_checkpointed_file"};
     auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-keep");
@@ -4310,7 +4310,7 @@ TEST_CASE("server: an interrupted upload keeps its temporary PGN while its impor
     // The seam stops this upload's import before it starts, so it ends
     // interrupted with its checkpoint in place, with no timing involved.
     auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
-    auto const temp_path = upload_temp_path(import_id);
+    auto const temp_path = upload_temp_path(db_res->dir(), import_id);
     CHECK(collect_import_events(cli, import_id).contains("event: complete"));
 
     // The session is done, so the worker has already settled the file.
@@ -4319,26 +4319,84 @@ TEST_CASE("server: an interrupted upload keeps its temporary PGN while its impor
     CHECK(std::filesystem::path {checkpoint->source_path} == temp_path);
     CHECK(std::filesystem::exists(temp_path));
 
-    // Resuming by path finishes the import: every game of the upload is stored.
-    // The retained upload is not deleted, even though the checkpoint is gone: only
-    // the current upload's own import cleans up, so the user removes it.
-    auto const resume_res = cli.Post("/api/imports", R"({"path":")" + temp_path.string() + R"("})", "application/json");
-    REQUIRE(resume_res != nullptr);
-    REQUIRE(resume_res->status == 202);
-    CHECK(collect_import_events(cli, extract_import_id(resume_res->body)).contains("total_attempted"));
-    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
-    CHECK(std::filesystem::exists(temp_path));
-
+    // Reopen the bundle and start a new server before resuming.
     srv.stop();
     server_thread.join();
+    db_res->close();
+    auto reopened = motif::db::database_manager::open(tdir.path / "db");
+    REQUIRE(reopened.has_value());
+    CHECK(std::filesystem::exists(temp_path));
+    constexpr std::uint16_t resume_port {18181};
+    motif::http::server resumed_srv {*reopened};
+    std::thread resumed_thread {[&]() -> void { [[maybe_unused]] auto start_res = resumed_srv.start(resume_port); }};
+    REQUIRE(wait_for_ready(resumed_srv));
+    httplib::Client resume_cli {"localhost", resume_port};
+    resume_cli.set_read_timeout(sse_read_timeout_s);
+    auto const resume_res = resume_cli.Post("/api/imports", R"({"path":")" + temp_path.string() + R"("})", "application/json");
+    REQUIRE(resume_res != nullptr);
+    REQUIRE(resume_res->status == 202);
+    CHECK(collect_import_events(resume_cli, extract_import_id(resume_res->body)).contains("total_attempted"));
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(reopened->dir())));
+    CHECK(std::filesystem::exists(temp_path));
+
+    resumed_srv.stop();
+    resumed_thread.join();
     logging.shutdown();
 
-    auto const game_count = db_res->store().count_games();
+    auto const game_count = reopened->store().count_games();
     REQUIRE(game_count.has_value());
     CHECK(*game_count == 3);
 
     std::error_code cleanup_err {};
     std::filesystem::remove(temp_path, cleanup_err);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros expand this scenario.
+TEST_CASE("server: a failed rebuild retains the uploaded source after committing games", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"upload_failed_rebuild"};
+    auto db_res = motif::db::database_manager::create(tdir.path / "db", "upload-failed-rebuild");
+    REQUIRE(db_res.has_value());
+    auto logging = import_logging_scope {tdir.path / "logs"};
+    constexpr std::uint16_t test_port {18182};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+    cli.set_read_timeout(sse_read_timeout_s);
+
+    std::string import_id;
+    {
+        motif::db::fault::scoped_hook const hook {+[](motif::db::fault::point where,
+                                                      motif::db::fault::artifact_kind kind,
+                                                      std::uint64_t) noexcept -> motif::db::fault::fault_action
+                                                  {
+                                                      if (where == motif::db::fault::point::before_build
+                                                          && kind == motif::db::fault::artifact_kind::postings) {
+                                                          return motif::db::fault::fault_action::fail_io;
+                                                      }
+                                                      return motif::db::fault::fault_action::proceed;
+                                                  }};
+        import_id = upload_pgn(cli, std::string {three_game_pgn_content});
+        CHECK(collect_import_events(cli, import_id).contains("event: error"));
+    }
+    auto const source = upload_temp_path(db_res->dir(), import_id);
+    auto const checkpoint = motif::import::read_checkpoint(db_res->dir());
+    REQUIRE(checkpoint.has_value());
+    CHECK(std::filesystem::path {checkpoint->source_path} == source);
+    CHECK(std::filesystem::exists(source));
+    auto const count = db_res->store().count_games();
+    REQUIRE(count.has_value());
+    CHECK(count.value_or(-1) == 3);
+
+    auto const resumed = cli.Post("/api/imports", R"({"path":")" + source.string() + R"("})", "application/json");
+    REQUIRE(resumed != nullptr);
+    REQUIRE(resumed->status == 202);
+    CHECK(collect_import_events(cli, extract_import_id(resumed->body)).contains("total_attempted"));
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
+    srv.stop();
+    server_thread.join();
+    logging.shutdown();
 }
 
 TEST_CASE("server: a completed upload removes its temporary PGN", "[motif-http]")
@@ -4360,7 +4418,7 @@ TEST_CASE("server: a completed upload removes its temporary PGN", "[motif-http]"
     auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
     CHECK(collect_import_events(cli, import_id).contains("total_attempted"));
 
-    CHECK_FALSE(std::filesystem::exists(upload_temp_path(import_id)));
+    CHECK_FALSE(std::filesystem::exists(upload_temp_path(db_res->dir(), import_id)));
     CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
 
     srv.stop();
@@ -4388,7 +4446,7 @@ TEST_CASE("server: a later upload never deletes the retained temporary PGN of an
     cli.set_read_timeout(sse_read_timeout_s);
 
     auto const first_id = upload_pgn(cli, std::string {three_game_pgn_content});
-    auto const first_path = upload_temp_path(first_id);
+    auto const first_path = upload_temp_path(db_res->dir(), first_id);
     CHECK(collect_import_events(cli, first_id).contains("event: complete"));
     REQUIRE(std::filesystem::exists(first_path));  // interrupted: kept for resumption
 
@@ -4398,7 +4456,7 @@ TEST_CASE("server: a later upload never deletes the retained temporary PGN of an
     CHECK(collect_import_events(cli, second_id).contains("total_attempted"));
 
     CHECK(std::filesystem::exists(first_path));
-    CHECK_FALSE(std::filesystem::exists(upload_temp_path(second_id)));
+    CHECK_FALSE(std::filesystem::exists(upload_temp_path(db_res->dir(), second_id)));
     CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(db_res->dir())));
 
     srv.stop();
@@ -4450,7 +4508,7 @@ TEST_CASE("server: a user file that a checkpoint names is never deleted, whether
     {
         auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
         CHECK(collect_import_events(cli, import_id).contains("total_attempted"));
-        CHECK_FALSE(std::filesystem::exists(upload_temp_path(import_id)));
+        CHECK_FALSE(std::filesystem::exists(upload_temp_path(db_res->dir(), import_id)));
     }
 
     CHECK(std::filesystem::exists(user_file));
@@ -4486,7 +4544,7 @@ TEST_CASE("server: an upload is kept when the import checkpoint cannot be read",
     // The import fails on the unreadable checkpoint. Whether that file names this
     // upload cannot be known, so the upload must not be deleted.
     auto const import_id = upload_pgn(cli, std::string {three_game_pgn_content});
-    auto const temp_path = upload_temp_path(import_id);
+    auto const temp_path = upload_temp_path(db_res->dir(), import_id);
     static_cast<void>(collect_import_events(cli, import_id));
 
     CHECK(std::filesystem::exists(temp_path));

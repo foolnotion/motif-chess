@@ -1317,6 +1317,244 @@ TEST_CASE("import_pipeline: cancel after a committed batch blocks queries until 
     std::filesystem::remove_all(tmp);
 }
 
+namespace
+{
+
+// Every postings rebuild fails before it builds anything, as a real I/O failure
+// would. The import's own canonical commits are unaffected.
+auto fail_postings_rebuild(motif::db::fault::point const where,
+                           motif::db::fault::artifact_kind const kind,
+                           std::uint64_t /*generation*/) noexcept -> motif::db::fault::fault_action
+{
+    if (where == motif::db::fault::point::before_build && kind == motif::db::fault::artifact_kind::postings) {
+        return motif::db::fault::fault_action::fail_io;
+    }
+    return motif::db::fault::fault_action::proceed;
+}
+
+// One SQLite batch for the whole import: the only canonical commit is the final one,
+// so no batch boundary ever writes a checkpoint on its own.
+constexpr motif::import::import_config k_single_batch {
+    .num_workers = 1,
+    .num_lines = 4,
+    .batch_size = motif::import::import_config::default_batch_size,
+};
+
+}  // namespace
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: a rebuild failing after the only (final) batch commit keeps a checkpoint and resume completes it",
+          "[motif-import][checkpoint]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_final_commit_rebuild_failure";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    auto const& bundle_dir = mgr->dir();
+
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        motif::db::fault::scoped_hook const hook {fail_postings_rebuild};
+        auto const failed = pipeline.run(pgn_file, k_single_batch);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error() == motif::import::error_code::io_failure);
+    }
+
+    // The games committed in one batch, so the in-stage checkpoint write never ran;
+    // the failed rebuild must nevertheless have left the checkpoint that names the
+    // source (the upload's only copy of the PGN).
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 3);
+    auto const saved = motif::import::read_checkpoint(bundle_dir);
+    REQUIRE(saved.has_value());
+    CHECK(saved->source_path == pgn_file.string());
+    // Position queries fail closed until a rebuild covers the committed games.
+    CHECK_FALSE(mgr->query_position_matches(motif::db::zobrist_hash {motif::chess::board {}.hash()}).has_value());
+
+    // After a restart the checkpoint is still there and drives the resume.
+    mgr->close();
+    auto reopened = motif::db::database_manager::open(bundle_dir);
+    REQUIRE(reopened.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    REQUIRE(motif::import::read_checkpoint(reopened->dir()).has_value());
+    {
+        motif::import::import_pipeline pipeline {*reopened};
+        auto const resumed = pipeline.resume(pgn_file, k_single_batch);
+        REQUIRE(resumed.has_value());
+        CHECK(resumed->committed == 0);
+        CHECK(resumed->skipped == 3);
+        CHECK(resumed->position_postings_metrics.has_value());
+    }
+    CHECK_FALSE(motif::import::read_checkpoint(reopened->dir()).has_value());
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 3);
+    CHECK(start_position_matches(*reopened) == 3U);
+
+    reopened->close();
+    // NOLINTEND(bugprone-unchecked-optional-access)
+    std::filesystem::remove_all(tmp);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: a cancel landing on the only (final) batch commit keeps a checkpoint and resume completes it",
+          "[motif-import][checkpoint]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_final_commit_cancel";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        g_cancel_pipeline = &pipeline;
+        g_canonical_commits_seen = 0;
+        motif::db::fault::scoped_hook const hook {cancel_after_first_canonical_commit};
+        auto const summary = pipeline.run(pgn_file, k_single_batch);
+        g_cancel_pipeline = nullptr;
+        REQUIRE(summary.has_value());
+        CHECK(summary->committed == 3);
+        // Canceled after ingest: no rebuild ran.
+        CHECK_FALSE(summary->position_postings_metrics.has_value());
+    }
+    auto const saved = motif::import::read_checkpoint(mgr->dir());
+    REQUIRE(saved.has_value());
+    CHECK(saved->source_path == pgn_file.string());
+
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const resumed = pipeline.resume(pgn_file, k_single_batch);
+        REQUIRE(resumed.has_value());
+        CHECK(resumed->skipped == 3);
+        CHECK(resumed->position_postings_metrics.has_value());
+    }
+    CHECK_FALSE(motif::import::read_checkpoint(mgr->dir()).has_value());
+    CHECK(start_position_matches(*mgr) == 3U);
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: a fatal error inside the only batch keeps a checkpoint and resume completes it", "[motif-import][checkpoint]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_single_batch_fatal";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_pgn_game_one << k_pgn_game_two << k_pgn_game_three;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    auto const& bundle_dir = mgr->dir();
+
+    exec_on_bundle(bundle_dir,
+                   "CREATE TRIGGER reject_alloc_three BEFORE INSERT ON game "
+                   "WHEN (SELECT name FROM player WHERE id = NEW.white_id) = 'Alloc Three W' "
+                   "BEGIN SELECT RAISE(ABORT, 'injected failure'); END;");
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const failed = pipeline.run(pgn_file, k_single_batch);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error() == motif::import::error_code::io_failure);
+    }
+    // The single batch rolled back, so nothing is stored; the source must still be
+    // named for the retry.
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 0);
+    auto const saved = motif::import::read_checkpoint(bundle_dir);
+    REQUIRE(saved.has_value());
+    CHECK(saved->source_path == pgn_file.string());
+
+    exec_on_bundle(bundle_dir, "DROP TRIGGER reject_alloc_three;");
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const resumed = pipeline.resume(pgn_file, k_single_batch);
+        REQUIRE(resumed.has_value());
+        CHECK(resumed->committed == 3);
+    }
+    CHECK_FALSE(motif::import::read_checkpoint(bundle_dir).has_value());
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 3);
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros dominate this test's score.
+TEST_CASE("import_pipeline: an import whose checkpoint cannot be written does not start", "[motif-import][checkpoint]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_checkpoint_unwritable";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto const pgn_file = tmp / "games.pgn";
+    {
+        std::ofstream out {pgn_file};
+        out << k_three_game_pgn;
+    }
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+    auto const& bundle_dir = mgr->dir();
+
+    // A directory where write_checkpoint stages its temp file makes every checkpoint write fail.
+    std::filesystem::create_directory(motif::import::checkpoint_path(bundle_dir).string() + ".tmp");
+
+    {
+        motif::import::import_pipeline pipeline {*mgr};
+        auto const failed = pipeline.run(pgn_file, k_single_batch);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error() == motif::import::error_code::io_failure);
+    }
+    // No game was committed on the strength of a checkpoint that does not exist, and
+    // the identity index was never dropped.
+    CHECK(committed_scalar(bundle_dir, "SELECT COUNT(*) FROM game") == 0);
+    REQUIRE(mgr->writer().identity_index_exists().has_value());
+    CHECK(*mgr->writer().identity_index_exists());
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(bundle_dir)));
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("import_pipeline: an unreadable source is rejected before a checkpoint is written or the database touched",
+          "[motif-import][checkpoint]")
+{
+    auto const tmp = std::filesystem::temp_directory_path() / "ipl_unreadable_source";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+
+    auto mgr = motif::db::database_manager::create(tmp / "db", "test");
+    REQUIRE(mgr.has_value());
+
+    motif::import::import_pipeline pipeline {*mgr};
+    auto const failed = pipeline.run(tmp / "missing.pgn", k_single_batch);
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error() == motif::import::error_code::io_failure);
+    CHECK_FALSE(std::filesystem::exists(motif::import::checkpoint_path(mgr->dir())));
+    REQUIRE(mgr->writer().identity_index_exists().has_value());
+    CHECK(*mgr->writer().identity_index_exists());
+
+    mgr->close();
+    std::filesystem::remove_all(tmp);
+}
+
 TEST_CASE("import_pipeline: an import without a rebuild leaves position queries blocked and one open repairs them", "[motif-import]")
 {
     auto const tmp = std::filesystem::temp_directory_path() / "ipl_norebuild_stale";

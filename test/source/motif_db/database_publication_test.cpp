@@ -1086,42 +1086,118 @@ TEST_CASE("publication: only well-identified unreferenced artifacts are collecte
     tmp_dir const tdir {"gc_scope"};
     make_bundle(tdir.path);
 
-    // Files that must never be touched.
-    write_bytes(tdir.path / "positions.duckdb", "legacy marker");
-    write_bytes(tdir.path / "notes.txt", "user notes");
-    write_bytes(tdir.path / "positions.postings.keepme", "not hex, not ours");
-    write_bytes(tdir.path / "opening_tree.idx.bak", "backup");
-    write_bytes(tdir.path / "positions.postings.1234.bak", "suffix we do not own");
-    fs::create_directory(tdir.path / "positions.postings.deadbeef");
-    write_bytes(tdir.path / "positions.postings.deadbeef" / "inside", "a directory with an artifact-like name");
-    // Orphans this subsystem does own: legacy numbered name, a hex name, staging.
-    write_bytes(tdir.path / "positions.postings.7", "orphan");
-    write_bytes(tdir.path / "opening_tree.idx.00ff", "orphan");
-    write_bytes(tdir.path / "positions.postings.abcdef.building", "orphan");
+    auto const artifact_id = std::string {"0123456789abcdef0123456789abcdef"};
+    auto const postings = std::string {"positions.postings."};
+    auto const tree = std::string {"opening_tree.idx."};
+    auto const metadata = std::string {"positions.metadata."};
+    auto const patch = std::string {"opening_tree.patch."};
+
+    // Names this subsystem never generates for the bundle: shaped like artifacts
+    // but outside the exact grammar (decimal generation or exactly 32 lower-case
+    // hex digits, then the suffixes that family's builder produces). They must
+    // survive every collection.
+    auto const look_alikes = std::vector<std::string> {
+        "positions.duckdb",
+        "notes.txt",
+        postings + "keepme",
+        postings + "deadbeef.building",  // short hex token: not an artifact id
+        postings + "deadbeef.tmp",
+        tree + "00ff",
+        tree + "bak",
+        postings + "1234.bak",
+        postings + "1234.building",  // a decimal generation is never staged
+        postings + artifact_id + ".keep",
+        postings + artifact_id + ".spill",  // spill runs are numbered
+        postings + artifact_id + ".building.spill00",
+        postings + artifact_id + ".building.spill18446744073709551616",
+        postings + artifact_id + ".dirspool",  // scratch only hangs off the staging name
+        postings + artifact_id + ".tmp",
+        postings + artifact_id + ".building.roots",  // tree scratch on a postings file
+        postings + artifact_id + ".building.tmp.tmp",
+        tree + artifact_id + ".building.dirspool",  // postings scratch on a tree file
+        tree + artifact_id + ".building.spill0",
+        tree + artifact_id + ".building.childfreq.spill",
+        tree + artifact_id + ".building.build.roots.",
+        tree + artifact_id + ".building.build.roots.01",
+        postings + std::string {"0123456789ABCDEF0123456789ABCDEF"},  // upper-case hex
+        postings + artifact_id.substr(1),  // 31 digits
+        postings + artifact_id + "0",  // 33 digits
+        postings + std::string(21, '7'),  // too long to be a generation counter
+        postings + "0007",  // not a canonical decimal generation
+        postings + "18446744073709551616",  // exceeds uint64
+        metadata + "7",  // runs are v7-only: no decimal generation
+        metadata + artifact_id + ".tmp",  // runs are written directly: no scratch
+        patch + artifact_id + ".building.tmp",
+        patch + "7",
+        patch + "keepme",
+    };
+    for (auto const& name : look_alikes) {
+        write_bytes(tdir.path / name, "not ours");
+    }
+    fs::create_directory(tdir.path / (postings + "deadbeef"));
+    write_bytes(tdir.path / (postings + "deadbeef") / "inside", "a directory with an artifact-like name");
+
+    // Genuinely owned, unreferenced files: pre-v7 numbered artifacts and their
+    // builder scratch, v7 artifacts, staging files and every scratch file a
+    // builder leaves hanging off a staging name.
+    auto const orphans = std::vector<std::string> {
+        postings + "7",
+        postings + "8.tmp",
+        postings + "8.dirspool",
+        postings + "8.spill0",
+        tree + "5",
+        tree + "5.tmp",
+        tree + "5.childcounts.tmp",
+        postings + artifact_id,
+        postings + artifact_id + ".building",
+        postings + artifact_id + ".building.spill0",
+        postings + artifact_id + ".building.spill12",
+        postings + artifact_id + ".building.dirspool",
+        postings + artifact_id + ".building.tmp",
+        tree + artifact_id,
+        tree + artifact_id + ".building",
+        tree + artifact_id + ".building.tmp",
+        tree + artifact_id + ".building.roots",
+        tree + artifact_id + ".building.edges",
+        tree + artifact_id + ".building.childcounts",
+        tree + artifact_id + ".building.childcounts.tmp",
+        tree + artifact_id + ".building.childfreq.spill0",
+        tree + artifact_id + ".building.build.roots.1",
+        tree + artifact_id + ".building.build.edges.2",
+        metadata + artifact_id,
+        metadata + artifact_id + ".building",
+        patch + artifact_id,
+        patch + artifact_id + ".building",
+    };
+    for (auto const& name : orphans) {
+        write_bytes(tdir.path / name, "orphan");
+    }
 
     auto mgr = motif::db::database_manager::open(tdir.path);
     REQUIRE(mgr.has_value());
     // NOLINTBEGIN(bugprone-unchecked-optional-access)
     auto const published = mgr->manifest().postings()->artifact.filename;
     // open() collects orphans after establishing a valid snapshot.
-    CHECK_FALSE(fs::exists(tdir.path / "positions.postings.7"));
-    CHECK_FALSE(fs::exists(tdir.path / "opening_tree.idx.00ff"));
-    CHECK_FALSE(fs::exists(tdir.path / "positions.postings.abcdef.building"));
-    CHECK(fs::exists(tdir.path / published));
-    for (auto const* survivor :
-         {"positions.duckdb", "notes.txt", "positions.postings.keepme", "opening_tree.idx.bak", "positions.postings.1234.bak"})
-    {
-        CHECK(fs::exists(tdir.path / survivor));
+    for (auto const& name : orphans) {
+        INFO(name);
+        CHECK_FALSE(fs::exists(tdir.path / name));
     }
-    CHECK(fs::exists(tdir.path / "positions.postings.deadbeef" / "inside"));
-    CHECK(read_bytes(tdir.path / "positions.duckdb") == "legacy marker");
+    for (auto const& name : look_alikes) {
+        INFO(name);
+        CHECK(fs::exists(tdir.path / name));
+    }
+    CHECK(fs::exists(tdir.path / published));
+    CHECK(fs::exists(tdir.path / (postings + "deadbeef") / "inside"));
+    CHECK(read_bytes(tdir.path / "positions.duckdb") == "not ours");
 
     // A fresh publication supersedes the old file but touches nothing else.
     REQUIRE(mgr->rebuild_position_postings().has_value());
     CHECK_FALSE(fs::exists(tdir.path / published));
-    CHECK(fs::exists(tdir.path / "notes.txt"));
-    CHECK(fs::exists(tdir.path / "positions.duckdb"));
-    CHECK(fs::exists(tdir.path / "positions.postings.deadbeef" / "inside"));
+    for (auto const& name : look_alikes) {
+        INFO(name);
+        CHECK(fs::exists(tdir.path / name));
+    }
+    CHECK(fs::exists(tdir.path / (postings + "deadbeef") / "inside"));
     // NOLINTEND(bugprone-unchecked-optional-access)
 }
 

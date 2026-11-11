@@ -36,6 +36,7 @@
 #include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
+#include "motif/db/manifest.hpp"
 #include "motif/db/types.hpp"
 #include "motif/engine/engine_manager.hpp"
 #include "motif/engine/error.hpp"
@@ -360,14 +361,9 @@ auto is_same_import_source(std::filesystem::path const& lhs, std::filesystem::pa
     return !lhs_err && !rhs_err && lhs_abs == rhs_abs;
 }
 
-// Runs after the import of an uploaded file ends, however it ended. The upload
-// is the only copy of the PGN, so it is kept while the import checkpoint names
-// it: that checkpoint is how an interrupted or failed import resumes (POST
-// /api/imports with this path). It is deleted only when the checkpoint can be
-// read (or is absent) and names something else. An unreadable checkpoint
-// decides nothing, so nothing is deleted. No other file is ever deleted: not a
-// path an earlier checkpoint named, and not one a user supplied. A retained
-// upload therefore stays until the user removes it, even after a resume.
+// Only a successful upload may be removed. Keep it if its checkpoint still
+// names it or cannot be read. Sync the bundle directory before unlinking where
+// supported; Windows directory-entry durability is best-effort.
 // The two paths are distinct: callers pass database.dir() first and the uploaded PGN second.
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void settle_upload_file(std::filesystem::path const& db_dir, std::filesystem::path const& upload)
@@ -376,7 +372,9 @@ void settle_upload_file(std::filesystem::path const& db_dir, std::filesystem::pa
     if (!checkpoint.has_value() && checkpoint.error() != motif::import::error_code::not_found) {
         return;
     }
-    if (checkpoint.has_value() && is_same_import_source(std::filesystem::path {checkpoint->source_path}, upload)) {
+    if ((checkpoint.has_value() && is_same_import_source(std::filesystem::path {checkpoint->source_path}, upload))
+        || !motif::db::sync_filesystem_path(db_dir, /*directory=*/true))
+    {
         return;
     }
     std::error_code remove_err {};
@@ -1862,22 +1860,36 @@ void server::impl::setup_routes()
                      session->pipeline = std::make_unique<motif::import::import_pipeline>(database);
                      sessions.emplace(import_id, session);
                  }
-                 temp_path = std::filesystem::temp_directory_path() / fmt::format("motif_upload_{}.pgn", import_id);
+                 // Keep the sole uploaded copy in the bundle, not a temporary
+                 // directory that can be cleared on reboot. Never replace an
+                 // existing file even if a generated session ID collides.
+                 std::error_code path_error {};
+                 auto const upload_dir = std::filesystem::absolute(database.dir(), path_error);
+                 if (path_error) {
+                     std::scoped_lock const lock {sessions_mutex};
+                     sessions.erase(import_id);
+                     set_json_error(res, http_internal_error, "failed to resolve bundle directory");
+                     return;
+                 }
+                 temp_path = upload_dir / fmt::format("motif_upload_{}.pgn", import_id);
                  {
-                     std::ofstream tmp {temp_path, std::ios::binary};
+                     std::ofstream tmp {temp_path, std::ios::binary | std::ios::out | std::ios::noreplace};
                      if (!tmp.is_open()) {
                          std::scoped_lock const lock {sessions_mutex};
                          sessions.erase(import_id);
-                         set_json_error(res, http_internal_error, "failed to create temporary file");
+                         set_json_error(res, http_internal_error, "failed to create upload file");
                          return;
                      }
                      tmp.write(file_content.data(), static_cast<std::streamsize>(file_content.size()));
-                     if (tmp.fail()) {
+                     tmp.close();
+                     if (tmp.fail() || !motif::db::sync_filesystem_path(temp_path, /*directory=*/false)
+                         || !motif::db::sync_filesystem_path(upload_dir, /*directory=*/true))
+                     {
                          std::error_code remove_err {};
                          std::filesystem::remove(temp_path, remove_err);
                          std::scoped_lock const lock {sessions_mutex};
                          sessions.erase(import_id);
-                         set_json_error(res, http_internal_error, "failed to write temporary file");
+                         set_json_error(res, http_internal_error, "failed to persist upload file");
                          return;
                      }
                  }
@@ -1894,22 +1906,19 @@ void server::impl::setup_routes()
                                                          auto result = session->pipeline->run(pgn_path, {});
                                                          if (result) {
                                                              session->summary = *result;
+                                                             settle_upload_file(database.dir(), pgn_path);
                                                          } else {
                                                              session->error_message = fmt::format(R"(import failed: "{}")",
                                                                                                   motif::import::to_string(result.error()));
                                                              session->failed.store(true, std::memory_order_release);
                                                          }
                                                      } catch (...) {
-                                                         settle_upload_file(database.dir(), pgn_path);
                                                          session->error_message = "import failed: unexpected error";
                                                          session->failed.store(true, std::memory_order_release);
                                                          session->done.store(true, std::memory_order_release);
                                                          session->cv.notify_all();
                                                          return;
                                                      }
-                                                     // A canceled or failed import leaves a checkpoint naming this file;
-                                                     // deleting it would make that checkpoint unresumable.
-                                                     settle_upload_file(database.dir(), pgn_path);
                                                      session->done.store(true, std::memory_order_release);
                                                      session->cv.notify_all();
                                                  }};

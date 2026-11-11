@@ -463,45 +463,97 @@ auto claim_if_absent(std::vector<std::filesystem::path>& ledger, std::filesystem
     }
 }
 
-// Names this subsystem owns inside a bundle directory: a derived-artifact
-// prefix (postings segment, postings metadata chain member, tree checkpoint,
-// tree patch run), a token (decimal for legacy "positions.postings.7", 32 hex
-// digits for v7), and then any number of builder/staging suffix components
-// (".building", ".tmp", ".dirspool", ".spill<digits>"). Only these are ever
-// garbage-collected; positions.duckdb, look-alikes such as
-// "opening_tree.patch.keepme" and every other file are never matched.
+// True for a non-empty run of ASCII decimal digits.
+// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
+auto is_decimal_digits(std::string_view const text) -> bool
+{
+    return !text.empty() && std::ranges::all_of(text, [](char const chr) -> bool { return chr >= '0' && chr <= '9'; });
+}
+
+// Exactly the 32 lower-case hex digits generate_random_id() produces.
+// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
+auto is_artifact_id_token(std::string_view const token) -> bool
+{
+    constexpr auto id_length = std::size_t {32};
+    return token.size() == id_length
+        && std::ranges::all_of(token, [](char const chr) -> bool { return (chr >= '0' && chr <= '9') || (chr >= 'a' && chr <= 'f'); });
+}
+
+// Canonical decimal form emitted by std::to_string for generation and run
+// counters; leading zeroes and out-of-range values are not owned names.
+// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
+auto is_decimal_counter(std::string_view const token) -> bool
+{
+    constexpr auto max_generation = std::string_view {"18446744073709551615"};
+    return is_decimal_digits(token) && (token.size() == 1U || token.front() != '0') && token.size() <= max_generation.size()
+        && (token.size() < max_generation.size() || token <= max_generation);
+}
+
+// True for stem followed by a canonical decimal run counter.
+// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
+auto is_numbered(std::string_view const text, std::string_view const stem) -> bool
+{
+    return text.starts_with(stem) && is_decimal_counter(text.substr(stem.size()));
+}
+
+// Scratch files position_postings::finalize() and its spills derive from the
+// path they build: <path>.spill<N>, <path>.dirspool, <path>.tmp.
+// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
+auto is_postings_scratch_suffix(std::string_view const suffix) -> bool
+{
+    return suffix == ".tmp" || suffix == ".dirspool" || is_numbered(suffix, ".spill");
+}
+
+// Scratch files the opening-tree builder, its child-count merge and the
+// checkpoint writer derive from the path they build: <path>.tmp (checkpoint
+// writer), <path>.roots / .edges / .childcounts (+ ".tmp") merged streams,
+// <path>.childfreq.spill<N>, <path>.build.roots.<N>, <path>.build.edges.<N>.
+// NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
+auto is_tree_scratch_suffix(std::string_view const suffix) -> bool
+{
+    return suffix == ".tmp" || suffix == ".roots" || suffix == ".edges" || suffix == ".childcounts" || suffix == ".childcounts.tmp"
+        || is_numbered(suffix, ".childfreq.spill") || is_numbered(suffix, ".build.roots.") || is_numbered(suffix, ".build.edges.");
+}
+
+// Names this subsystem owns inside a bundle directory, matched against what the
+// code actually generates (reserve_staged_artifact and the builders):
+//   <prefix><32-hex id>                final v7 artifact
+//   <prefix><32-hex id>.building       reserved staging file
+//   <prefix><32-hex id>.building<S>    builder scratch hanging off staging
+//   <prefix><decimal generation>       pre-v7 postings segment / tree checkpoint
+//   <prefix><decimal generation><S>    builder scratch of a pre-v7 build
+// where <S> is the scratch vocabulary of that prefix's builder. Metadata and
+// patch runs are v7-only and written directly (no scratch), so they never take
+// a decimal token or a scratch suffix. Anything else -- positions.duckdb,
+// "positions.postings.deadbeef", "opening_tree.patch.keepme", a known id with an
+// unknown suffix -- is never matched and so never garbage-collected.
 // NOLINTNEXTLINE(llvm-prefer-static-over-anonymous-namespace)
 auto is_owned_artifact_name(std::string_view const name) -> bool
 {
-    for (auto const prefix :
-         {postings_artifact_prefix, tree_artifact_prefix, postings_metadata_artifact_prefix, tree_patch_artifact_prefix})
+    constexpr auto building_suffix = std::string_view {".building"};
+    auto const matches_family = [name, building_suffix](
+                                    std::string_view const prefix, bool const legacy_numbered, auto const is_scratch) -> bool
     {
         if (!name.starts_with(prefix)) {
-            continue;
-        }
-        auto const rest = name.substr(prefix.size());
-        auto const token_end = rest.find('.');
-        auto const token = rest.substr(0, token_end);
-        auto suffix = token_end == std::string_view::npos ? std::string_view {} : rest.substr(token_end);
-        auto const hex_token = !token.empty()
-            && std::ranges::all_of(token, [](char const chr) -> bool { return (chr >= '0' && chr <= '9') || (chr >= 'a' && chr <= 'f'); });
-        if (!hex_token) {
             return false;
         }
-        while (!suffix.empty()) {
-            auto const next_dot = suffix.find('.', 1);
-            auto const component = suffix.substr(0, next_dot);
-            auto const known = component == ".building" || component == ".tmp" || component == ".dirspool"
-                || (component.starts_with(".spill")
-                    && std::ranges::all_of(component.substr(6), [](char const chr) -> bool { return chr >= '0' && chr <= '9'; }));
-            if (!known) {
-                return false;
+        auto const rest = name.substr(prefix.size());
+        auto const token = rest.substr(0, rest.find('.'));
+        auto tail = rest.substr(token.size());
+        if (is_artifact_id_token(token)) {
+            if (tail.starts_with(building_suffix)) {
+                tail.remove_prefix(building_suffix.size());
+                return tail.empty() || is_scratch(tail);
             }
-            suffix = next_dot == std::string_view::npos ? std::string_view {} : suffix.substr(next_dot);
+            return tail.empty();
         }
-        return true;
-    }
-    return false;
+        return legacy_numbered && is_decimal_counter(token) && (tail.empty() || is_scratch(tail));
+    };
+    auto const no_scratch = [](std::string_view /*suffix*/) -> bool { return false; };
+    return matches_family(postings_artifact_prefix, true, is_postings_scratch_suffix)
+        || matches_family(tree_artifact_prefix, true, is_tree_scratch_suffix)
+        || matches_family(postings_metadata_artifact_prefix, false, no_scratch)
+        || matches_family(tree_patch_artifact_prefix, false, no_scratch);
 }
 
 // Installs from at target without ever replacing an existing file: a collision
