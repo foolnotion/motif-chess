@@ -561,11 +561,23 @@ TEST_CASE("membership deltas create absent-base nodes, retract edges to zero and
     constexpr auto corpus_size = 10U;
     constexpr auto novel_white_rating = -40;
     constexpr auto novel_black_rating = 2200;
-    small_tree tree {motif_test::make_corpus(corpus_seed, corpus_size)};
+    // make_corpus draws through std::uniform_int_distribution, whose mapping is
+    // implementation-defined, so whether one of its random games happens to share
+    // an edge with the retracted fool's-mate game is platform luck (the libstdc++
+    // corpus shared one, the libc++ corpus did not). Pin the scenario instead: this
+    // game shares fool's mate's first three plies, so removing corpus[1] retracts
+    // edges that survive with invalidated extrema on every platform.
+    auto corpus = motif_test::make_corpus(corpus_seed, corpus_size);
+    corpus.push_back(motif_test::model_game {.moves = motif_test::uci_moves({"f2f3", "e7e5", "g2g4", "b8c6"}),
+                                             .result = "1/2-1/2",
+                                             .white_elo = motif_test::club_rating,
+                                             .black_elo = motif_test::club_rating});
+    small_tree tree {std::move(corpus)};
     auto const base_count = tree.corpus.size();
 
     // Insert a game with a novel opening (absent-base nodes and edges), and remove
-    // the zero-move game and a game with a unique line.
+    // the zero-move game and fool's mate (whose shared prefix must survive with
+    // invalidated extrema while its unique tail retracts to zero).
     auto novel = motif_test::model_game {.moves = motif_test::uci_moves({"b1c3", "b8c6", "c3b5", "a7a6", "b5c3", "c6b8", "c3b1"}),
                                          .result = "1-0",
                                          .white_elo = novel_white_rating,

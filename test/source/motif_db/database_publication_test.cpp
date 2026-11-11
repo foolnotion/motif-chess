@@ -1119,7 +1119,10 @@ TEST_CASE("publication: only well-identified unreferenced artifacts are collecte
         tree + artifact_id + ".building.childfreq.spill",
         tree + artifact_id + ".building.build.roots.",
         tree + artifact_id + ".building.build.roots.01",
-        postings + std::string {"0123456789ABCDEF0123456789ABCDEF"},  // upper-case hex
+        // Upper-case hex is not an artifact id. The digits differ from
+        // artifact_id's beyond case: on a case-insensitive filesystem
+        // (macOS default) the same digits would name one file for both lists.
+        postings + std::string {"FEDCBA9876543210FEDCBA9876543210"},
         postings + artifact_id.substr(1),  // 31 digits
         postings + artifact_id + "0",  // 33 digits
         postings + std::string(21, '7'),  // too long to be a generation counter
