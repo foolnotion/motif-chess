@@ -1055,7 +1055,17 @@ paths:
           result correction.
         - `white_elo` / `black_elo`: omit to leave unchanged, an integer to set,
           `null` to clear. The signed 16-bit range is enforced (HTTP 400).
-        - All string fields are trimmed; empty strings are rejected with HTTP 400.
+        - String fields are trimmed of surrounding whitespace before they are
+          validated or stored. `white`, `black`, `event` and `date` must be
+          non-empty after trimming (HTTP 400). `site`, `eco`, `source_label` and
+          `notes` accept an empty string, which clears the value (an empty `notes`
+          removes the note).
+        - `site` is a property of the event, which every game with the same event
+          name shares. It is accepted together with a new `event` name, or when it
+          equals the site the game's event already has. Any other site is rejected
+          with HTTP 400 and nothing is applied: a different site (or clearing it)
+          for an existing event, and a site for a game that has no event.
+          To give a game another site, patch it with a new event name and the site.
         - `result` must be one of `1-0`, `0-1`, `1/2-1/2`, or `*`.
         - `review_status` must be one of `new`, `needs_review`, `studied`, or `archived`.
       parameters:
@@ -1110,7 +1120,7 @@ paths:
                       source_type: manual
                       review_status: studied
         '400':
-          description: Invalid game ID, empty string field, or invalid enum value
+          description: Invalid game ID, empty player name / event name / date, invalid enum value, or a site that cannot be applied to the game's event
           content:
             application/json:
               schema:
@@ -1125,6 +1135,9 @@ paths:
                 empty_field:
                   value:
                     error: white name must not be empty
+                unrepresentable_site:
+                  value:
+                    error: event "Candidates 2024" is shared by name and already has a different site; use a new event name to give this game another site
         '409':
           description: |-
             The patch supplies a field other than `result`, `white_elo` or
@@ -1507,10 +1520,10 @@ components:
       properties:
         white:
           type: string
-          description: White player name; must be non-empty when provided (manual games only)
+          description: White player name; trimmed, must be non-empty after trimming when provided (manual games only)
         black:
           type: string
-          description: Black player name; must be non-empty when provided (manual games only)
+          description: Black player name; trimmed, must be non-empty after trimming when provided (manual games only)
         white_elo:
           type: [integer, 'null']
           minimum: -32768
@@ -1526,13 +1539,21 @@ components:
           description: Black rating for this game; same omit / integer / `null` semantics as `white_elo`
         event:
           type: string
-          description: Event name; must be non-empty when provided (manual games only)
+          description: Event name; trimmed, must be non-empty after trimming when provided (manual games only)
         site:
           type: string
-          description: Event site (manual games only)
+          description: |-
+            Event site (manual games only). The site belongs to the event row, which
+            every game with the same event name shares, so it is not stored per game.
+            It is accepted together with a new `event` name (the event is created with
+            this site) and when it equals the site the game's event already has. A
+            different site for an existing event (clearing included), or a site for a
+            game without an event, is rejected with HTTP 400 and nothing is applied;
+            give the game a new event name together with the site instead. Surrounding
+            whitespace is trimmed; an empty string means "no site".
         date:
           type: string
-          description: Game date in YYYY.MM.DD format; must be non-empty when provided (manual games only)
+          description: Game date in YYYY.MM.DD format; trimmed, must be non-empty after trimming when provided (manual games only)
         result:
           type: string
           enum: ['1-0', '0-1', '1/2-1/2', '*']
@@ -1542,13 +1563,15 @@ components:
             statistics count both as a draw.
         eco:
           type: string
-          description: ECO code (manual games only)
+          description: ECO code (manual games only); surrounding whitespace is trimmed, an empty string clears it
         source_label:
           type: string
-          description: Free-form source label (manual games only)
+          description: Free-form source label (manual games only); surrounding whitespace is trimmed, an empty string clears it
         notes:
           type: string
-          description: Personal notes stored as a reserved PGN tag (manual games only)
+          description: |-
+            Personal notes stored as a reserved PGN tag (manual games only);
+            surrounding whitespace is trimmed, an empty string removes the notes
         review_status:
           type: string
           enum: [new, needs_review, studied, archived]

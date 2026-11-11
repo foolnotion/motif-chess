@@ -81,6 +81,12 @@ struct prepared_metadata_patch
     [[nodiscard]] auto is_noop() const noexcept -> bool { return !indexed_change && !other_fields; }
 };
 
+// Trims every string field of the patch (ASCII whitespace) and rejects what the
+// contract forbids: an empty white, black, event or date is invalid_argument.
+// An empty site, eco, source_label or notes is kept: it clears the value (an
+// empty note removes the notes tag). Idempotent.
+auto normalize_game_patch(game_patch patch) -> result<game_patch>;
+
 class game_store
 {
   public:
@@ -173,8 +179,12 @@ class game_store
     // Returns error_code::not_found if the id does not exist.
     // Returns error_code::not_editable if an imported game's patch supplies a
     //   field other than result/ratings (nothing is applied).
-    // Returns error_code::invalid_argument for a malformed result or a rating
-    //   outside the signed 16-bit domain.
+    // Returns error_code::invalid_argument for a malformed result, a rating
+    //   outside the signed 16-bit domain, an empty player name, event name or
+    //   date (after trimming), or a site the schema cannot represent: events
+    //   are shared rows keyed by name, so a site that differs from the one of
+    //   the event the game ends up with is refused rather than silently
+    //   dropped or written onto other games; name a new event with the site.
     // Returns error_code::duplicate if the patch would create an identity conflict.
     // The mutation sequence advances once, and only when the result or a rating
     // really changes; a patch that restates stored values is a no-op. This is the
@@ -232,7 +242,7 @@ class game_store
     // (imported games: result and ratings only, else not_editable for the
     // whole patch), and rejects an exact-duplicate identity (duplicate) without
     // writing anything. Never writes.
-    auto prepare_metadata_patch(game_id game_key, game_patch const& patch) -> result<prepared_metadata_patch>;
+    auto prepare_metadata_patch(game_id game_key, game_patch const& requested) -> result<prepared_metadata_patch>;
     // The canonical UPDATE(s): re-verifies the before-image, resolves player and
     // event ids, assigns the identity collision slot (a move-hash collision
     // between distinct move lists takes the next slot; an exact duplicate is
@@ -258,7 +268,10 @@ class game_store
     struct identity_row;
     auto read_identity_row(game_id game_key) const -> result<identity_row>;
     auto lookup_player_id(std::string const& name) const -> result<std::optional<std::int64_t>>;
-    auto lookup_event_id(std::string const& name) const -> result<std::optional<std::int64_t>>;
+    // The event row of that name, or nullopt. The site is read so a patch can
+    // tell a restated site from an edit of a row other games may share.
+    struct event_row;
+    auto lookup_event_row(std::string const& name) const -> result<std::optional<event_row>>;
     auto identity_duplicate_exists(game_id game_key, identity_row const& identity) const -> result<bool>;
     auto next_identity_collision(game_id game_key, identity_row const& identity) const -> result<std::int64_t>;
     // The identity a patched game would have. `current` is the full game when the

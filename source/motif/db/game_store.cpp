@@ -1317,6 +1317,13 @@ struct game_store::identity_row
     }
 };
 
+// An event row as the patch resolver sees it: its id and its (shared) site.
+struct game_store::event_row
+{
+    std::int64_t id {};
+    std::optional<std::string> site;
+};
+
 namespace
 {
 
@@ -1460,21 +1467,22 @@ auto game_store::lookup_player_id(std::string const& name) const -> result<std::
     return std::optional<std::int64_t> {};
 }
 
-auto game_store::lookup_event_id(std::string const& name) const -> result<std::optional<std::int64_t>>
+auto game_store::lookup_event_row(std::string const& name) const -> result<std::optional<event_row>>
 {
-    auto stmt = prepare(db_, "SELECT id FROM event WHERE name = ?");
+    auto stmt = prepare(db_, "SELECT id, site FROM event WHERE name = ?");
     if (!stmt) {
         return tl::unexpected {stmt.error()};
     }
     sqlite3_bind_text(stmt->get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
     auto const step_rc = sqlite3_step(stmt->get());
     if (step_rc == SQLITE_ROW) {
-        return std::optional<std::int64_t> {sqlite3_column_int64(stmt->get(), 0)};
+        return std::optional<event_row> {
+            event_row {.id = sqlite3_column_int64(stmt->get(), 0), .site = column_optional_text(stmt->get(), 1)}};
     }
     if (step_rc != SQLITE_DONE) {
         return step_error(db_);
     }
-    return std::optional<std::int64_t> {};
+    return std::optional<event_row> {};
 }
 
 namespace
@@ -1640,31 +1648,47 @@ auto game_store::resolve_patched_player(std::optional<std::string> const& name,
 }
 
 // Applies the patched event to target. An empty event name leaves the game's
-// event untouched; the site only describes a newly created event row, so it
-// never changes the identity of a game whose event already exists. False when
-// the event does not exist and create is unset.
+// event untouched. Event rows are shared and keyed by name (event.name is
+// UNIQUE), so the site is a property of the event row, not of the game: a
+// patched site is honoured only where the schema can represent it, i.e. when
+// the event row is created by this patch or already has that site. Every
+// other site change (a different site on an existing, possibly shared row, or a
+// site for a game without an event) is refused with invalid_argument; it is
+// never dropped silently and never written onto rows other games point at.
+// False when the event does not exist and create is unset.
 auto game_store::resolve_patched_event(game_patch const& patch, game const& current, bool const create, std::optional<std::int64_t>& target)
     -> result<bool>
 {
     auto const& existing = current.event_details;
     auto const event_name = patch.event.value_or(existing ? existing->name : std::string {});
     if (event_name.empty()) {
+        if (patch.site && !patch.site->empty()) {
+            return tl::unexpected {error {error_code::invalid_argument, "a site needs an event: name the event in the same patch"}};
+        }
+        return true;
+    }
+    auto found = lookup_event_row(event_name);
+    if (!found) {
+        return tl::unexpected {found.error()};
+    }
+    auto const& row = *found;
+    if (row) {
+        if (patch.site && *patch.site != row->site.value_or(std::string {})) {
+            return tl::unexpected {error {
+                error_code::invalid_argument,
+                "event \"" + event_name
+                    + "\" is shared by name and already has a different site; " "use a new event name to give this game another site"}};
+        }
+        target = row->id;
         return true;
     }
     if (!create) {
-        auto found = lookup_event_id(event_name);
-        if (!found) {
-            return tl::unexpected {found.error()};
-        }
-        auto const& slot = *found;
-        if (!slot) {
-            return false;
-        }
-        target = slot;
-        return true;
+        return false;
     }
-    std::optional<std::string> const inherited_site = existing ? existing->site : std::nullopt;
-    std::optional<std::string> const site = patch.site.has_value() ? patch.site : inherited_site;
+    std::optional<std::string> site = existing ? existing->site : std::nullopt;
+    if (patch.site) {
+        site = patch.site->empty() ? std::nullopt : patch.site;
+    }
     std::optional<std::string> const date = existing ? existing->date : std::nullopt;
     auto inserted = find_or_insert_event({.name = event_name, .site = site, .date = date});
     if (!inserted) {
@@ -1765,12 +1789,65 @@ auto game_store::reject_duplicate_identity(game_id const game_key, game_patch co
     return {};
 }
 
-auto game_store::prepare_metadata_patch(game_id const game_key, game_patch const& patch) -> result<prepared_metadata_patch>
+namespace
+{
+
+auto trimmed(std::string const& value) -> std::string
+{
+    constexpr auto whitespace = std::string_view {" \t\n\r\f\v"};
+    auto const first = value.find_first_not_of(whitespace);
+    if (first == std::string::npos) {
+        return {};
+    }
+    auto const last = value.find_last_not_of(whitespace);
+    return value.substr(first, last - first + 1);
+}
+
+}  // namespace
+
+auto normalize_game_patch(game_patch patch) -> result<game_patch>
+{
+    for (auto* const field : std::array {&patch.white_name,
+                                         &patch.black_name,
+                                         &patch.event,
+                                         &patch.site,
+                                         &patch.date,
+                                         &patch.result,
+                                         &patch.eco,
+                                         &patch.source_label,
+                                         &patch.review_status,
+                                         &patch.notes})
+    {
+        if (field->has_value()) {
+            **field = trimmed(**field);
+        }
+    }
+    if (patch.white_name && patch.white_name->empty()) {
+        return tl::unexpected {error {error_code::invalid_argument, "white name must not be empty"}};
+    }
+    if (patch.black_name && patch.black_name->empty()) {
+        return tl::unexpected {error {error_code::invalid_argument, "black name must not be empty"}};
+    }
+    if (patch.event && patch.event->empty()) {
+        return tl::unexpected {error {error_code::invalid_argument, "event name must not be empty"}};
+    }
+    if (patch.date && patch.date->empty()) {
+        return tl::unexpected {error {error_code::invalid_argument, "date must not be empty"}};
+    }
+    return patch;
+}
+
+auto game_store::prepare_metadata_patch(game_id const game_key, game_patch const& requested) -> result<prepared_metadata_patch>
 {
     auto provenance = get_provenance(game_key);
     if (!provenance) {
         return tl::unexpected {provenance.error()};
     }
+    auto normalized = normalize_game_patch(requested);
+    if (!normalized) {
+        return tl::unexpected {normalized.error()};
+    }
+    auto const& patch = *normalized;
     if (patch.result && !is_valid_game_result(*patch.result)) {
         return tl::unexpected {error {error_code::invalid_argument, "result must be one of 1-0, 0-1, 1/2-1/2, *"}};
     }

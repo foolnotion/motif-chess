@@ -3586,6 +3586,87 @@ TEST_CASE("server: PATCH /api/games/{id} invalid fields returns 400", "[motif-ht
     CHECK(bad_result->status == 400);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("server: PATCH trims strings, rejects empty identity fields and refuses a site the event cannot take", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_patch_strings"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-patch-strings-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18190};
+    motif::http::server srv {*db_res};
+    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+    auto const url = fmt::format("/api/games/{}", created.id);
+
+    // Empty (after trimming) player name, event name and date are 400 and change nothing.
+    auto const empty_white = cli.Patch(url, R"({"white":"   "})", "application/json");
+    auto const empty_black = cli.Patch(url, R"({"black":""})", "application/json");
+    auto const empty_event = cli.Patch(url, R"({"event":" \t "})", "application/json");
+    auto const empty_date = cli.Patch(url, R"({"date":""})", "application/json");
+    auto const untouched = cli.Get(url);
+
+    // Padded strings are stored trimmed (enum fields are trimmed before they are validated).
+    auto const padded =
+        cli.Patch(url,
+                  R"({"white":"  Carol  ","event":"  Padded Open ","site":" Oslo ","review_status":" studied ","source_label":"  lbl "})",
+                  "application/json");
+
+    // The site belongs to the shared event row: restating it is fine, any other site is a 400.
+    auto const restated = cli.Patch(url, R"({"site":" Oslo"})", "application/json");
+    auto const other_site = cli.Patch(url, R"({"site":"Elsewhere","eco":"A00"})", "application/json");
+    auto const cleared_site = cli.Patch(url, R"({"site":""})", "application/json");
+    auto const after_refusals = cli.Get(url);
+
+    srv.stop();
+    server_thread.join();
+
+    REQUIRE(empty_white != nullptr);
+    CHECK(empty_white->status == 400);
+    CHECK(empty_white->body.contains("white name must not be empty"));
+    REQUIRE(empty_black != nullptr);
+    CHECK(empty_black->status == 400);
+    CHECK(empty_black->body.contains("black name must not be empty"));
+    REQUIRE(empty_event != nullptr);
+    CHECK(empty_event->status == 400);
+    CHECK(empty_event->body.contains("event name must not be empty"));
+    REQUIRE(empty_date != nullptr);
+    CHECK(empty_date->status == 400);
+    CHECK(empty_date->body.contains("date must not be empty"));
+    REQUIRE(untouched != nullptr);
+    CHECK(untouched->body.contains(R"("name":"Alice")"));
+    CHECK(untouched->body.contains(R"("name":"Test Event")"));
+    CHECK(untouched->body.contains("2024.06.01"));
+
+    REQUIRE(padded != nullptr);
+    CHECK(padded->status == 200);
+    CHECK(padded->body.contains(R"("name":"Carol")"));
+    CHECK(padded->body.contains(R"("name":"Padded Open")"));
+    CHECK(padded->body.contains(R"("site":"Oslo")"));
+    CHECK(padded->body.contains(R"("review_status":"studied")"));
+    CHECK(padded->body.contains(R"("source_label":"lbl")"));
+
+    REQUIRE(restated != nullptr);
+    CHECK(restated->status == 200);
+    REQUIRE(other_site != nullptr);
+    CHECK(other_site->status == 400);
+    CHECK(other_site->body.contains("different site"));
+    REQUIRE(cleared_site != nullptr);
+    CHECK(cleared_site->status == 400);
+    REQUIRE(after_refusals != nullptr);
+    CHECK(after_refusals->body.contains(R"("site":"Oslo")"));
+    CHECK_FALSE(after_refusals->body.contains("Elsewhere"));
+    CHECK_FALSE(after_refusals->body.contains("A00"));  // the refused patch applied nothing, its valid eco included
+}
+
 TEST_CASE("server: PATCH /api/games/{id} missing game returns 404", "[motif-http]")
 {
     auto const tdir = tmp_dir {"crud_patch_404"};

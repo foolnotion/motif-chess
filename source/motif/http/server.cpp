@@ -36,6 +36,7 @@
 #include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
+#include "motif/db/game_store.hpp"
 #include "motif/db/manifest.hpp"
 #include "motif/db/types.hpp"
 #include "motif/engine/engine_manager.hpp"
@@ -1390,6 +1391,16 @@ void server::impl::setup_routes()
                       set_json_error(res, http_bad_request, "invalid request body");
                       return;
                   }
+
+                  // Every string field is trimmed and an empty player name, event name or date
+                  // is refused here, before any enum check sees the untrimmed value. The store
+                  // applies the same normalization, so a direct caller gets the same contract.
+                  auto normalized = motif::db::normalize_game_patch(std::move(patch));
+                  if (!normalized) {
+                      set_json_error(res, http_bad_request, normalized.error().message);
+                      return;
+                  }
+                  patch = std::move(*normalized);
 
                   if (patch.result.has_value() && !is_valid_result(*patch.result)) {
                       set_json_error(res, http_bad_request, "invalid result; allowed: 1-0, 0-1, 1/2-1/2, *");
