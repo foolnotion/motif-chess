@@ -1,6 +1,6 @@
 // PR 6b atomicity: every row of the edit failure matrix (design section 4.3),
 // ambiguous COMMIT reconciliation, forked-child crashes at the boundaries, the
-// hard-cap fold, rebuild interplay, reimport behaviour, reader exclusion and
+// hard-cap fold, rebuild interplay, reimport behavior, reader exclusion and
 // directory copies -- all against the production patch_game_metadata path.
 
 #include <algorithm>

@@ -596,7 +596,7 @@ inline auto load_base_bundle(fs::path const& pgn) -> std::optional<base_bundle>
 }
 
 // Import `pgn` into a new bundle at `bundle` with postings and the tree, then
-// close it. Logging is initialised for the duration of the import.
+// close it. Logging is initialized for the duration of the import.
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- corpus, destination bundle and log directory; every call site names all three.
 inline auto import_corpus(fs::path const& pgn, fs::path const& bundle, fs::path const& log_dir) -> motif::import::import_summary
 {

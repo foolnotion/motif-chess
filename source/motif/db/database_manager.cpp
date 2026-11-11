@@ -31,7 +31,7 @@
 #    endif
 #    include <windows.h>
 #else
-#    include <cstdio>  // <cstdio> pulls in glibc's stdio.h, which declares renameat2
+#    include <cstdio>  // glibc declares renameat2 through this header
 
 #    include <fcntl.h>
 #    include <sys/file.h>

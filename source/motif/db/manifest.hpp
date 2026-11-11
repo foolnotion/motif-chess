@@ -267,7 +267,7 @@ struct manifest_write_result
 
 // The envelope bytes manifest.json holds for manifest: schema version,
 // generation, coverage, canonical count, payload version, exact payload bytes
-// and payload checksum. Deterministic, so a cache is "current" iff its bytes
+// and payload checksum. Deterministic, so a cache is "current" if and only if its bytes
 // equal this.
 auto encode_manifest_cache(db_manifest const& manifest) -> result<std::string>;
 
