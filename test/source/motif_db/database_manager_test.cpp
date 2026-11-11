@@ -1146,7 +1146,8 @@ TEST_CASE("database_manager::open of an unchanged bundle neither replays nor rew
     }
     CHECK(g_hook_calls == 0U);
     CHECK(read_all_bytes(tdir.path / "manifest.json") == cache_before);
-    CHECK(std::filesystem::last_write_time(tdir.path / "manifest.json") == modified_before);
+    auto const cache_was_not_rewritten = std::filesystem::last_write_time(tdir.path / "manifest.json") == modified_before;
+    CHECK(cache_was_not_rewritten);
 }
 
 TEST_CASE("database_manager::open rebuilds postings automatically when the snapshot does not cover the canonical sequence",
