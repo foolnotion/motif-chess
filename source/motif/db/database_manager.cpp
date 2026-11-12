@@ -2894,9 +2894,14 @@ auto database_manager::prepare_indexed_patch(prepared_metadata_patch const& plan
     }
     // A stale baseline (an insert/remove/import not yet rebuilt) cannot certify
     // incremental coverage; reject before any UPDATE rather than carry the gap.
-    auto const status = require_postings_usable();
+    // Only this refusal is index_stale: a coverage read error stays what it is.
+    auto const status = coverage_locked();
     if (!status) {
         return tl::unexpected {status.error()};
+    }
+    if (!status->postings_usable) {
+        return tl::unexpected {error {error_code::index_stale,
+                                      "the position index does not cover the bundle; rebuild it before correcting a result or rating"}};
     }
     auto const base_seq = status->mutation_seq;
     if (manifest_.publication_generation >= int64_max || base_seq >= int64_max - 1U) {

@@ -1067,8 +1067,9 @@ TEST_CASE("game_store: patch trims every string field and refuses an empty name,
     auto const cleared = fix.store.get(game_key);
     REQUIRE(cleared.has_value());
     // NOLINTBEGIN(bugprone-unchecked-optional-access)
-    CHECK(cleared->eco.value_or("").empty());
-    CHECK(cleared->provenance.source_label.value_or("").empty());
+    CHECK_FALSE(cleared->eco.has_value());
+    CHECK_FALSE(cleared->provenance.source_label.has_value());
+    CHECK(cleared->provenance.review_status == "studied");  // an omitted field keeps its value
     // NOLINTEND(bugprone-unchecked-optional-access)
     CHECK(fix.count_rows("game_tag") == 0);
 }
@@ -1116,7 +1117,7 @@ TEST_CASE("game_store: a site edit is applied or refused, never dropped, and nev
     CHECK(site_of(first) == "London");
     CHECK(site_of(second) == "London");
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(fix.store.get(first)->eco.value_or("").empty());
+    CHECK_FALSE(fix.store.get(first)->eco.has_value());
     CHECK(fix.count_rows("event") == 1);
 
     // Clearing the site is a site change too.

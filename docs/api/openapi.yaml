@@ -1158,8 +1158,22 @@ paths:
         '503':
           description: |-
             A result or rating correction needs the position index to cover the
-            bundle, and an earlier insert or removal left it stale. Nothing was
-            changed; rebuild the index (`POST /api/positions/rebuild`) and retry.
+            bundle, and an earlier insert or removal left it stale (or it was never
+            built). The request was refused before anything was changed; rebuild the
+            index (`POST /api/positions/rebuild`) and retry. Only this condition
+            returns 503: any other failure of the correction is HTTP 500, even if it
+            leaves the index unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: |-
+            The patch failed for a reason other than the ones above, for example a
+            storage error while publishing a result or rating correction. The
+            outcome of the change may be unknown; read the game back, and rebuild
+            the position index (`POST /api/positions/rebuild`) if position queries
+            fail.
           content:
             application/json:
               schema:

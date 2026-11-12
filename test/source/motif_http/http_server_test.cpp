@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -290,6 +291,50 @@ auto wait_for_ready(motif::http::server const& srv) -> bool
     }
     return srv.is_running();
 }
+
+// Wait for startup or failure before stopping: stop() before listen() starts is
+// a no-op, while calling it twice during shutdown can close an invalid socket.
+// The thread is joined on every exit path, including a failed REQUIRE.
+class server_thread_scope
+{
+  public:
+    server_thread_scope(motif::http::server& srv, std::uint16_t const port)
+        : srv_ {srv}
+        , thread_ {[this, port]() -> void
+                   {
+                       [[maybe_unused]] auto start_res = srv_.start(port);
+                       finished_.store(true, std::memory_order_release);
+                   }}
+    {
+    }
+
+    ~server_thread_scope() noexcept { shutdown(); }
+
+    server_thread_scope(server_thread_scope const&) = delete;
+    auto operator=(server_thread_scope const&) -> server_thread_scope& = delete;
+    server_thread_scope(server_thread_scope&&) = delete;
+    auto operator=(server_thread_scope&&) -> server_thread_scope& = delete;
+
+    // Idempotent: a second call (e.g. from the destructor) finds the thread already joined.
+    void shutdown() noexcept
+    {
+        if (!thread_.joinable()) {
+            return;
+        }
+        while (!finished_.load(std::memory_order_acquire) && !srv_.is_running()) {
+            std::this_thread::sleep_for(wait_poll_interval);
+        }
+        if (!finished_.load(std::memory_order_acquire)) {
+            srv_.stop();
+        }
+        thread_.join();
+    }
+
+  private:
+    motif::http::server& srv_;
+    std::atomic<bool> finished_ {false};
+    std::thread thread_;
+};
 
 auto seed_positions(motif::db::database_manager& dbmgr, std::size_t count) -> std::uint64_t
 {
@@ -3595,7 +3640,7 @@ TEST_CASE("server: PATCH trims strings, rejects empty identity fields and refuse
 
     constexpr std::uint16_t test_port {18190};
     motif::http::server srv {*db_res};
-    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    server_thread_scope server_guard {srv, test_port};
     REQUIRE(wait_for_ready(srv));
 
     httplib::Client cli {"localhost", test_port};
@@ -3626,8 +3671,7 @@ TEST_CASE("server: PATCH trims strings, rejects empty identity fields and refuse
     auto const cleared_site = cli.Patch(url, R"({"site":""})", "application/json");
     auto const after_refusals = cli.Get(url);
 
-    srv.stop();
-    server_thread.join();
+    server_guard.shutdown();
 
     REQUIRE(empty_white != nullptr);
     CHECK(empty_white->status == 400);
@@ -3665,6 +3709,52 @@ TEST_CASE("server: PATCH trims strings, rejects empty identity fields and refuse
     CHECK(after_refusals->body.contains(R"("site":"Oslo")"));
     CHECK_FALSE(after_refusals->body.contains("Elsewhere"));
     CHECK_FALSE(after_refusals->body.contains("A00"));  // the refused patch applied nothing, its valid eco included
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("server: PATCH with an empty eco or source_label clears it and later reads omit it", "[motif-http]")
+{
+    auto const tdir = tmp_dir {"crud_patch_clear"};
+    auto db_res = motif::db::database_manager::create(tdir.path, "crud-patch-clear-db");
+    REQUIRE(db_res.has_value());
+
+    constexpr std::uint16_t test_port {18197};
+    motif::http::server srv {*db_res};
+    server_thread_scope server_guard {srv, test_port};
+    REQUIRE(wait_for_ready(srv));
+
+    httplib::Client cli {"localhost", test_port};
+    auto const post_body = fmt::format(R"({{"pgn":{}}})", glz::write_json(std::string {single_game_pgn}).value_or("\"\""));
+    auto const post_res = cli.Post("/api/games", post_body, "application/json");
+    REQUIRE(post_res != nullptr);
+    REQUIRE(post_res->status == 201);
+    motif_http_test::create_game_response created;
+    REQUIRE(!glz::read_json(created, post_res->body));
+    auto const url = fmt::format("/api/games/{}", created.id);
+
+    auto const set = cli.Patch(url, R"({"eco":"B12","source_label":"lbl","review_status":"studied"})", "application/json");
+    // Whitespace-only values normalize to empty; review_status is omitted and must survive.
+    auto const cleared = cli.Patch(url, R"({"eco":"  ","source_label":""})", "application/json");
+    auto const reread = cli.Get(url);
+
+    server_guard.shutdown();
+
+    REQUIRE(set != nullptr);
+    CHECK(set->status == 200);
+    CHECK(set->body.contains(R"("eco":"B12")"));
+    CHECK(set->body.contains(R"("source_label":"lbl")"));
+
+    REQUIRE(cleared != nullptr);
+    CHECK(cleared->status == 200);
+    CHECK_FALSE(cleared->body.contains(R"("eco")"));
+    CHECK_FALSE(cleared->body.contains(R"("source_label")"));
+    CHECK(cleared->body.contains(R"("review_status":"studied")"));
+
+    REQUIRE(reread != nullptr);
+    CHECK(reread->status == 200);
+    CHECK_FALSE(reread->body.contains(R"("eco")"));
+    CHECK_FALSE(reread->body.contains(R"("source_label")"));
+    CHECK(reread->body.contains(R"("review_status":"studied")"));
 }
 
 TEST_CASE("server: PATCH /api/games/{id} missing game returns 404", "[motif-http]")
@@ -3960,18 +4050,61 @@ TEST_CASE("server: a result correction on a stale index is refused with 503 and 
     REQUIRE_FALSE(setup.db.derived_index_status()->postings_usable);
     constexpr std::uint16_t test_port {18174};
     motif::http::server srv {setup.db};
-    std::thread server_thread {[&]() -> void { [[maybe_unused]] auto start_res = srv.start(test_port); }};
+    server_thread_scope server_guard {srv, test_port};
     REQUIRE(wait_for_ready(srv));
     httplib::Client cli {"localhost", test_port};
 
     auto const refused = cli.Patch(fmt::format("/api/games/{}", setup.imported_id), R"({"result":"0-1"})", "application/json");
     REQUIRE(refused != nullptr);
     CHECK(refused->status == 503);
+    CHECK(refused->body.contains("position index is not current"));
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(setup.db.store().get(motif::db::game_id {setup.imported_id})->result == "1-0");
 
-    srv.stop();
-    server_thread.join();
+    server_guard.shutdown();
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("server: a correction that fails for another reason is 500 even though it leaves the index stale", "[motif-http][pr6b]")
+{
+    correction_fixture setup {"http_correct_failed_stale"};
+    REQUIRE(setup.db.derived_index_status()->postings_usable);  // current baseline: the stale gate passes
+    constexpr std::uint16_t test_port {18202};
+    motif::http::server srv {setup.db};
+    server_thread_scope server_guard {srv, test_port};
+    REQUIRE(wait_for_ready(srv));
+    httplib::Client cli {"localhost", test_port};
+
+    auto status = 0;
+    auto body = std::string {};
+    {
+        // The COMMIT is reported as failed although it landed, and the read that would reconcile the
+        // outcome fails too: the edit's result is unknown, so the old snapshot no longer covers the bundle.
+        motif::db::fault::scoped_hook const hook {
+            +[](motif::db::fault::point where, motif::db::fault::artifact_kind, std::uint64_t) noexcept -> motif::db::fault::fault_action
+            {
+                if (where == motif::db::fault::point::before_sqlite_commit) {
+                    return motif::db::fault::fault_action::commit_error_after_commit;
+                }
+                if (where == motif::db::fault::point::before_commit_reconcile) {
+                    return motif::db::fault::fault_action::fail_io;
+                }
+                return motif::db::fault::fault_action::proceed;
+            }};
+        auto const response = cli.Patch(fmt::format("/api/games/{}", setup.imported_id), R"({"result":"0-1"})", "application/json");
+        REQUIRE(response != nullptr);
+        status = response->status;
+        body = response->body;
+    }
+    server_guard.shutdown();
+
+    // The failure left the indexes unusable ...
+    REQUIRE_FALSE(setup.db.derived_index_status()->postings_usable);
+    // ... but the edit did not fail because of a stale baseline, so the answer is 500, not the
+    // "rebuild and retry" 503 that would hide the real failure.
+    CHECK(status == 500);
+    CHECK(body.contains("patch failed"));
+    CHECK_FALSE(body.contains("position index"));
 }
 
 TEST_CASE("server: a manual game accepts a wide patch through the documented wire names", "[motif-http][pr6b]")

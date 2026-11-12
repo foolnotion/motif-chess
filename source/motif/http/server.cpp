@@ -1442,7 +1442,10 @@ void server::impl::setup_routes()
                       }
                       // A result or rating correction needs the position indexes to be current: it
                       // is refused before any change when an earlier insert/removal left them stale.
-                      if (auto const status = database.derived_index_status(); status && !status->postings_usable) {
+                      // Only that gate is 503. Any other failure stays a 500 even when it leaves the
+                      // indexes unusable (an unknown COMMIT outcome, say): the index state does not
+                      // say why the edit failed.
+                      if (failure == motif::db::error_code::index_stale) {
                           set_json_error(res,
                                          http_service_unavailable,
                                          "position index is not current; rebuild it before correcting a result or rating");

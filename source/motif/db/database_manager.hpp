@@ -232,10 +232,12 @@ class database_manager
     // and equal a rebuild of the edited bundle; the postings occurrence file
     // and the tree checkpoint are untouched unless a hard cap forced a fold.
     //
-    // Fails before any UPDATE with io_failure (the unavailable error) when the
-    // indexes do not currently cover the bundle (stale baseline: run a
-    // rebuild first), and with invalid_argument inside an open canonical
-    // transaction. error_code::duplicate means the new identity would equal
+    // Fails before any UPDATE with index_stale when the indexes do not
+    // currently cover the bundle (stale baseline: run a rebuild first), and
+    // with invalid_argument inside an open canonical transaction. A failure
+    // of the edit itself (including one that leaves the indexes unusable, such
+    // as an unknown COMMIT outcome) is io_failure, never index_stale.
+    // error_code::duplicate means the new identity would equal
     // another game's. A patch that restates stored values is a success that
     // changes nothing; draw versus unfinished is a real change even though
     // the indexes encode both identically. A patch that changes no indexed

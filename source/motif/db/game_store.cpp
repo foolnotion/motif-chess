@@ -1574,6 +1574,20 @@ class game_store::column_assignments
                             { sqlite3_bind_text(stmt, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT); });
     }
 
+    // An empty value clears the column: it is stored as NULL, never as ''.
+    void set_nullable_text(std::string_view const column, std::string const& value)
+    {
+        items_.emplace_back(column,
+                            [value](sqlite3_stmt* stmt, int const index) -> void
+                            {
+                                if (value.empty()) {
+                                    sqlite3_bind_null(stmt, index);
+                                } else {
+                                    sqlite3_bind_text(stmt, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
+                                }
+                            });
+    }
+
     void set_optional_int(std::string_view const column, std::optional<std::int64_t> const& value)
     {
         items_.emplace_back(column,
@@ -1952,10 +1966,10 @@ void game_store::collect_value_assignments(prepared_metadata_patch const& plan, 
 {
     auto const& patch = plan.patch;
     if (patch.eco) {
-        assignments.set_text("eco", *patch.eco);
+        assignments.set_nullable_text("eco", *patch.eco);
     }
     if (patch.source_label) {
-        assignments.set_text("source_label", *patch.source_label);
+        assignments.set_nullable_text("source_label", *patch.source_label);
     }
     if (patch.review_status) {
         assignments.set_text("review_status", *patch.review_status);

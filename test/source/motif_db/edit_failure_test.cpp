@@ -572,7 +572,11 @@ TEST_CASE("an ambiguous COMMIT reconciles to the true outcome and never serves o
         {
             auto const faults = armed_faults {{.at = point::before_sqlite_commit, .action = fault_action::commit_error_after_commit},
                                               {.at = point::before_commit_reconcile, .action = fault_action::fail_io}};
-            REQUIRE_FALSE(env.manager->patch_game_metadata(edit_bundle::id_of(index), patch_for(env.corpus[index], target)).has_value());
+            auto const failed = env.manager->patch_game_metadata(edit_bundle::id_of(index), patch_for(env.corpus[index], target));
+            REQUIRE_FALSE(failed.has_value());
+            // The edit itself failed (unknown COMMIT outcome): the indexes it leaves unusable do not
+            // turn that into the stale-baseline refusal, which is reserved for a gate that ran first.
+            CHECK(failed.error() == error_code::io_failure);
         }
         // Canonical rows are new and the in-memory snapshot is old: no query may combine them.
         CHECK_FALSE(env.status().postings_usable);

@@ -345,7 +345,7 @@ TEST_CASE("an index-relevant patch on a stale baseline is refused before any UPD
     patch.result = env.corpus[1].result == "1-0" ? "0-1" : "1-0";
     auto const refused = env.manager->patch_game_metadata(edit_bundle::id_of(1), patch);
     REQUIRE_FALSE(refused.has_value());
-    CHECK(refused.error() == error_code::io_failure);  // the existing "indexes unavailable" error
+    CHECK(refused.error() == error_code::index_stale);
     CHECK(env.status().mutation_seq == seq);
     CHECK(env.status().publication_generation == generation);
     CHECK(artifact_names(env.bundle) == files);
