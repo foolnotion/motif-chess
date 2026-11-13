@@ -49,6 +49,9 @@ struct search_page
     std::int64_t total_matches {};
     motif::search::opening_stats::stats continuations;
     motif::db::search_filter filter;
+    // database_manager::data_revision() read in the same generation scope as
+    // the data above; a cached page is reusable only while it is unchanged.
+    std::uint64_t data_revision {};
 };
 
 // Toolkit-neutral position-search/opening-explorer state. Mirrors
@@ -100,7 +103,12 @@ class search_presenter
     // game is indexed at ply 0, so it decodes the whole posting block) and
     // is re-issued every time board navigation returns to ply 0. Its result
     // is cached after the first real fetch and served synchronously from
-    // then on, until the underlying data changes.
+    // then on, but only while it is provably current: the manager's
+    // data_revision() (which covers every canonical change, metadata and
+    // provenance included) must be unchanged and derived_index_status() must
+    // still report usable postings. Anything else falls through to a real
+    // query. invalidate_starting_position_cache() remains for callers that
+    // want to drop it explicitly.
     void invalidate_starting_position_cache() noexcept;
 
     [[nodiscard]] auto state() const noexcept -> search_state const&;
@@ -110,6 +118,10 @@ class search_presenter
     search_state state_;
     motif::db::zobrist_hash starting_position_hash_;
     std::optional<search_page> starting_position_cache_;
+
+    // True only while the cached starting-position page still describes the
+    // database: unchanged data_revision() and usable postings coverage.
+    [[nodiscard]] auto starting_position_cache_is_current() const -> bool;
 
     static auto from_database_error(motif::db::error const& database_error) -> search_error;
     static auto from_search_error(motif::search::error const& search_error_value) -> search_error;

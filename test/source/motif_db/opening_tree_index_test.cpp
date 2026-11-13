@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "motif/db/opening_tree_index.hpp"
@@ -488,9 +489,8 @@ TEST_CASE("database_manager::rebuild_opening_tree_index reuses exact postings ch
     CHECK(metrics.child_visit_count == 0U);
     CHECK(metrics.child_spill_run_count == 0U);
 
-    REQUIRE(manager->manifest().opening_tree_index.has_value());
-    auto manager_index = motif::db::opening_tree_index::open(
-        manager->dir() / manager->manifest().opening_tree_index.value_or(motif::db::derived_index_manifest_entry {}).filename);
+    REQUIRE(manager->manifest().tree() != nullptr);
+    auto manager_index = motif::db::opening_tree_index::open(manager->dir() / manager->manifest().tree()->checkpoint.filename);
     REQUIRE(manager_index.has_value());
 
     check_stats_for_hash(*manager_index,
@@ -510,7 +510,8 @@ TEST_CASE("database_manager::rebuild_opening_tree_index reuses exact postings ch
                            .elo_weighted_score = 200.0 / 4100.0}});
 }
 
-TEST_CASE("database_manager::rebuild_opening_tree_index rejects a postings game-count mismatch", "[motif-db][opening_tree_index]")
+TEST_CASE("database_manager::rebuild_opening_tree_index rejects postings that no longer cover the canonical sequence",
+          "[motif-db][opening_tree_index]")
 {
     tmp_dir const tdir {"stale-postings"};
     auto manager = motif::db::database_manager::create(tdir.path / "db", "stale-postings");
@@ -522,24 +523,66 @@ TEST_CASE("database_manager::rebuild_opening_tree_index rejects a postings game-
     auto const rebuilt = manager->rebuild_opening_tree_index();
     REQUIRE_FALSE(rebuilt.has_value());
     CHECK(rebuilt.error() == motif::db::error_code::invalid_argument);
-    CHECK_FALSE(manager->manifest().opening_tree_index.has_value());
+    CHECK(manager->manifest().tree() == nullptr);
 }
 
-TEST_CASE("database_manager::rebuild_opening_tree_index rejects postings invalidated before a canonical mutation",
-          "[motif-db][opening_tree_index]")
+TEST_CASE("database_manager::rebuild_opening_tree_index rejects equal-count stale postings", "[motif-db][opening_tree_index]")
 {
-    tmp_dir const tdir {"invalidated-postings"};
-    auto manager = motif::db::database_manager::create(tdir.path / "db", "invalidated-postings");
+    tmp_dir const tdir {"equal-count-stale-postings"};
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "equal-count-stale");
     REQUIRE(manager.has_value());
-    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    auto const first = manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100}));
+    REQUIRE(first.has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
 
-    REQUIRE(manager->prepare_canonical_mutation().has_value());
+    // Delete and reinsert: the canonical game count is back to what the
+    // published postings indexed, but the game set is different.
+    REQUIRE(manager->remove_game(*first).has_value());
     REQUIRE(manager->insert_game(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
-    CHECK_FALSE(manager->manifest().position_postings.has_value());
+    auto const count = manager->store().count_games();
+    REQUIRE(count.has_value());
+    CHECK(std::cmp_equal(*count, manager->manifest().postings()->document_count));
+
     auto const rebuilt = manager->rebuild_opening_tree_index();
     REQUIRE_FALSE(rebuilt.has_value());
     CHECK(rebuilt.error() == motif::db::error_code::invalid_argument);
+}
+
+TEST_CASE("database_manager keeps a stale tree descriptor referenced but unusable and falls back to exact postings",
+          "[motif-db][opening_tree_index]")
+{
+    tmp_dir const tdir {"stale-tree"};
+    auto manager = motif::db::database_manager::create(tdir.path / "db", "stale-tree");
+    REQUIRE(manager.has_value());
+    REQUIRE(manager->insert_game(make_game({.sans = {"e4"}, .result = "1-0", .white_elo = 2200, .black_elo = 2100})).has_value());
+    REQUIRE(manager->rebuild_position_postings().has_value());
+    REQUIRE(manager->rebuild_opening_tree_index().has_value());
+    REQUIRE(manager->manifest().tree() != nullptr);
+    auto const tree_file = manager->dir() / manager->manifest().tree()->checkpoint.filename;
+    REQUIRE(std::filesystem::exists(tree_file));
+    CHECK(manager->derived_index_status()->tree_usable);
+
+    // An index-relevant mutation: both descriptors stay, neither is usable.
+    REQUIRE(manager->insert_game(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    auto const stale = manager->derived_index_status();
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(stale->postings_usable);
+    CHECK_FALSE(stale->tree_usable);
+    CHECK(manager->manifest().tree() != nullptr);
+    CHECK(std::filesystem::exists(tree_file));
+
+    // A postings rebuild at the new sequence drops the stale tree descriptor
+    // (it would not cover the new sequence) and the tree file is collected.
+    REQUIRE(manager->rebuild_position_postings().has_value());
+    CHECK(manager->manifest().tree() == nullptr);
+    CHECK_FALSE(std::filesystem::exists(tree_file));
+    CHECK(manager->derived_index_status()->postings_usable);
+    CHECK_FALSE(manager->derived_index_status()->tree_usable);
+
+    // Unfiltered stats still answer, exactly, through the postings fallback.
+    auto const stats = manager->query_unfiltered_opening_stats(hash_after_sans({}));
+    REQUIRE(stats.has_value());
+    CHECK(stats->size() == 2U);
 }
 
 TEST_CASE("opening_tree_index::build rejects an external child-count stream missing a referenced hash", "[motif-db][opening_tree_index]")

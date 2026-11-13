@@ -10,10 +10,17 @@ add_library(motif_db STATIC
     game_writer.cpp
     schema.cpp
     manifest.cpp
+    published_snapshot.cpp
+    fault_injection.cpp
     database_manager.cpp
     position_postings.cpp
     position_prefix_postings.cpp
     opening_tree_index.cpp
+    resource_governor.cpp
+    opening_tree_stats.cpp
+    opening_tree_patch.cpp
+    opening_tree_composite.cpp
+    postings_metadata_patch.cpp
 )
 
 target_link_libraries(

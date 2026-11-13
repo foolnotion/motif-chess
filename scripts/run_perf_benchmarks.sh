@@ -12,18 +12,26 @@ Modes:
   quick              Uses a 100k-game corpus and runs the production-path perf guard
   full               Uses a 1M-game corpus and runs the same perf guard on the full dataset
   exhaustive         Uses a 1M-game corpus and runs all existing performance-tagged tests
+  bench-quick        Benchmark suite (motif_bench_test) on the 100k corpus via scripts/bench_compare.py
+  bench-full         Benchmark suite on the 1M corpus (slow: every scenario rebuilds the 1M bundle indexes)
 
 Options:
-  --mode MODE        quick | full | exhaustive (default: quick)
-  --build-dir PATH   Build directory to use (default: build/dev)
+  --mode MODE        quick | full | exhaustive | bench-quick | bench-full (default: quick)
+  --build-dir PATH   Build directory to use (default: build/dev; bench modes need Release)
   --skip-build       Do not build test binaries before running benchmarks
   --dry-run          Print commands without executing them
+  --repeat N         bench modes: repetitions per scenario (default: 3)
+  --out FILE         bench modes: result JSON (default: <build-dir>/bench-<tier>.json)
+  --compare FILE     bench modes: afterwards compare against this baseline JSON
+                     (exit non-zero on regression); baselines live in docs/bench-baselines/
   -h, --help         Show this help text
 
 Examples:
   scripts/run_perf_benchmarks.sh
   scripts/run_perf_benchmarks.sh --mode full
   scripts/run_perf_benchmarks.sh --mode exhaustive --build-dir build/release
+  scripts/run_perf_benchmarks.sh --mode bench-quick --build-dir build/release \
+      --compare docs/bench-baselines/quick-twic-100k.json
 EOF
 }
 
@@ -31,6 +39,9 @@ build_dir='build/dev'
 mode='quick'
 skip_build='false'
 dry_run='false'
+bench_repeat='3'
+bench_out=''
+bench_baseline=''
 
 while (($# > 0)); do
     case "$1" in
@@ -50,6 +61,18 @@ while (($# > 0)); do
             dry_run='true'
             shift
             ;;
+        --repeat)
+            bench_repeat=${2:-}
+            shift 2
+            ;;
+        --out)
+            bench_out=${2:-}
+            shift 2
+            ;;
+        --compare)
+            bench_baseline=${2:-}
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -62,8 +85,8 @@ while (($# > 0)); do
     esac
 done
 
-if [[ ${mode} != 'quick' && ${mode} != 'full' && ${mode} != 'exhaustive' ]]; then
-    printf '--mode must be quick, full, or exhaustive\n' >&2
+if [[ ${mode} != 'quick' && ${mode} != 'full' && ${mode} != 'exhaustive' && ${mode} != 'bench-quick' && ${mode} != 'bench-full' ]]; then
+    printf '--mode must be quick, full, exhaustive, bench-quick, or bench-full\n' >&2
     exit 1
 fi
 
@@ -96,12 +119,28 @@ ensure_quick_pgn() {
     run bash scripts/extract_pgn_subset.sh
 }
 
-if [[ ${mode} == 'quick' ]]; then
+if [[ ${mode} == 'quick' || ${mode} == 'bench-quick' ]]; then
     ensure_quick_pgn
     corpus_path="${repo_root}/${quick_pgn}"
 else
     ensure_one_million_pgn
     corpus_path="${repo_root}/${one_million_pgn}"
+fi
+
+# Benchmark suite: scenario binaries run one process each via bench_compare.py.
+if [[ ${mode} == bench-* ]]; then
+    tier=${mode#bench-}
+    if [[ ${skip_build} == 'false' ]]; then
+        run cmake --build "${build_dir}" --target motif_bench_test
+    fi
+    bench_out=${bench_out:-${build_dir}/bench-${tier}.json}
+    bench_script="$(dirname "$0")/bench_compare.py"
+    run python3 "${bench_script}" run --build-dir "${build_dir}" --tier "${tier}" \
+        --repeat "${bench_repeat}" --out "${bench_out}"
+    if [[ -n ${bench_baseline} ]]; then
+        run python3 "${bench_script}" compare "${bench_baseline}" "${bench_out}"
+    fi
+    exit 0
 fi
 
 if [[ ${skip_build} == 'false' ]]; then

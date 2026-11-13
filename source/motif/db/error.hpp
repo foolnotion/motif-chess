@@ -19,6 +19,12 @@ enum class error_code : std::uint8_t
     duplicate,
     not_editable,
     invalid_argument,
+    // A result or rating correction needs the published position index to cover
+    // the bundle, and it does not (stale after an insert/removal/import, or
+    // never built). Raised only by that gate, before anything is written; a
+    // failure of the correction itself stays io_failure even when it leaves the
+    // index unusable.
+    index_stale,
 };
 
 struct error
@@ -61,6 +67,8 @@ using result = tl::expected<T, error>;
             return "not_editable";
         case error_code::invalid_argument:
             return "invalid_argument";
+        case error_code::index_stale:
+            return "index_stale";
     }
 
     return "unknown";

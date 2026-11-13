@@ -62,7 +62,10 @@ Engine analysis flow:
 
 ## Known Limitations
 
-- SQLite mutations invalidate derived indexes before changing canonical data; queries fail closed until rebuild
+- an insert, removal or dedup leaves the derived indexes stale (queries fail closed until rebuild); a result or
+  rating correction (`PATCH /api/games/{id}`, `database_manager::patch_game_metadata`) does not: it publishes
+  its derived state incrementally in the same FULL SQLite commit as the canonical edit, but requires the
+  indexes to be current and overwrites the stored value (no undo)
 - the Slint shell covers workspace lifecycle, game browsing, board/notation navigation, PGN import, and
   position search/opening-explorer parity; the engine analysis panel from the historical Qt spec has not
   yet been ported

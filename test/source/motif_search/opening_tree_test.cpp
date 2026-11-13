@@ -306,6 +306,141 @@ TEST_CASE("opening_tree::open leaves boundary nodes unexpanded", "[motif-search]
     CHECK_FALSE(nf3.subtree->is_expanded);
 }
 
+namespace
+{
+
+auto find_continuation(motif::search::opening_tree::node const& parent, std::string_view const san)
+    -> motif::search::opening_tree::node_continuation const*
+{
+    for (auto const& cont : parent.continuations) {
+        if (cont.san == san) {
+            return &cont;
+        }
+    }
+    return nullptr;
+}
+
+// Walks `sans` from `from` and returns the subtree reached, or nullptr if any step is missing.
+auto walk_subtree(motif::search::opening_tree::node const& from, std::initializer_list<char const*> sans)
+    -> motif::search::opening_tree::node const*
+{
+    auto const* current = &from;
+    for (char const* const san : sans) {
+        auto const* cont = find_continuation(*current, san);
+        if (cont == nullptr || cont->subtree == nullptr) {
+            return nullptr;
+        }
+        current = cont->subtree.get();
+    }
+    return current;
+}
+
+}  // namespace
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("opening_tree::open gives every transposing parent the full shared subtree", "[motif-search][opening_tree]")
+{
+    tmp_dir const tdir {"diamond_transposition"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "tree-db");
+    REQUIRE(manager.has_value());
+
+    // 1.Nf3 Nf6 2.Nc3 and 1.Nc3 Nf6 2.Nf3 reach one position at the same depth through two
+    // distinct parents, so both parents must carry that position's continuations.
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"Nf3", "Nf6", "Nc3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::nullopt,
+                                            .opening_name = std::nullopt}),
+                                 make_game({.sans = {"Nc3", "Nf6", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::nullopt,
+                                            .opening_name = std::nullopt}),
+                                 make_game({.sans = {"Nc3", "Nf6", "Nf3", "d5"},
+                                            .result = "0-1",
+                                            .white_elo = white_elo_low,
+                                            .black_elo = black_elo_other,
+                                            .eco = std::nullopt,
+                                            .opening_name = std::nullopt}),
+                             });
+
+    auto const starting_hash = hash_after_sans({});
+    auto tree_res = motif::search::opening_tree::open(*manager, starting_hash, default_prefetch_depth);
+    REQUIRE(tree_res.has_value());
+
+    auto const* const via_nf3 = walk_subtree(tree_res->root, {"Nf3", "Nf6", "Nc3"});
+    auto const* const via_nc3 = walk_subtree(tree_res->root, {"Nc3", "Nf6", "Nf3"});
+    REQUIRE(via_nf3 != nullptr);
+    REQUIRE(via_nc3 != nullptr);
+    CHECK(via_nf3 != via_nc3);
+
+    // The transposed position aggregates all three games regardless of the path taken.
+    for (auto const* const shared : {via_nf3, via_nc3}) {
+        CHECK(shared->zobrist_hash == hash_after_sans({"Nf3", "Nf6", "Nc3"}));
+        CHECK(shared->is_expanded);
+        REQUIRE(shared->continuations.size() == 2);
+        CHECK(shared->continuations[0].san == "Nc6");
+        CHECK(shared->continuations[0].frequency == 2);
+        CHECK(shared->continuations[0].white_wins == 2);
+        CHECK(shared->continuations[1].san == "d5");
+        CHECK(shared->continuations[1].frequency == 1);
+        CHECK(shared->continuations[1].black_wins == 1);
+    }
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+TEST_CASE("opening_tree::open with filter gives every transposing parent the full shared subtree", "[motif-search][opening_tree][filter]")
+{
+    tmp_dir const tdir {"diamond_transposition_filter"};
+
+    auto manager = motif::db::database_manager::create(tdir.path, "tree-db");
+    REQUIRE(manager.has_value());
+
+    insert_games_and_rebuild(*manager,
+                             {
+                                 make_game({.sans = {"Nf3", "Nf6", "Nc3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::nullopt,
+                                            .opening_name = std::nullopt}),
+                                 make_game({.sans = {"Nc3", "Nf6", "Nf3", "Nc6"},
+                                            .result = "1-0",
+                                            .white_elo = white_elo_high,
+                                            .black_elo = black_elo_high,
+                                            .eco = std::nullopt,
+                                            .opening_name = std::nullopt}),
+                                 make_game({.sans = {"Nc3", "Nf6", "Nf3", "d5"},
+                                            .result = "0-1",
+                                            .white_elo = white_elo_low,
+                                            .black_elo = black_elo_other,
+                                            .eco = std::nullopt,
+                                            .opening_name = std::nullopt}),
+                             });
+
+    motif::db::search_filter filter;
+    filter.result = "1-0";
+
+    auto tree_res = motif::search::opening_tree::open(*manager, hash_after_sans({}), default_prefetch_depth, filter);
+    REQUIRE(tree_res.has_value());
+
+    auto const* const via_nf3 = walk_subtree(tree_res->root, {"Nf3", "Nf6", "Nc3"});
+    auto const* const via_nc3 = walk_subtree(tree_res->root, {"Nc3", "Nf6", "Nf3"});
+    REQUIRE(via_nf3 != nullptr);
+    REQUIRE(via_nc3 != nullptr);
+
+    for (auto const* const shared : {via_nf3, via_nc3}) {
+        REQUIRE(shared->continuations.size() == 1);
+        CHECK(shared->continuations[0].san == "Nc6");
+        CHECK(shared->continuations[0].frequency == 2);
+    }
+}
+
 TEST_CASE("opening_tree::expand populates children for unexpanded node", "[motif-search][opening_tree]")
 {
     tmp_dir const tdir {"expand"};

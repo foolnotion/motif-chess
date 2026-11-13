@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <ios>
 #include <limits>
 #include <optional>
@@ -240,6 +241,9 @@ auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config c
         return tl::unexpected {error_code::invalid_state};
     }
 
+    // Same scope as resume(): the checkpoint read, the store().count_games() reconciliation in
+    // resume_from_checkpoint(), and run_from() must all observe one generation.
+    auto const generation_lock = db_.lock_generation();
     auto const chk = read_checkpoint(db_.dir());
     if (chk) {
         auto const checkpoint_source = std::filesystem::absolute(std::filesystem::path {chk->source_path}).lexically_normal();
@@ -254,17 +258,32 @@ auto import_pipeline::run(std::filesystem::path const& pgn_path, import_config c
     } else if (chk.error() != error_code::not_found) {
         return tl::unexpected {chk.error()};
     }
-    return run_from(pgn_path, 0, 0, 0, config);
+    return run_from(pgn_path, 0, /*resumed=*/false, config);
 }
 
 auto import_pipeline::resume(std::filesystem::path const& pgn_path, import_config const& config) -> result<import_summary>
 {
+    if (config.num_workers == 0 || config.num_lines == 0) {
+        return tl::unexpected {error_code::invalid_state};
+    }
     auto const generation_lock = db_.lock_generation();
     auto chk = read_checkpoint(db_.dir());
     if (!chk) {
         return tl::unexpected {error_code::io_failure};
     }
     return resume_from_checkpoint(pgn_path, *chk, config);
+}
+
+auto import_pipeline::restore_identity_index() -> result<std::size_t>
+{
+    auto dedup_res = db_.writer().deduplicate();
+    if (!dedup_res) {
+        if (auto const log = spdlog::get("motif.import"); log) {
+            log->error("identity index restore failed; the database needs recovery (reopen it or resume the import)");
+        }
+        return tl::unexpected {error {error_code::recovery_required, "identity index could not be restored"}};
+    }
+    return dedup_res->removed;
 }
 
 auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_path,
@@ -282,46 +301,55 @@ auto import_pipeline::resume_from_checkpoint(std::filesystem::path const& pgn_pa
         return tl::unexpected {error_code::io_failure};
     }
 
-    auto pre_committed = checkpoint.games_committed;
+    // The checkpoint only says that an import of this source was interrupted. Its
+    // cursor is never used: the JSON file is written after its batch's SQLite
+    // COMMIT, a NORMAL commit can be lost to a power failure while the file
+    // survives, and nothing in the file can prove otherwise (see checkpoint.hpp).
+    // The source is re-read from offset 0 with checked inserts, which skip the
+    // games that survived as duplicates and import the ones that did not.
     if (!*index_exists) {
         // A process or power failure can occur after raw batches commit but
         // before deduplicate() restores the identity index. Reconcile that
         // durable SQLite state before resuming with checked inserts.
-        if (auto repair_res = db_.writer().deduplicate(); !repair_res) {
-            return tl::unexpected {error_code::io_failure};
-        }
         // deduplicate() can remove canonical games committed by the prior,
-        // interrupted session; postings are marked stale by
-        // prepare_canonical_mutation() in run_from() below regardless, so
+        // interrupted session; each such change advances the mutation sequence,
+        // so the previously published snapshot is stale by construction and
         // this reconciliation never needs to touch a derived index itself.
-        auto const game_count = db_.store().count_games();
-        if (!game_count) {
-            return tl::unexpected {error_code::io_failure};
+        if (auto restored = restore_identity_index(); !restored) {
+            return tl::unexpected {restored.error()};
         }
-        pre_committed = *game_count;
+    }
+    // Games already stored are not this run's: count from the recovered database.
+    auto const game_count = db_.store().count_games();
+    if (!game_count) {
+        return tl::unexpected {error_code::io_failure};
     }
 
-    return run_from(pgn_path, checkpoint.byte_offset, pre_committed, checkpoint.last_game_id, config);
+    return run_from(pgn_path, *game_count, /*resumed=*/true, config);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
-                               // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-                               std::size_t start_offset,
-                               std::int64_t pre_committed,
-                               std::int64_t pre_last_game_id,
+                               std::int64_t const pre_committed,
+                               bool const resumed,
                                import_config const& config) -> result<import_summary>
 {
+    // No invalidation step: every canonical batch commit advances the mutation
+    // sequence inside its own transaction, which atomically makes the previously
+    // published snapshot stale. A failed or all-duplicate import changes nothing.
     auto const generation_lock = db_.lock_generation();
-    if (auto stale_res = db_.prepare_canonical_mutation(); !stale_res) {
-        return tl::unexpected {error_code::io_failure};
-    }
     if (config.num_workers == 0 || config.num_lines == 0) {
         auto log = spdlog::get("motif.import");
         if (log) {
             log->error("import_config validation failed: num_workers={} num_lines={}", config.num_workers, config.num_lines);
         }
         return tl::unexpected {error_code::invalid_state};
+    }
+
+    // An unreadable source is rejected before anything is changed -- no
+    // checkpoint, no dropped identity index.
+    if (!std::ifstream {pgn_path, std::ios::binary}.is_open()) {
+        return tl::unexpected {error_code::io_failure};
     }
 
     auto log = spdlog::get("motif.import");
@@ -340,32 +368,33 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     start_time_ns_.store(current_time_ns(), std::memory_order_relaxed);
     phase_.store(import_phase::ingesting, std::memory_order_relaxed);
 
-    if (auto game_count = count_games(pgn_path, start_offset); game_count.has_value()) {
+    if (auto game_count = count_games(pgn_path, 0); game_count.has_value()) {
         total_games_.store(*game_count, std::memory_order_relaxed);
     }
 
     pgn_reader reader {pgn_path};
-    if (start_offset > 0) {
-        if (auto seek_res = reader.seek_to_offset(start_offset); !seek_res) {
-            return tl::unexpected {error_code::io_failure};
-        }
-    }
 
-    std::int64_t last_game_id = pre_last_game_id;
+    std::int64_t last_game_id = 0;
     std::int64_t committed = pre_committed;
     std::size_t batch_pending = 0;
     bool sqlite_tx_open = false;
     bool eof_reached = false;
     bool stopped = false;
-    std::size_t checkpoint_offset = start_offset;
+    std::size_t checkpoint_offset = 0;
     std::optional<error> fatal_error;
+    // The cursor as of the last successful COMMIT (see write_progress_checkpoint).
+    std::size_t durable_offset = 0;
+    std::int64_t durable_committed = pre_committed;
+    std::int64_t durable_last_game_id = 0;
 
     // A fresh import (never resumed) skips the per-row identity check during
     // ingest and reconciles duplicates in one pass afterward -- see
     // deduplicate_and_rebuild_index below. resume() keeps the checked path:
     // reasoning about a partially-committed DB is already nontrivial without
-    // also tracking "is the identity index currently dropped".
-    bool const raw_mode = pre_committed == 0;
+    // also tracking "is the identity index currently dropped". An existing
+    // checkpoint means a checked resume even when it records zero accepted
+    // games, so this is an explicit flag, not a game-count proxy.
+    bool const raw_mode = !resumed;
 
     auto begin_sqlite_batch = [&]() -> bool
     {
@@ -399,39 +428,71 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
             return false;
         }
         sqlite_tx_open = false;
-        // These games are now durable in SQLite. Postings and the opening
-        // tree index (if enabled) are rebuilt from the persisted game store
-        // once ingest finishes -- see below.
+        // These games are now committed in SQLite, and the cursor describing
+        // them is the only one a checkpoint may record. Postings and the
+        // opening tree index (if enabled) are rebuilt from the persisted game
+        // store once ingest finishes -- see below.
+        durable_offset = checkpoint_offset;
+        durable_committed = committed;
+        durable_last_game_id = last_game_id;
         return true;
     };
 
-    auto write_progress_checkpoint = [&]() -> void
+    // Writes the cursor the last successful COMMIT made durable, never the
+    // in-flight position, so the file never claims games a rollback discarded.
+    // It marks the import as interrupted; resume does not seek to it.
+    auto write_progress_checkpoint = [&]() -> bool
     {
         import_checkpoint const chk {
             .source_path = pgn_path.string(),
-            .byte_offset = checkpoint_offset,
-            .games_committed = committed,
-            .last_game_id = last_game_id,
+            .byte_offset = durable_offset,
+            .games_committed = durable_committed,
+            .last_game_id = durable_last_game_id,
         };
         if (auto wres = write_checkpoint(db_.dir(), chk); !wres) {
             if (log) {
                 log->error("checkpoint write failed");
             }
+            return false;
         }
+        return true;
     };
 
     // Once drop_identity_index() below succeeds, every remaining early-return
     // path in this function must call this before returning: the DB is left
     // without its uniqueness guarantee -- and, once any raw insert has
     // landed, with potential unreconciled duplicates -- until deduplicate()
-    // runs. deduplicate() is safe to call even with zero raw-mode inserts
-    // pending (it's a no-op DELETE/UPDATE followed by CREATE INDEX).
-    auto restore_identity_index = [&]() -> void
+    // runs. It is the shared recovery path (fatal error, cancel, normal end).
+    // Failure is reported to the caller as recovery_required rather than being
+    // swallowed. Removed duplicates shrink the committed count, so the
+    // checkpoint is rewritten to keep its reported count accurate.
+    auto restore_after_raw_ingest = [&]() -> result<std::size_t>
     {
-        if (raw_mode) {
-            (void)db_.writer().deduplicate();
+        if (!raw_mode) {
+            return std::size_t {0};
         }
+        auto restored = restore_identity_index();
+        if (!restored) {
+            return restored;
+        }
+        auto const removed = *restored;
+        if (removed != 0U) {
+            committed -= static_cast<std::int64_t>(removed);
+            durable_committed -= static_cast<std::int64_t>(removed);
+            games_committed_.fetch_sub(removed, std::memory_order_relaxed);
+            games_skipped_.fetch_add(removed, std::memory_order_relaxed);
+            write_progress_checkpoint();
+        }
+        return removed;
     };
+
+    // Write the marker before the first canonical commit and retain it through
+    // dedup and rebuild. If it cannot be written the database is untouched.
+    // On POSIX it is also synchronized for power-loss recovery; see the
+    // checkpoint contract for the Windows directory-sync limitation.
+    if (!write_progress_checkpoint()) {
+        return tl::unexpected {error_code::io_failure};
+    }
 
     if (raw_mode) {
         if (auto drop_res = db_.writer().drop_identity_index(); !drop_res) {
@@ -440,7 +501,9 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     }
 
     if (!begin_sqlite_batch()) {
-        restore_identity_index();
+        if (auto restored = restore_after_raw_ingest(); !restored) {
+            return tl::unexpected {restored.error()};
+        }
         return tl::unexpected {error_code::io_failure};
     }
 
@@ -619,15 +682,22 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
 
     if (fatal_error.has_value() && *fatal_error != error_code::eof) {
         rollback_sqlite_batch();
-        restore_identity_index();
+        if (auto restored = restore_after_raw_ingest(); !restored) {
+            return tl::unexpected {restored.error()};
+        }
         return tl::unexpected {*fatal_error};
     }
 
     if (!commit_sqlite_batch()) {
         rollback_sqlite_batch();
-        restore_identity_index();
+        if (auto restored = restore_after_raw_ingest(); !restored) {
+            return tl::unexpected {restored.error()};
+        }
         return tl::unexpected {error_code::io_failure};
     }
+    // The initial marker remains until success; this updates its reported
+    // cursor after the final batch.
+    write_progress_checkpoint();
     auto const ingest_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ingest_started);
     auto position_postings_metrics = motif::db::position_postings_build_metrics {};
     auto opening_tree_index_metrics = motif::db::opening_tree_index_build_metrics {};
@@ -641,15 +711,14 @@ auto import_pipeline::run_from(std::filesystem::path const& pgn_path,
     if (raw_mode) {
         phase_.store(import_phase::deduplicating, std::memory_order_relaxed);
         auto const dedup_started = std::chrono::steady_clock::now();
-        auto dedup_res = db_.writer().deduplicate();
-        if (!dedup_res) {
-            return tl::unexpected {error_code::io_failure};
+        auto restored = restore_after_raw_ingest();
+        if (!restored) {
+            // Cancel or not, the index is still absent: this is not a completed
+            // (or resumable-as-usual) import.
+            return tl::unexpected {restored.error()};
         }
         dedup_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - dedup_started);
-        duplicates_removed = dedup_res->removed;
-        committed -= static_cast<std::int64_t>(duplicates_removed);
-        games_committed_.fetch_sub(duplicates_removed, std::memory_order_relaxed);
-        games_skipped_.fetch_add(duplicates_removed, std::memory_order_relaxed);
+        duplicates_removed = *restored;
     }
 
     if (stopped || stop_requested_.load(std::memory_order_relaxed)) {

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <utility>
@@ -22,7 +23,9 @@
 #    include <unistd.h>
 #endif
 
+#include "composite_test_support.hpp"
 #include "motif/db/error.hpp"
+#include "motif/db/fault_injection.hpp"
 #include "motif/db/manifest.hpp"
 #include "motif/db/schema.hpp"
 #include "motif/db/types.hpp"
@@ -87,7 +90,8 @@ TEST_CASE("database_manager::create produces games.db and manifest.json", "[moti
     CHECK(std::filesystem::exists(tdir.path / "manifest.json"));
 }
 
-TEST_CASE("database_manager::create sets manifest name and schema_version", "[motif-db][database_manager]")
+TEST_CASE("database_manager::create sets the snapshot identity, schema_version and an empty published generation",
+          "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"create_mf"};
 
@@ -96,10 +100,24 @@ TEST_CASE("database_manager::create sets manifest name and schema_version", "[mo
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto const& manifest = res->manifest();
-    CHECK(manifest.name == "my-chess-db");
+    CHECK(manifest.name() == "my-chess-db");
     CHECK(manifest.schema_version == motif::db::schema::current_version);
-    CHECK(manifest.game_count == 0);
-    CHECK_FALSE(manifest.created_at.empty());
+    CHECK(manifest.canonical_game_count == 0);
+    CHECK_FALSE(manifest.created_at().empty());
+    CHECK(manifest.payload.bundle.id.size() == 32U);
+    // Creation publishes the empty postings at sequence 0 as generation 1.
+    CHECK(manifest.publication_generation == 1U);
+    CHECK(manifest.covered_mutation_seq == std::optional<std::uint64_t> {0});
+
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const status = res->derived_index_status();
+    REQUIRE(status.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(status->postings_usable);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_FALSE(status->tree_usable);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(status->mutation_seq == 0U);
 }
 
 TEST_CASE("database_manager::create fails if bundle already exists", "[motif-db][database_manager]")
@@ -213,6 +231,39 @@ TEST_CASE("database_manager::open rejects a concurrent writer process for the sa
     REQUIRE(after_close.has_value());
 }
 
+TEST_CASE("database_manager::open rejects a second open of the same bundle in one process", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"bundle_lock_same_process"};
+    auto first = motif::db::database_manager::create(tdir.path, "lock-test");
+    REQUIRE(first.has_value());
+
+    auto second = motif::db::database_manager::open(tdir.path);
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error() == motif::db::error_code::io_failure);
+
+    // A refused second open must not release the first holder's lock.
+    auto third = motif::db::database_manager::open(tdir.path);
+    CHECK_FALSE(third.has_value());
+
+    first->close();
+    auto after_close = motif::db::database_manager::open(tdir.path);
+    REQUIRE(after_close.has_value());
+}
+
+TEST_CASE("database_manager holds a page-cache lease only while open", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"cache_lease"};
+    auto& governor = motif::db::resource_governor::process();
+    auto const baseline = governor.sqlite_cache_in_use();
+
+    auto manager = motif::db::database_manager::create(tdir.path, "lease-test");
+    REQUIRE(manager.has_value());
+    CHECK(governor.sqlite_cache_in_use() > baseline);
+
+    manager->close();
+    CHECK(governor.sqlite_cache_in_use() == baseline);
+}
+
 TEST_CASE("database_manager::create initializes SQLite with correct schema version", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"schema_ver"};
@@ -243,7 +294,7 @@ TEST_CASE("database_manager::open succeeds on an existing bundle", "[motif-db][d
     auto opened = motif::db::database_manager::open(tdir.path);
     REQUIRE(opened.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(opened->manifest().name == "open-db");
+    CHECK(opened->manifest().name() == "open-db");
 }
 
 TEST_CASE("database_manager::open returns not_found for missing bundle", "[motif-db][database_manager]")
@@ -376,9 +427,9 @@ TEST_CASE("database_manager::create does not create positions.duckdb", "[motif-d
     // so the bundle never needs any legacy fallback just because nothing
     // has been imported yet -- see create()'s comment.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(res->manifest().position_postings.has_value());
+    REQUIRE(res->manifest().postings() != nullptr);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(res->manifest().position_postings->game_count == 0U);
+    CHECK(res->manifest().postings()->document_count == 0U);
 }
 
 TEST_CASE("database_manager::open ignores a leftover positions.duckdb file and leaves it untouched",
@@ -396,7 +447,7 @@ TEST_CASE("database_manager::open ignores a leftover positions.duckdb file and l
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         REQUIRE(mgr->rebuild_position_postings().has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->manifest().position_postings.has_value());
+        REQUIRE(mgr->manifest().postings() != nullptr);
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         mgr->close();
     }
@@ -412,14 +463,9 @@ TEST_CASE("database_manager::open ignores a leftover positions.duckdb file and l
     }
     auto const duckdb_size_before = std::filesystem::file_size(tdir.path / "positions.duckdb");
 
-    // Force a dirty reopen (simulated unclean shutdown) to exercise the
-    // recovery decision, not just the ordinary clean-close path.
-    {
-        auto manifest = motif::db::read_manifest(tdir.path / "manifest.json");
-        REQUIRE(manifest.has_value());
-        manifest->position_index_dirty = true;  // NOLINT(bugprone-unchecked-optional-access)
-        REQUIRE(motif::db::write_manifest(tdir.path / "manifest.json", *manifest).has_value());
-    }
+    // The cache is not needed to open: drop it entirely to exercise the SQLite-
+    // authoritative recovery decision, not just the ordinary open path.
+    REQUIRE(std::filesystem::remove(tdir.path / "manifest.json"));
 
     auto reopened = motif::db::database_manager::open(tdir.path);
     REQUIRE(reopened.has_value());
@@ -446,9 +492,9 @@ TEST_CASE("database_manager::rebuild_position_postings on empty DB indexes 0 gam
     REQUIRE(rebuild_res.has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->manifest().position_postings.has_value());
+    REQUIRE(mgr->manifest().postings() != nullptr);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(mgr->manifest().position_postings->game_count == 0U);
+    CHECK(mgr->manifest().postings()->document_count == 0U);
 }
 
 TEST_CASE("database_manager::rebuild_position_postings after N-move game indexes N+1 occurrences", "[motif-db][database_manager]")
@@ -646,7 +692,9 @@ TEST_CASE("database_manager::remove_game deletes the SQLite row and marks postin
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(mgr->manifest().position_postings.has_value());
+    REQUIRE(mgr->manifest().postings() != nullptr);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto const published_file = tdir.path / mgr->manifest().postings()->artifact.filename;
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->remove_game(*gid).has_value());
@@ -657,14 +705,25 @@ TEST_CASE("database_manager::remove_game deletes the SQLite row and marks postin
     REQUIRE_FALSE(get_res.has_value());
     CHECK(get_res.error() == motif::db::error_code::not_found);
 
-    // remove_game() marks postings stale immediately.
+    // remove_game() advanced the mutation sequence in its own transaction: the
+    // last published snapshot stays referenced (and its file on disk) but no
+    // longer covers canonical state, so every position query fails closed.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    auto const stale = mgr->derived_index_status();
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(stale->postings_usable);
+    CHECK(stale->mutation_seq > stale->covered_mutation_seq.value_or(0));
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(mgr->manifest().postings() != nullptr);
+    CHECK(std::filesystem::exists(published_file));
+    CHECK_FALSE(mgr->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).has_value());
 
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(mgr->manifest().position_postings->game_count == 0U);
+    CHECK(mgr->manifest().postings()->document_count == 0U);
+    // The superseded generation is deleted once the new one is committed.
+    CHECK_FALSE(std::filesystem::exists(published_file));
 }
 
 TEST_CASE("database_manager::remove_game returns not_found for absent id", "[motif-db][database_manager]")
@@ -691,17 +750,19 @@ TEST_CASE("database_manager::remove_user_game rejects imported games without cha
     auto const gid = mgr->insert_game(make_one_move_game("White", "Black"));
     REQUIRE(gid.has_value());
     REQUIRE(mgr->rebuild_position_postings().has_value());
-    auto const postings_before = mgr->manifest().position_postings;
-    REQUIRE(postings_before.has_value());
+    auto const generation_before = mgr->manifest().publication_generation;
 
     auto const remove_result = mgr->remove_user_game(*gid);
     REQUIRE_FALSE(remove_result.has_value());
     CHECK(remove_result.error() == motif::db::error_code::not_editable);
     CHECK(mgr->store().get(*gid).has_value());
-    auto const postings_after = mgr->manifest().position_postings;
-    REQUIRE(postings_after.has_value());
-    CHECK(postings_after.value_or(motif::db::derived_index_manifest_entry {}).filename
-          == postings_before.value_or(motif::db::derived_index_manifest_entry {}).filename);
+    // A rejected removal advances nothing: the published snapshot still covers
+    // the bundle and queries keep working.
+    CHECK(mgr->manifest().publication_generation == generation_before);
+    auto const status = mgr->derived_index_status();
+    REQUIRE(status.has_value());
+    CHECK(status->postings_usable);
+    CHECK(mgr->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).has_value());
 }
 
 TEST_CASE("database_manager::remove_user_game deletes a manual game and marks postings stale", "[motif-db][database_manager]")
@@ -720,10 +781,16 @@ TEST_CASE("database_manager::remove_user_game deletes a manual game and marks po
     auto const game = mgr->store().get(*gid);
     REQUIRE_FALSE(game.has_value());
     CHECK(game.error() == motif::db::error_code::not_found);
-    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    // The removal advanced the sequence; the last snapshot is retained but stale.
+    auto const stale = mgr->derived_index_status();
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(stale->postings_usable);
+    CHECK(mgr->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).error() == motif::db::error_code::io_failure);
 
     REQUIRE(mgr->rebuild_position_postings().has_value());
-    CHECK(mgr->manifest().position_postings.value_or(motif::db::derived_index_manifest_entry {}).game_count == 0U);
+    REQUIRE(mgr->manifest().postings() != nullptr);
+    CHECK(mgr->manifest().postings()->document_count == 0U);
+    CHECK(mgr->derived_index_status()->postings_usable);
 }
 
 TEST_CASE("database_manager::find_games intersects position and metadata filters", "[motif-db][database_manager]")
@@ -926,7 +993,7 @@ TEST_CASE("database_manager::find_games handles >999 position IDs via batched IN
 
 // ──────────────────────────────────────
 
-TEST_CASE("database_manager::close persists game_count in manifest", "[motif-db][database_manager]")
+TEST_CASE("database_manager::close keeps the published baseline and does not refresh it to the live count", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"manifest_count"};
 
@@ -939,76 +1006,185 @@ TEST_CASE("database_manager::close persists game_count in manifest", "[motif-db]
         REQUIRE(mgr->insert_game(make_one_move_game("C", "D")).has_value());
     }  // close() called here
 
-    auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
-    REQUIRE(manifest_after.has_value());
+    // The cache mirrors SQLite's snapshot row: still the generation published at
+    // creation, covering sequence 0 with the 0 games it indexed. Current counts
+    // come from the game store, never from this baseline.
+    auto const cache = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(cache.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(manifest_after->game_count == 2U);
-    // Direct store writes bypass derived-index rebuilding, so close persists
-    // the game count but keeps recovery dirty until postings are repaired.
+    CHECK(cache->canonical_game_count == 0U);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(manifest_after->position_index_dirty);
+    CHECK(cache->covered_mutation_seq == std::optional<std::uint64_t> {0});
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(cache->publication_generation == 1U);
 }
 
-TEST_CASE("database_manager::open marks manifest dirty and close clears it", "[motif-db][database_manager]")
+namespace
 {
-    tmp_dir const tdir {"manifest_dirty"};
 
+// Hook state for tests that fail one fault point; the seam is a plain function
+// pointer, so the target lives at namespace scope.
+motif::db::fault::point g_fail_point {};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables) -- read by the plain-function hook.
+std::uint64_t g_hook_calls {};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables) -- see g_fail_point.
+
+auto fail_at_selected_point(motif::db::fault::point const where,
+                            motif::db::fault::artifact_kind /*kind*/,
+                            std::uint64_t /*generation*/) noexcept -> motif::db::fault::fault_action
+{
+    if (where == g_fail_point) {
+        ++g_hook_calls;
+        return motif::db::fault::fault_action::fail_io;
+    }
+    return motif::db::fault::fault_action::proceed;
+}
+
+auto read_all_bytes(std::filesystem::path const& path) -> std::string
+{
+    std::ifstream input {path, std::ios::binary};
+    return {std::istreambuf_iterator<char> {input}, std::istreambuf_iterator<char> {}};
+}
+
+struct legacy_bundle
+{
+    std::filesystem::path postings_file;
+    std::optional<std::filesystem::path> tree_file;
+};
+
+// Hand-builds a schema-v6 bundle with real artifacts: a bundle built by this
+// code, then rewritten into exactly what a v6 binary left on disk -- no
+// mutation_state or published_snapshot, user_version 6, generation-numbered
+// artifact names, and a legacy manifest.json that lists them.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+auto make_legacy_v6_bundle(std::filesystem::path const& dir, std::string const& name, bool const with_tree) -> legacy_bundle
+{
+    std::filesystem::path postings_name;
+    std::filesystem::path tree_name;
     {
-        auto mgr = motif::db::database_manager::create(tdir.path, "dirty-db");
+        auto mgr = motif::db::database_manager::create(dir, name);
         REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->rebuild_position_postings().has_value());
+        if (with_tree) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+            REQUIRE(mgr->rebuild_opening_tree_index().has_value());
+        }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->manifest().postings() != nullptr);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        postings_name = mgr->manifest().postings()->artifact.filename;
+        if (with_tree) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+            tree_name = mgr->manifest().tree()->checkpoint.filename;
+        }
     }
 
-    {
-        auto mgr = motif::db::database_manager::open(tdir.path);
-        REQUIRE(mgr.has_value());
-        // Manifest on disk must be dirty while a session is open.
-        auto const mf_open = motif::db::read_manifest(tdir.path / "manifest.json");
-        REQUIRE(mf_open.has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        CHECK(mf_open->position_index_dirty);
-    }  // close() called here
+    sqlite3* raw_conn = nullptr;
+    REQUIRE(sqlite3_open((dir / "games.db").c_str(), &raw_conn) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(
+                raw_conn, "DROP TABLE mutation_state; DROP TABLE published_snapshot; PRAGMA user_version = 6;", nullptr, nullptr, nullptr)
+            == SQLITE_OK);
+    sqlite3_close(raw_conn);
 
-    // After clean close the dirty flag is cleared.
-    auto const mf_closed = motif::db::read_manifest(tdir.path / "manifest.json");
-    REQUIRE(mf_closed.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK_FALSE(mf_closed->position_index_dirty);
+    auto fixture = legacy_bundle {};
+    fixture.postings_file = dir / "positions.postings.4";
+    std::filesystem::rename(dir / postings_name, fixture.postings_file);
+    auto const entry_json = [](std::filesystem::path const& file) -> std::string
+    {
+        auto const bytes = read_all_bytes(file);
+        return fmt::format(R"({{"filename":"{}","source_generation":2,"game_count":1,"file_size":{},"checksum":{}}})",
+                           file.filename().string(),
+                           bytes.size(),
+                           motif::db::fnv1a64(bytes));
+    };
+    auto tree_entry = std::string {"null"};
+    if (with_tree) {
+        fixture.tree_file = dir / "opening_tree.idx.5";
+        std::filesystem::rename(dir / tree_name, *fixture.tree_file);
+        tree_entry = entry_json(*fixture.tree_file);
+    }
+    std::ofstream manifest {dir / "manifest.json", std::ios::trunc};
+    manifest << fmt::format(
+        R"({{"name":"{}","schema_version":6,"game_count":1,"created_at":"2026-03-01T00:00:00Z",)" R"("position_index_dirty":false,"source_generation":2,"derived_index_build_seq":6,)" R"("position_postings":{},"opening_tree_index":{}}})",
+        name,
+        entry_json(fixture.postings_file),
+        tree_entry);
+    return fixture;
 }
 
-TEST_CASE("database_manager::open rebuilds postings automatically when they do not cover canonical games", "[motif-db][database_manager]")
+}  // namespace
+
+TEST_CASE("database_manager::open of an unchanged bundle neither replays nor rewrites the cache", "[motif-db][database_manager]")
+{
+    tmp_dir const tdir {"unchanged_reopen"};
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "unchanged-db");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("A", "B")).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->rebuild_position_postings().has_value());
+    }
+    auto const cache_before = read_all_bytes(tdir.path / "manifest.json");
+    auto const modified_before = std::filesystem::last_write_time(tdir.path / "manifest.json");
+
+    // Any attempt to build an artifact on this reopen fails the open: proof that
+    // a crash-free session with no mutation never triggers a corpus replay.
+    g_fail_point = motif::db::fault::point::before_build;
+    g_hook_calls = 0;
+    {
+        motif::db::fault::scoped_hook const hook {fail_at_selected_point};
+        auto reopened = motif::db::database_manager::open(tdir.path);
+        REQUIRE(reopened.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->derived_index_status()->postings_usable);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        reopened->close();
+    }
+    CHECK(g_hook_calls == 0U);
+    CHECK(read_all_bytes(tdir.path / "manifest.json") == cache_before);
+    auto const cache_was_not_rewritten = std::filesystem::last_write_time(tdir.path / "manifest.json") == modified_before;
+    CHECK(cache_was_not_rewritten);
+}
+
+TEST_CASE("database_manager::open rebuilds postings automatically when the snapshot does not cover the canonical sequence",
+          "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"manifest_rebuild_dirty"};
 
     {
         auto mgr = motif::db::database_manager::create(tdir.path, "rebuild-dirty-db");
         REQUIRE(mgr.has_value());
-        // Insert directly through the SQLite store, bypassing
-        // rebuild_position_postings(): the bundle now has 1 game but its
-        // published postings generation still describes 0.
+        // Insert without rebuilding: the bundle now has 1 game but its
+        // published postings generation still covers sequence 0 and 0 games.
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         REQUIRE(mgr->insert_game(make_one_move_game("W", "B")).has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         mgr->close();
     }
 
-    // A clean close cannot mark the index clean when postings do not cover
-    // canonical games -- confirm the crash-recovery marker really is set,
-    // then that the next open() repairs it without any manual nudge.
     {
-        auto const manifest_before_reopen = motif::db::read_manifest(tdir.path / "manifest.json");
-        REQUIRE(manifest_before_reopen.has_value());
+        auto const cache = motif::db::read_manifest(tdir.path / "manifest.json");
+        REQUIRE(cache.has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        CHECK(manifest_before_reopen->position_index_dirty);
+        CHECK(cache->covered_mutation_seq == std::optional<std::uint64_t> {0});
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        CHECK(manifest_before_reopen->position_postings.value_or(motif::db::derived_index_manifest_entry {}).game_count == 0U);
+        CHECK(cache->canonical_game_count == 0U);
     }
 
     auto reopened = motif::db::database_manager::open(tdir.path);
     REQUIRE(reopened.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(reopened->manifest().position_postings.has_value());
+    REQUIRE(reopened->manifest().postings() != nullptr);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(reopened->manifest().position_postings->game_count == 1U);
+    CHECK(reopened->manifest().postings()->document_count == 1U);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(reopened->manifest().covered_mutation_seq == std::optional<std::uint64_t> {1});
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(reopened->manifest().publication_generation == 2U);
 
     auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -1019,28 +1195,15 @@ TEST_CASE("database_manager::open rebuilds postings automatically when they do n
     reopened->close();
 }
 
-TEST_CASE("database_manager::open migrates a legacy bundle with a leftover positions.duckdb by rebuilding postings from SQLite",
-          "[motif-db][database_manager][migration]")
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("database_manager::open migrates a v6 bundle with real artifacts by one full rebuild", "[motif-db][database_manager][migration]")
 {
     tmp_dir const tdir {"legacy_migrate"};
+    auto const legacy = make_legacy_v6_bundle(tdir.path, "legacy-db", /*with_tree=*/true);
+    REQUIRE(legacy.tree_file.has_value());
 
-    {
-        auto mgr = motif::db::database_manager::create(tdir.path, "legacy-db");
-        REQUIRE(mgr.has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
-        // Shape a bundle "from before postings existed": no postings entry
-        // in the manifest at all, matching a genuinely legacy bundle.
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->prepare_canonical_mutation().has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        CHECK_FALSE(mgr->manifest().position_postings.has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        mgr->close();
-    }
-
-    // Leave a leftover positions.duckdb from an older release. It does not
-    // need to be a valid DuckDB database -- this codebase never reads it.
+    // A leftover positions.duckdb from an older release. It does not need to be
+    // a valid DuckDB database -- this codebase never reads it.
     {
         std::ofstream marker {tdir.path / "positions.duckdb", std::ios::binary};
         REQUIRE(marker.good());
@@ -1048,101 +1211,128 @@ TEST_CASE("database_manager::open migrates a legacy bundle with a leftover posit
     }
     auto const duckdb_size_before = std::filesystem::file_size(tdir.path / "positions.duckdb");
 
-    auto reopened = motif::db::database_manager::open(tdir.path);
-    REQUIRE(reopened.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(reopened->manifest().position_postings.has_value());
-    // The leftover file is never read or deleted by the migration attempt.
+    // The legacy artifacts are not adopted: exactly one build happens, and
+    // only for postings.
+    g_fail_point = motif::db::fault::point::before_build;
+    g_hook_calls = 0;
+    auto const counting_hook =
+        +[](motif::db::fault::point const where, motif::db::fault::artifact_kind, std::uint64_t) noexcept -> motif::db::fault::fault_action
+    {
+        if (where == motif::db::fault::point::before_build) {
+            ++g_hook_calls;
+        }
+        return motif::db::fault::fault_action::proceed;
+    };
+    std::uint64_t first_generation {};
+    {
+        motif::db::fault::scoped_hook const hook {counting_hook};
+        auto reopened = motif::db::database_manager::open(tdir.path);
+        REQUIRE(reopened.has_value());
+        CHECK(g_hook_calls == 1U);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->manifest().name() == "legacy-db");
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->manifest().created_at() == "2026-03-01T00:00:00Z");
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(reopened->manifest().postings() != nullptr);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->manifest().covered_mutation_seq == std::optional<std::uint64_t> {0});
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->manifest().postings()->document_count == 1U);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->manifest().publication_generation == 1U);
+
+        auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        auto const summary = reopened->position_summary(start_hash);
+        REQUIRE(summary.has_value());
+        REQUIRE(summary->has_value());
+        CHECK(summary->value_or(motif::db::position_postings_summary {}).distinct_game_count == 1U);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        first_generation = reopened->manifest().publication_generation;
+        // The tree is not carried over: it is rebuilt on request.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened->manifest().tree() == nullptr);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        reopened->close();
+    }
+
+    // The old generation-numbered artifacts are gone once the v7 snapshot
+    // committed; the leftover positions.duckdb is never read or deleted.
+    CHECK_FALSE(std::filesystem::exists(legacy.postings_file));
+    CHECK_FALSE(std::filesystem::exists(motif_test::require_value(legacy.tree_file)));
     CHECK(std::filesystem::exists(tdir.path / "positions.duckdb"));
     CHECK(std::filesystem::file_size(tdir.path / "positions.duckdb") == duckdb_size_before);
 
-    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    // The cache was rewritten from SQLite as a v7 envelope.
+    auto const cache = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(cache.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const summary = reopened->position_summary(start_hash);
-    REQUIRE(summary.has_value());
-    REQUIRE(summary->has_value());
-    CHECK(summary->value_or(motif::db::position_postings_summary {}).distinct_game_count == 1U);
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const build_seq_after_migration = reopened->manifest().derived_index_build_seq;
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    reopened->close();
+    CHECK(cache->schema_version == motif::db::schema::current_version);
 
     // A later open() of the now-migrated bundle needs no further rebuild.
-    auto reopened_again = motif::db::database_manager::open(tdir.path);
-    REQUIRE(reopened_again.has_value());
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(reopened_again->manifest().derived_index_build_seq == build_seq_after_migration);
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    reopened_again->close();
+    g_hook_calls = 0;
+    {
+        motif::db::fault::scoped_hook const hook {counting_hook};
+        auto reopened_again = motif::db::database_manager::open(tdir.path);
+        REQUIRE(reopened_again.has_value());
+        CHECK(g_hook_calls == 0U);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(reopened_again->manifest().publication_generation == first_generation);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        reopened_again->close();
+    }
 }
 
-TEST_CASE("database_manager::open fails closed and is retryable when postings migration cannot publish",
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("database_manager::open fails closed and is retryable when the post-migration rebuild cannot publish",
           "[motif-db][database_manager][migration]")
 {
     tmp_dir const tdir {"legacy_migrate_fail"};
-    std::uint64_t build_seq_at_close {};
-
-    {
-        auto mgr = motif::db::database_manager::create(tdir.path, "legacy-fail-db");
-        REQUIRE(mgr.has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->insert_game(make_one_move_game("White", "Black")).has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        REQUIRE(mgr->prepare_canonical_mutation().has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        CHECK_FALSE(mgr->manifest().position_postings.has_value());
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        build_seq_at_close = mgr->manifest().derived_index_build_seq;
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        mgr->close();
-    }
-
+    auto const legacy = make_legacy_v6_bundle(tdir.path, "legacy-fail-db", /*with_tree=*/false);
     {
         std::ofstream marker {tdir.path / "positions.duckdb", std::ios::binary};
         REQUIRE(marker.good());
         marker << "not a real duckdb file";
     }
     auto const duckdb_size_before = std::filesystem::file_size(tdir.path / "positions.duckdb");
-    auto const manifest_before = motif::db::read_manifest(tdir.path / "manifest.json");
-    REQUIRE(manifest_before.has_value());
 
-    // Collide with the exact staging path open()'s migration attempt will
-    // pass to position_postings::build(): a non-empty directory can't be
-    // removed by rebuild_position_postings()'s leading cleanup nor opened
-    // for writing as a regular file, so the build step fails cleanly before
-    // writing anything -- games.db, manifest.json, and positions.duckdb are
-    // never touched by that call (see rebuild_position_postings()).
-    auto const staging_collision = tdir.path / fmt::format("positions.postings.{}.building", build_seq_at_close);
-    REQUIRE(std::filesystem::create_directory(staging_collision));
+    g_fail_point = motif::db::fault::point::before_artifact_rename;
+    g_hook_calls = 0;
     {
-        std::ofstream const blocker {staging_collision / "blocker"};
-        REQUIRE(blocker.good());
+        motif::db::fault::scoped_hook const hook {fail_at_selected_point};
+        auto reopened = motif::db::database_manager::open(tdir.path);
+        REQUIRE_FALSE(reopened.has_value());
+    }
+    CHECK(g_hook_calls == 1U);
+    CHECK(std::filesystem::file_size(tdir.path / "positions.duckdb") == duckdb_size_before);
+    // Nothing was published and nothing legacy was thrown away: the old
+    // artifact is still there for the retry, and no orphan candidate remains.
+    CHECK(std::filesystem::exists(legacy.postings_file));
+    for (auto const& entry : std::filesystem::directory_iterator {tdir.path}) {
+        CHECK_FALSE(entry.path().filename().string().ends_with(".building"));
     }
 
-    auto reopened = motif::db::database_manager::open(tdir.path);
-    REQUIRE_FALSE(reopened.has_value());
-
-    CHECK(std::filesystem::file_size(tdir.path / "positions.duckdb") == duckdb_size_before);
-    auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
-    REQUIRE(manifest_after.has_value());
-    CHECK_FALSE(manifest_after->position_postings.has_value());
-    CHECK(manifest_after->derived_index_build_seq == manifest_before->derived_index_build_seq);
-
-    // Retryable: clearing the collision lets a later open() succeed.
-    std::filesystem::remove_all(staging_collision);
+    // The migration itself had committed (v7, unbuilt snapshot); the retry only
+    // has to build.
     auto retried = motif::db::database_manager::open(tdir.path);
     REQUIRE(retried.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(retried->manifest().position_postings.has_value());
+    REQUIRE(retried->manifest().postings() != nullptr);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(retried->derived_index_status()->postings_usable);
+    CHECK_FALSE(std::filesystem::exists(legacy.postings_file));
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     retried->close();
 }
 
-TEST_CASE("database_manager::open fails closed when postings-only repair cannot publish", "[motif-db][database_manager][position_postings]")
+TEST_CASE("database_manager::open fails closed when a missing postings artifact cannot be rebuilt",
+          "[motif-db][database_manager][position_postings]")
 {
     tmp_dir const tdir {"postings_repair_fail"};
 
-    std::uint64_t repair_build_seq {};
+    std::filesystem::path published_file;
+    std::uint64_t generation_before {};
     {
         auto mgr = motif::db::database_manager::create(tdir.path, "repair-fail-db");
         REQUIRE(mgr.has_value());
@@ -1151,41 +1341,34 @@ TEST_CASE("database_manager::open fails closed when postings-only repair cannot 
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         REQUIRE(mgr->rebuild_position_postings().has_value());
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        repair_build_seq = mgr->manifest().derived_index_build_seq;
+        published_file = tdir.path / mgr->manifest().postings()->artifact.filename;
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        mgr->close();
+        generation_before = mgr->manifest().publication_generation;
     }
+    REQUIRE(std::filesystem::remove(published_file));
 
-    auto manifest = motif::db::read_manifest(tdir.path / "manifest.json");
-    REQUIRE(manifest.has_value());
-    REQUIRE(manifest->position_postings.has_value());
-    auto const original_postings = manifest->position_postings.value_or(motif::db::derived_index_manifest_entry {});
-    std::filesystem::remove(tdir.path / original_postings.filename);
-
-    auto const staging_collision = tdir.path / fmt::format("positions.postings.{}.building", repair_build_seq);
-    REQUIRE(std::filesystem::create_directory(staging_collision));
+    g_fail_point = motif::db::fault::point::before_build;
     {
-        std::ofstream const blocker {staging_collision / "blocker"};
-        REQUIRE(blocker.good());
+        motif::db::fault::scoped_hook const hook {fail_at_selected_point};
+        auto reopened = motif::db::database_manager::open(tdir.path);
+        REQUIRE_FALSE(reopened.has_value());
     }
-
-    auto reopened = motif::db::database_manager::open(tdir.path);
-    REQUIRE_FALSE(reopened.has_value());
     CHECK_FALSE(std::filesystem::exists(tdir.path / "positions.duckdb"));
 
-    auto const manifest_after = motif::db::read_manifest(tdir.path / "manifest.json");
-    REQUIRE(manifest_after.has_value());
-    CHECK(manifest_after->derived_index_build_seq == repair_build_seq);
-    REQUIRE(manifest_after->position_postings.has_value());
-    auto const persisted_postings = manifest_after->position_postings.value_or(motif::db::derived_index_manifest_entry {});
-    CHECK(persisted_postings.filename == original_postings.filename);
-    CHECK(persisted_postings.checksum == original_postings.checksum);
+    // Retryable once the failure clears: the rebuild replaces the lost file.
+    auto retried = motif::db::database_manager::open(tdir.path);
+    REQUIRE(retried.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(retried->manifest().publication_generation == generation_before + 1U);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(retried->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).has_value());
 }
 
 // ── patch_game_metadata
 // ──────────────────────────────────────────────────────────
 
-TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebuild reflects the new elo", "[motif-db][database_manager]")
+TEST_CASE("database_manager::patch_game_metadata keeps postings usable and reports the new elo without a rebuild",
+          "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"patch_elo_sync"};
 
@@ -1237,19 +1420,32 @@ TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebu
 
     // Patch both elos.
     auto patch = motif::db::game_patch {};
-    patch.white_elo = patched_white_elo;
-    patch.black_elo = patched_black_elo;
+    patch.white_elo = motif::db::rating_patch::set(patched_white_elo);
+    patch.black_elo = motif::db::rating_patch::set(patched_black_elo);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
 
-    // patch_game_metadata() marks postings stale immediately: queries fail
-    // closed until an explicit rebuild.
+    // The patch is one atomic operation: its canonical UPDATE, the sequence advance and the
+    // new snapshot commit together, so queries stay available and already report the
+    // corrected ratings. No rebuild is involved.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    auto const patched_status = mgr->derived_index_status();
+    REQUIRE(patched_status.has_value());
+    CHECK(patched_status->postings_usable);
+    CHECK(patched_status->covered_mutation_seq == std::optional<std::uint64_t> {patched_status->mutation_seq});
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const rows_stale = mgr->query_position_matches(start_hash);
-    REQUIRE_FALSE(rows_stale.has_value());
+    CHECK(mgr->manifest().postings() != nullptr);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto rows_patched = mgr->query_position_matches(start_hash);
+    REQUIRE(rows_patched.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(rows_patched->size() == 1);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows_patched->front().white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_white_elo)});
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows_patched->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_black_elo)});
 
+    // A full rebuild from canonical SQLite answers identically.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -1263,7 +1459,7 @@ TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebu
     CHECK(rows_after->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_black_elo)});
 }
 
-TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebuild reflects the new result",
+TEST_CASE("database_manager::patch_game_metadata keeps postings usable and reports the new result without a rebuild",
           "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"patch_result_sync"};
@@ -1311,12 +1507,24 @@ TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebu
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
 
+    // The patch is one atomic operation (canonical row, sequence advance and a new snapshot in a
+    // single commit): the position queries stay available and already report the new result.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK_FALSE(mgr->manifest().position_postings.has_value());
+    auto const patched_status = mgr->derived_index_status();
+    REQUIRE(patched_status.has_value());
+    CHECK(patched_status->postings_usable);
+    CHECK(patched_status->covered_mutation_seq == std::optional<std::uint64_t> {patched_status->mutation_seq});
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(mgr->manifest().postings() != nullptr);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    auto rows_patched = mgr->query_position_matches(start_hash);
+    REQUIRE(rows_patched.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(rows_patched->size() == 1);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(rows_patched->front().result == std::int8_t {-1});
 
-    // A rebuild must reflect the new result, not the pre-patch value: the
-    // game row itself carries the new result, so a full replay-based rebuild
-    // always sees the current value.
+    // A full rebuild from canonical SQLite answers identically.
     REQUIRE(mgr->rebuild_position_postings().has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto rows_rebuilt = mgr->query_position_matches(start_hash);
@@ -1327,7 +1535,8 @@ TEST_CASE("database_manager::patch_game_metadata marks postings stale and a rebu
     CHECK(rows_rebuilt->front().result == std::int8_t {-1});
 }
 
-TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other column unchanged after rebuild",
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("database_manager::patch_game_metadata partial elo patch updates one rating incrementally and leaves the other unchanged",
           "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"patch_elo_partial"};
@@ -1366,21 +1575,354 @@ TEST_CASE("database_manager::patch_game_metadata partial elo patch leaves other 
 
     // Patch only white elo.
     auto patch = motif::db::game_patch {};
-    patch.white_elo = patched_white_elo;
+    patch.white_elo = motif::db::rating_patch::set(patched_white_elo);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->patch_game_metadata(*game_id, patch).has_value());
+
+    // Incremental: no rebuild is needed and none happens before the check.
+    CHECK(mgr->derived_index_status()->postings_usable);
+    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    auto const check_rows = [&]() -> void
+    {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        auto rows = mgr->query_position_matches(start_hash);
+        REQUIRE(rows.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(rows->size() == 1);
+        // White elo updated; black elo unchanged.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(rows->front().white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_white_elo)});
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(rows->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(initial_black_elo)});
+    };
+    check_rows();
+    // A full rebuild of the edited bundle answers identically.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
+    check_rows();
+}
 
-    auto const start_hash = motif::db::zobrist_hash {chesslib::board {}.hash()};
+// ── Durable game-ID allocator and v5 -> v6 migration ─────────────────────────
+
+TEST_CASE("database_manager: removing the highest game never lets a later insert reuse its id, even across reopen",
+          "[motif-db][database_manager][allocator]")
+{
+    tmp_dir const tdir {"id_no_reuse"};
+
+    auto removed_id = motif::db::game_id {};
+    auto third_id = motif::db::game_id {};
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "no-reuse");
+        REQUIRE(mgr.has_value());
+        // NOLINTBEGIN(bugprone-unchecked-optional-access)
+        auto const first = mgr->insert_game(make_one_move_game("Alpha", "Beta"));
+        auto const second = mgr->insert_game(make_one_move_game("Gamma", "Delta"));
+        REQUIRE(first.has_value());
+        REQUIRE(second.has_value());
+        removed_id = *second;
+        REQUIRE(mgr->remove_game(removed_id).has_value());
+
+        auto const third = mgr->insert_game(make_one_move_game("Epsilon", "Zeta"));
+        REQUIRE(third.has_value());
+        CHECK(third->value > removed_id.value);
+        third_id = *third;
+        // NOLINTEND(bugprone-unchecked-optional-access)
+    }
+
+    auto reopened = motif::db::database_manager::open(tdir.path);
+    REQUIRE(reopened.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    REQUIRE(reopened->remove_game(third_id).has_value());
+    auto const fourth = reopened->insert_game(make_one_move_game("Eta", "Theta"));
+    REQUIRE(fourth.has_value());
+    CHECK(fourth->value > third_id.value);
+    // NOLINTEND(bugprone-unchecked-optional-access)
+}
+
+TEST_CASE("database_manager::open migrates a v5 bundle in place", "[motif-db][database_manager][migration]")
+{
+    tmp_dir const tdir {"open_v5"};
+
+    auto last_id = motif::db::game_id {};
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "v5-db");
+        REQUIRE(mgr.has_value());
+        // NOLINTBEGIN(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("Alpha", "Beta")).has_value());
+        auto const second = mgr->insert_game(make_one_move_game("Gamma", "Delta"));
+        REQUIRE(second.has_value());
+        last_id = *second;
+        // NOLINTEND(bugprone-unchecked-optional-access)
+    }
+
+    // Turn the bundle back into a v5 one: no allocator table, no
+    // content_revision column, user_version 5.
+    {
+        sqlite3* raw_conn = nullptr;
+        REQUIRE(sqlite3_open((tdir.path / "games.db").c_str(), &raw_conn) == SQLITE_OK);
+        REQUIRE(
+            sqlite3_exec(
+                raw_conn,
+                "DROP TABLE mutation_state;" "DROP TABLE published_snapshot;" "DROP TABLE bundle_meta;" "ALTER TABLE game " "DROP " "COLUMN" " " "co" "n" "ten" "t_" "revision;" "PRA" "GMA" " " "user_version " "= 5;",
+                nullptr,
+                nullptr,
+                nullptr)
+            == SQLITE_OK);
+        sqlite3_close(raw_conn);
+    }
+
+    auto opened = motif::db::database_manager::open(tdir.path);
+    REQUIRE(opened.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    CHECK(opened->manifest().schema_version == motif::db::schema::current_version);
+    auto const count = opened->store().count_games();
+    REQUIRE(count.has_value());
+    CHECK(*count == 2);
+
+    auto const next = opened->insert_game(make_one_move_game("Epsilon", "Zeta"));
+    REQUIRE(next.has_value());
+    CHECK(next->value > last_id.value);
+    // NOLINTEND(bugprone-unchecked-optional-access)
+    opened->close();
+
+    sqlite3* check_conn = nullptr;
+    REQUIRE(sqlite3_open((tdir.path / "games.db").c_str(), &check_conn) == SQLITE_OK);
+    auto const ver = motif::db::schema::version(check_conn);
+    sqlite3_close(check_conn);
+    REQUIRE(ver.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto rows = mgr->query_position_matches(start_hash);
-    REQUIRE(rows.has_value());
+    CHECK(*ver == motif::db::schema::current_version);
+}
+
+// ── One allocator per connection; migration/manifest ordering ───────────────
+
+namespace
+{
+
+// Rewrites a freshly created bundle's SQLite file into the v5 shape: no
+// allocator table, no content_revision column, user_version 5. The manifest is
+// left alone.
+void downgrade_bundle_to_v5(std::filesystem::path const& dir)
+{
+    sqlite3* raw_conn = nullptr;
+    REQUIRE(sqlite3_open((dir / "games.db").c_str(), &raw_conn) == SQLITE_OK);
+    REQUIRE(
+        sqlite3_exec(
+            raw_conn,
+            "DROP TABLE mutation_state;" "DROP TABLE published_snapshot;" "DROP TABLE bundle_meta;" "ALTER TABLE game DROP " "COLUMN " "con" "ten" "t_" "revision;" "PRA" "GMA" " " "user_version = 5;",
+            nullptr,
+            nullptr,
+            nullptr)
+        == SQLITE_OK);
+    sqlite3_close(raw_conn);
+}
+
+[[nodiscard]] auto raw_scalar(std::filesystem::path const& dir, char const* sql) -> std::int64_t
+{
+    sqlite3* raw_conn = nullptr;
+    REQUIRE(sqlite3_open((dir / "games.db").c_str(), &raw_conn) == SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(raw_conn, sql, -1, &stmt, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    auto const value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw_conn);
+    return value;
+}
+
+void set_manifest_schema_version(std::filesystem::path const& dir, std::uint32_t const version)
+{
+    auto manifest = motif::db::read_manifest(dir / "manifest.json");
+    REQUIRE(manifest.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    REQUIRE(rows->size() == 1);
-    // White elo updated; black elo unchanged.
+    manifest->schema_version = version;
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(rows->front().white_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(patched_white_elo)});
+    REQUIRE(motif::db::write_manifest(dir / "manifest.json", *manifest).has_value());
+}
+
+}  // namespace
+
+TEST_CASE("database_manager: an insert_game made inside the writer's open batch shares its allocator",
+          "[motif-db][database_manager][allocator]")
+{
+    tmp_dir const tdir {"shared_allocator"};
+
+    auto mgr = motif::db::database_manager::create(tdir.path, "shared-allocator");
+    REQUIRE(mgr.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    auto& writer = mgr->writer();
+
+    REQUIRE(writer.begin_transaction().has_value());
+    auto const batch_first = writer.insert(make_one_move_game("Alpha", "Beta"));
+    // A second route to the same connection, while the batch is open. With a
+    // private writer behind insert_game() this reloaded the not-yet-persisted
+    // counter, handed out the batch's id again, and failed on the primary key.
+    auto const via_manager = mgr->insert_game(make_one_move_game("Gamma", "Delta"));
+    auto const batch_second = writer.insert(make_one_move_game("Epsilon", "Zeta"));
+    REQUIRE(batch_first.has_value());
+    REQUIRE(via_manager.has_value());
+    REQUIRE(batch_second.has_value());
+    CHECK(via_manager->value == batch_first->value + 1U);
+    CHECK(batch_second->value == via_manager->value + 1U);
+
+    // The manager's insert joined the batch instead of committing it or
+    // writing the counter on its own: a second connection sees neither rows
+    // nor a moved counter, and rolling back discards all three games.
+    CHECK(raw_scalar(tdir.path, "SELECT COUNT(*) FROM game") == 0);
+    CHECK(raw_scalar(tdir.path, "SELECT next_game_id FROM bundle_meta WHERE id = 1") == 1);
+    writer.rollback_transaction();
+    auto const count = mgr->store().count_games();
+    REQUIRE(count.has_value());
+    CHECK(*count == 0);
+
+    // Both routes keep working afterwards, without colliding.
+    auto const after_via_manager = mgr->insert_game(make_one_move_game("Eta", "Theta"));
+    auto const after_via_writer = writer.insert(make_one_move_game("Iota", "Kappa"));
+    REQUIRE(after_via_manager.has_value());
+    REQUIRE(after_via_writer.has_value());
+    CHECK(after_via_writer->value == after_via_manager->value + 1U);
+    // NOLINTEND(bugprone-unchecked-optional-access)
+}
+
+TEST_CASE("database_manager: a batch with a mid-batch manager insert persists one counter covering every row on commit",
+          "[motif-db][database_manager][allocator]")
+{
+    tmp_dir const tdir {"shared_allocator_commit"};
+
+    std::uint32_t highest = 0;
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "shared-allocator-commit");
+        REQUIRE(mgr.has_value());
+        // NOLINTBEGIN(bugprone-unchecked-optional-access)
+        auto& writer = mgr->writer();
+        REQUIRE(writer.begin_transaction().has_value());
+        REQUIRE(writer.insert(make_one_move_game("Alpha", "Beta")).has_value());
+        auto const via_manager = mgr->insert_game(make_one_move_game("Gamma", "Delta"));
+        REQUIRE(via_manager.has_value());
+        auto const last = writer.insert(make_one_move_game("Epsilon", "Zeta"));
+        REQUIRE(last.has_value());
+        highest = last->value;
+        REQUIRE(writer.commit_transaction().has_value());
+
+        // Standalone inserts after the batch continue above it.
+        auto const after = mgr->insert_game(make_one_move_game("Eta", "Theta"));
+        REQUIRE(after.has_value());
+        CHECK(after->value == highest + 1U);
+        highest = after->value;
+        // NOLINTEND(bugprone-unchecked-optional-access)
+    }
+
+    CHECK(raw_scalar(tdir.path, "SELECT COUNT(*) FROM game") == 4);
+    CHECK(raw_scalar(tdir.path, "SELECT COUNT(DISTINCT id) FROM game") == 4);
+    CHECK(raw_scalar(tdir.path, "SELECT next_game_id FROM bundle_meta WHERE id = 1") == static_cast<std::int64_t>(highest) + 1);
+}
+
+TEST_CASE("database_manager::open rejects a manifest newer than this build before migrating SQLite",
+          "[motif-db][database_manager][migration]")
+{
+    tmp_dir const tdir {"future_manifest"};
+
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "future-manifest");
+        REQUIRE(mgr.has_value());
+    }
+    downgrade_bundle_to_v5(tdir.path);
+    set_manifest_schema_version(tdir.path, motif::db::schema::current_version + 1U);
+
+    auto const opened = motif::db::database_manager::open(tdir.path);
+    REQUIRE_FALSE(opened.has_value());
+    CHECK(opened.error() == motif::db::error_code::schema_mismatch);
+
+    // SQLite was not migrated: still v5, no allocator table, no new column.
+    CHECK(raw_scalar(tdir.path, "PRAGMA user_version") == 5);
+    CHECK(raw_scalar(tdir.path, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'bundle_meta'") == 0);
+    CHECK(raw_scalar(tdir.path, "SELECT COUNT(*) FROM pragma_table_info('game') WHERE name = 'content_revision'") == 0);
+
+    // And the manifest is exactly as the newer build left it. (read_manifest()
+    // would refuse it as newer than supported, so use the lenient legacy reader.)
+    auto const manifest = motif::db::read_legacy_manifest(tdir.path / "manifest.json");
+    REQUIRE(manifest.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK(rows->front().black_elo == std::optional<std::int16_t> {static_cast<std::int16_t>(initial_black_elo)});
+    CHECK(manifest->schema_version == motif::db::schema::current_version + 1U);
+}
+
+TEST_CASE("database_manager::open raises a lower manifest schema_version only after a successful migration",
+          "[motif-db][database_manager][migration]")
+{
+    tmp_dir const tdir {"lower_manifest"};
+
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "lower-manifest");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("Alpha", "Beta")).has_value());
+    }
+    constexpr auto downgraded_version = 5U;
+    downgrade_bundle_to_v5(tdir.path);
+    set_manifest_schema_version(tdir.path, downgraded_version);
+
+    {
+        auto opened = motif::db::database_manager::open(tdir.path);
+        REQUIRE(opened.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        CHECK(opened->manifest().schema_version == motif::db::schema::current_version);
+    }
+    CHECK(raw_scalar(tdir.path, "PRAGMA user_version") == motif::db::schema::current_version);
+    auto const manifest = motif::db::read_manifest(tdir.path / "manifest.json");
+    REQUIRE(manifest.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(manifest->schema_version == motif::db::schema::current_version);
+
+    // A failed migration leaves the lower manifest version alone as well.
+    tmp_dir const bad_dir {"lower_manifest_bad_id"};
+    {
+        auto mgr = motif::db::database_manager::create(bad_dir.path, "lower-manifest-bad");
+        REQUIRE(mgr.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(mgr->insert_game(make_one_move_game("Alpha", "Beta")).has_value());
+    }
+    downgrade_bundle_to_v5(bad_dir.path);
+    set_manifest_schema_version(bad_dir.path, downgraded_version);
+    {
+        sqlite3* raw_conn = nullptr;
+        REQUIRE(sqlite3_open((bad_dir.path / "games.db").c_str(), &raw_conn) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw_conn, "UPDATE game SET id = 0;", nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw_conn);
+    }
+    auto const rejected = motif::db::database_manager::open(bad_dir.path);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error() == motif::db::error_code::schema_mismatch);
+    CHECK(raw_scalar(bad_dir.path, "PRAGMA user_version") == 5);
+    auto const bad_manifest = motif::db::read_manifest(bad_dir.path / "manifest.json");
+    REQUIRE(bad_manifest.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(bad_manifest->schema_version == 5U);
+}
+
+TEST_CASE("database_manager::open of a migrated bundle ends with foreign_keys enforced", "[motif-db][database_manager][migration]")
+{
+    tmp_dir const tdir {"migrated_fk"};
+
+    {
+        auto mgr = motif::db::database_manager::create(tdir.path, "migrated-fk");
+        REQUIRE(mgr.has_value());
+    }
+    downgrade_bundle_to_v5(tdir.path);
+
+    {
+        auto opened = motif::db::database_manager::open(tdir.path);
+        REQUIRE(opened.has_value());
+        // NOLINTBEGIN(bugprone-unchecked-optional-access)
+        auto tagged = make_one_move_game("Alpha", "Beta");
+        tagged.extra_tags = {{"Round", "7"}};
+        auto const inserted = opened->insert_game(tagged);
+        REQUIRE(inserted.has_value());
+        REQUIRE(opened->remove_game(*inserted).has_value());
+        // NOLINTEND(bugprone-unchecked-optional-access)
+    }
+
+    // game_tag rows are removed by ON DELETE CASCADE, which SQLite applies only
+    // while foreign_keys is ON for the deleting connection.
+    CHECK(raw_scalar(tdir.path, "SELECT COUNT(*) FROM game") == 0);
+    CHECK(raw_scalar(tdir.path, "SELECT COUNT(*) FROM game_tag") == 0);
 }

@@ -78,7 +78,7 @@ auto workspace_service::open_database(std::string const& dir_path) -> result<voi
         return tl::unexpected {error_code::database_failure};
     }
 
-    auto opened_name = std::string {opened->manifest().name};
+    auto opened_name = std::string {opened->manifest().name()};
     auto next_config = config_;
     push_recent(next_config, opened_name, dir_path);
     if (auto persisted = persist_config(next_config); !persisted) {

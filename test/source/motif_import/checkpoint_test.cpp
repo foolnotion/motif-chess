@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 
 #include "motif/import/checkpoint.hpp"
 
@@ -32,6 +33,28 @@ TEST_CASE("checkpoint: glaze round-trip all fields", "[motif-import]")
     CHECK(result->byte_offset == orig.byte_offset);
     CHECK(result->games_committed == orig.games_committed);
     CHECK(result->last_game_id == orig.last_game_id);
+
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("checkpoint: a file written by a build with more fields still loads", "[motif-import]")
+{
+    // An unknown key must not make the file unreadable: run() treats an
+    // unreadable checkpoint as an error, which would block every later import.
+    auto const tmp = std::filesystem::temp_directory_path() / "cp_unknown_keys";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+    {
+        std::ofstream out {motif::import::checkpoint_path(tmp)};
+        out << R"({"source_path":"/data/games.pgn","byte_offset":10,"games_committed":3,"last_game_id":3,"mutation_seq":5,"game_count":3})";
+    }
+
+    auto const result = motif::import::read_checkpoint(tmp);
+    REQUIRE(result.has_value());
+    CHECK(result->source_path == "/data/games.pgn");
+    CHECK(result->byte_offset == 10);
+    CHECK(result->games_committed == 3);
+    CHECK(result->last_game_id == 3);
 
     std::filesystem::remove_all(tmp);
 }

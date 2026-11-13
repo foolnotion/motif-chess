@@ -195,7 +195,25 @@ TEST_CASE("search_presenter: repeated position within one game keeps the first p
     CHECK(presenter.state().matches.front().ply == 0);
 }
 
-TEST_CASE("search_presenter: starting-position search is served from cache without re-querying the database", "[motif-slint-app]")
+TEST_CASE("search_presenter: starting-position search is served from cache while the database is unchanged", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    REQUIRE(database->insert_game(make_game({"e4"})).has_value());
+    REQUIRE(database->rebuild_position_postings().has_value());
+    auto presenter = motif::slint_app::search_presenter {*database};
+
+    auto const first_query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, first_query).value_or(false));
+    REQUIRE(presenter.state().total_matches == 1);
+
+    auto const cached = presenter.search(starting_position_hash(), empty_filter());
+    REQUIRE(cached.has_value());
+    CHECK_FALSE(cached->has_value());  // nullopt: served synchronously from cache, nothing to dispatch
+    CHECK(presenter.state().total_matches == 1);
+}
+
+TEST_CASE("search_presenter: a canonical change makes the cached starting-position page unusable even after a rebuild", "[motif-slint-app]")
 {
     auto database = motif::db::database_manager::create_scratch();
     REQUIRE(database.has_value());
@@ -208,15 +226,91 @@ TEST_CASE("search_presenter: starting-position search is served from cache witho
     REQUIRE(presenter.state().total_matches == 1);
 
     // Insert another game and rebuild postings directly on the database,
-    // bypassing the presenter -- if the next starting-position search were
-    // a real fetch it would see 2 matches instead of the cached 1.
+    // bypassing the presenter. The cached one-game page is stale: search() must
+    // dispatch a real query (dispatch() asserts it did) and see both games.
     REQUIRE(database->insert_game(make_game({"d4"})).has_value());
     REQUIRE(database->rebuild_position_postings().has_value());
 
-    auto const cached = presenter.search(starting_position_hash(), empty_filter());
-    REQUIRE(cached.has_value());
-    CHECK_FALSE(cached->has_value());  // nullopt: served synchronously from cache, nothing to dispatch
-    CHECK(presenter.state().total_matches == 1);
+    auto const refreshed_query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, refreshed_query).value_or(false));
+    CHECK(presenter.state().total_matches == 2);
+}
+
+TEST_CASE("search_presenter: a cache hit does not bypass the database coverage gate", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    REQUIRE(database->insert_game(make_game({"e4"})).has_value());
+    REQUIRE(database->rebuild_position_postings().has_value());
+    auto presenter = motif::slint_app::search_presenter {*database};
+
+    auto const first_query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, first_query).value_or(false));
+    REQUIRE(presenter.state().total_matches == 1);
+
+    // A canonical change without a rebuild leaves the postings stale: the
+    // database refuses position queries, so the presenter must not paper over
+    // that with its cached page.
+    REQUIRE(database->insert_game(make_game({"d4"})).has_value());
+    auto const status = database->derived_index_status();
+    REQUIRE(status.has_value());
+    REQUIRE_FALSE(status->postings_usable);
+
+    auto const query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, query).value_or(false));  // the error was applied, not a cached page
+    CHECK_FALSE(presenter.state().error_text.empty());
+    CHECK(presenter.state().matches.empty());
+}
+
+TEST_CASE("search_presenter: a non-indexed metadata patch invalidates the cached starting-position page", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    auto const inserted = database->insert_game(make_game({"e4"}));
+    REQUIRE(inserted.has_value());
+    REQUIRE(database->set_manual_game_provenance(*inserted, std::nullopt, "new").has_value());
+    REQUIRE(database->rebuild_position_postings().has_value());
+    auto presenter = motif::slint_app::search_presenter {*database};
+
+    auto const first_query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, first_query).value_or(false));
+    REQUIRE(presenter.state().matches.size() == 1);
+    REQUIRE(presenter.state().matches.front().game.white == "White Player");
+
+    // A name patch does not advance the mutation sequence, so the postings
+    // stay usable -- exactly the case the sequence alone cannot detect.
+    auto patch = motif::db::game_patch {};
+    patch.white_name = "Renamed Player";
+    REQUIRE(database->patch_game_metadata(*inserted, patch).has_value());
+    auto const status = database->derived_index_status();
+    REQUIRE(status.has_value());
+    REQUIRE(status->postings_usable);
+
+    auto const refreshed_query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, refreshed_query).value_or(false));
+    REQUIRE(presenter.state().matches.size() == 1);
+    CHECK(presenter.state().matches.front().game.white == "Renamed Player");
+}
+
+TEST_CASE("search_presenter: a provenance change invalidates the cached starting-position page", "[motif-slint-app]")
+{
+    auto database = motif::db::database_manager::create_scratch();
+    REQUIRE(database.has_value());
+    auto const inserted = database->insert_game(make_game({"e4"}));
+    REQUIRE(inserted.has_value());
+    REQUIRE(database->rebuild_position_postings().has_value());
+    auto presenter = motif::slint_app::search_presenter {*database};
+
+    auto const first_query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, first_query).value_or(false));
+
+    auto const revision_before = database->data_revision();
+    REQUIRE(database->set_manual_game_provenance(*inserted, std::nullopt, "reviewed").has_value());
+    CHECK(database->data_revision() > revision_before);
+
+    auto const refreshed_query = dispatch(presenter, starting_position_hash(), empty_filter());
+    REQUIRE(load(presenter, refreshed_query).value_or(false));
+    CHECK(presenter.state().matches.size() == 1);
 }
 
 TEST_CASE("search_presenter: invalidate_starting_position_cache forces a fresh fetch", "[motif-slint-app]")

@@ -20,12 +20,40 @@ namespace motif::db
 
 class game_store;
 
+// On-disk format version of a postings artifact; recorded in the published
+// snapshot descriptor so an artifact this build cannot read is never trusted.
+inline constexpr std::uint32_t position_postings_format_version = 6;
+
 struct position_postings_summary
 {
     std::uint64_t occurrence_count {};
     std::uint32_t distinct_game_count {};
     std::uint16_t min_ply {};
     std::uint16_t max_ply {};
+};
+
+// One game's complete metadata after-image: the exact values the postings
+// reader reports for every occurrence of the game. PR 6 supports exactly one
+// content revision per game (revision 1); the key is already (game, revision) so
+// later PRs add replacement documents without a format change.
+struct position_metadata_after_image
+{
+    game_id id {};
+    std::uint64_t content_revision {1};
+    std::int8_t result {};  // -1 black win, 0 draw/other, 1 white win
+    std::optional<std::int16_t> white_elo;
+    std::optional<std::int16_t> black_elo;
+
+    auto operator==(position_metadata_after_image const&) const -> bool = default;
+};
+
+// A verified, owned replacement for one metadata slot. The index stays valid as
+// long as the reader's metadata table is not resized, which no operation does
+// after open().
+struct position_metadata_slot
+{
+    std::size_t index {};
+    position_metadata_after_image image;
 };
 
 struct position_postings_build_metrics
@@ -104,6 +132,25 @@ class position_postings
     [[nodiscard]] auto distinct_game_ids(zobrist_hash hash, std::size_t limit, std::size_t offset) const -> result<std::vector<game_id>>;
     [[nodiscard]] auto summary(zobrist_hash hash) const -> result<std::optional<position_postings_summary>>;
     [[nodiscard]] auto indexed_game_count() const noexcept -> std::uint64_t;
+
+    // Metadata overlay. The artifact's embedded per-game metadata is the
+    // baseline; the certified chain of after-images is applied on top.
+    //
+    // apply_metadata_overlay: open-time materialization of a whole chain
+    // (records sorted ascending and unique by id). All-or-nothing: every record
+    // is validated (known document, revision 1, result in range) before any
+    // slot is assigned.
+    [[nodiscard]] auto apply_metadata_overlay(std::span<position_metadata_after_image const> sorted_records) -> result<void>;
+    // prepare/install: the per-edit pair. prepare verifies the document and
+    // locates its slot (it may fail, and changes nothing); install then assigns
+    // scalar fields only -- no search, allocation, I/O or failure -- so it can
+    // run after the durable commit. Callers serialize both against readers.
+    [[nodiscard]] auto prepare_metadata_update(position_metadata_after_image const& image) const -> result<position_metadata_slot>;
+    void install_metadata_update(position_metadata_slot const& slot) noexcept;
+    // The effective metadata of one game (baseline plus anything installed).
+    [[nodiscard]] auto metadata_for(game_id game) const -> std::optional<position_metadata_after_image>;
+    // Every game's effective metadata in ascending id order.
+    void for_each_metadata(std::function<void(position_metadata_after_image const&)> const& visitor) const;
 
     // Streams every distinct hash in strictly ascending order together with
     // its summary, decoding only compressed directory blocks (never posting

@@ -100,7 +100,12 @@ auto game_browser_presenter::previous_page() -> browser_result<browser_query>
 
 auto game_browser_presenter::execute_query(browser_query const& query) const -> browser_result<browser_page>
 {
-    auto result = database_->store().find_games(query.filter);
+    // store() is unlocked; hold the generation scope for the read so it cannot straddle a mutation or index publish.
+    auto result = [&]() -> decltype(database_->store().find_games(query.filter))
+    {
+        auto const scope = database_->lock_generation();
+        return database_->store().find_games(query.filter);
+    }();
     if (!result) {
         return tl::unexpected {from_database_error(result.error())};
     }
@@ -190,7 +195,11 @@ auto game_browser_presenter::prepare_activation() -> browser_result<activation_r
 
 auto game_browser_presenter::execute_activation(activation_request const& request) const -> browser_result<loaded_game>
 {
-    auto game = database_->store().get(request.game_id);
+    auto game = [&]() -> decltype(database_->store().get(request.game_id))
+    {
+        auto const scope = database_->lock_generation();
+        return database_->store().get(request.game_id);
+    }();
     if (!game) {
         return tl::unexpected {from_database_error(game.error())};
     }

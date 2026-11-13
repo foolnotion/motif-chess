@@ -537,7 +537,7 @@ TEST_CASE("game_store: elo-only patch does not mutate a player row shared by ano
     REQUIRE(fix.store.set_manual_provenance(*game1_id, {}, "new").has_value());
 
     auto patch = motif::db::game_patch {};
-    patch.white_elo = patched_white_elo;
+    patch.white_elo = motif::db::rating_patch::set(patched_white_elo);
     REQUIRE(fix.store.patch_metadata(*game1_id, patch).has_value());
 
     // Game 1 is the patch target and must show the new elo.
@@ -919,4 +919,256 @@ TEST_CASE("game_store: game with no moves round-trips correctly", "[motif_db][ga
     auto const get_res = fix.store.get(*ins_res);
     REQUIRE(get_res.has_value());
     CHECK(get_res->moves.empty());
+}
+
+// ── Durable game-ID allocator ────────────────────────────────────────────────
+
+TEST_CASE("game_store: create_schema creates the allocator row and content_revision column", "[motif_db][game_store][allocator]")
+{
+    db_fixture fix;
+    CHECK(fix.count_rows("bundle_meta") == 1);
+
+    REQUIRE(fix.store.insert(make_game()).has_value());
+    sqlite3_stmt* raw = nullptr;
+    REQUIRE(sqlite3_prepare_v2(fix.db.get(), "SELECT content_revision FROM game", -1, &raw, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(raw) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(raw, 0) == 1);
+    sqlite3_finalize(raw);
+}
+
+TEST_CASE("game_store: insert after deleting the highest id yields a greater id", "[motif_db][game_store][allocator]")
+{
+    db_fixture fix;
+
+    auto const first = fix.store.insert(make_game("Alpha", "Beta"));
+    auto const second = fix.store.insert(make_game("Gamma", "Delta"));
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    REQUIRE(fix.store.remove(*second).has_value());
+
+    auto const third = fix.store.insert(make_game("Epsilon", "Zeta"));
+    REQUIRE(third.has_value());
+    CHECK(third->value > second->value);
+
+    // Deleting everything must not rewind the allocator either.
+    REQUIRE(fix.store.remove(*first).has_value());
+    REQUIRE(fix.store.remove(*third).has_value());
+    auto const fourth = fix.store.insert(make_game("Eta", "Theta"));
+    REQUIRE(fourth.has_value());
+    CHECK(fourth->value > third->value);
+}
+
+TEST_CASE("game_store: a batch rolled back through the store leaves later inserts collision-free", "[motif_db][game_store][allocator]")
+{
+    db_fixture fix;
+
+    auto const kept = fix.store.insert(make_game("Alpha", "Beta"));
+    REQUIRE(kept.has_value());
+
+    REQUIRE(fix.store.begin_transaction().has_value());
+    REQUIRE(fix.store.insert(make_game("Gamma", "Delta")).has_value());
+    fix.store.rollback_transaction();
+
+    auto const after = fix.store.insert(make_game("Epsilon", "Zeta"));
+    REQUIRE(after.has_value());
+    CHECK(after->value > kept->value);
+    CHECK(fix.count_rows("game") == 2);
+}
+
+// ── Patch contract: string normalization and event/site ──────────────────────
+
+namespace
+{
+
+// Inserts a game and flips it to a manual one so every field may be patched.
+[[nodiscard]] auto insert_manual_game(db_fixture& fix, motif::db::game const& candidate) -> motif::db::game_id
+{  // NOLINT(llvm-prefer-static-over-anonymous-namespace)
+    auto const inserted = fix.store.insert(candidate);
+    REQUIRE(inserted.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    REQUIRE(fix.store.set_manual_provenance(*inserted, std::nullopt, "new").has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    return *inserted;
+}
+
+}  // namespace
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("game_store: patch trims every string field and refuses an empty name, event or date", "[motif_db][game_store][patch]")
+{
+    db_fixture fix;
+    auto const game_key = insert_manual_game(fix, make_game("Original White", "Original Black"));
+
+    auto padded = motif::db::game_patch {};
+    padded.white_name = "  Fischer \t";
+    padded.black_name = "\nSpassky  ";
+    padded.event = "  Candidates 1959 ";
+    padded.site = " Zurich ";
+    padded.date = " 1959.09.01 ";
+    padded.result = " 0-1 ";
+    padded.eco = " C95 ";
+    padded.source_label = "  my label ";
+    padded.review_status = " studied ";
+    padded.notes = "  a note \n";
+    REQUIRE(fix.store.patch_metadata(game_key, padded).has_value());
+
+    auto stored = fix.store.get(game_key);
+    REQUIRE(stored.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    CHECK(stored->white.name == "Fischer");
+    CHECK(stored->black.name == "Spassky");
+    CHECK(stored->event_details->name == "Candidates 1959");
+    CHECK(stored->event_details->site == "Zurich");
+    CHECK(stored->date == "1959.09.01");
+    CHECK(stored->result == "0-1");
+    CHECK(stored->eco == "C95");
+    CHECK(stored->provenance.source_label == "my label");
+    CHECK(stored->provenance.review_status == "studied");
+    // NOLINTEND(bugprone-unchecked-optional-access)
+
+    // A name, event or date that is empty once trimmed is refused and nothing is applied,
+    // not even the valid field the same patch carries.
+    for (auto const* const field : {"white", "black", "event", "date"}) {
+        auto blank = motif::db::game_patch {};
+        blank.eco = "B00";
+        auto const text = std::string {field};
+        if (text == "white") {
+            blank.white_name = "   ";
+        } else if (text == "black") {
+            blank.black_name = "";
+        } else if (text == "event") {
+            blank.event = " \t ";
+        } else {
+            blank.date = "";
+        }
+        INFO(field);
+        auto const refused = fix.store.patch_metadata(game_key, blank);
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error() == motif::db::error_code::invalid_argument);
+        CHECK_FALSE(refused.error().message.empty());
+    }
+    auto const unchanged = fix.store.get(game_key);
+    REQUIRE(unchanged.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    CHECK(unchanged->white.name == "Fischer");
+    CHECK(unchanged->black.name == "Spassky");
+    CHECK(unchanged->event_details->name == "Candidates 1959");
+    CHECK(unchanged->date == "1959.09.01");
+    CHECK(unchanged->eco == "C95");
+    // NOLINTEND(bugprone-unchecked-optional-access)
+
+    // eco, source_label and notes keep their clear semantics: an empty value clears them.
+    CHECK(fix.count_rows("game_tag") == 1);
+    auto clear = motif::db::game_patch {};
+    clear.eco = "";
+    clear.source_label = "   ";
+    clear.notes = "  ";
+    REQUIRE(fix.store.patch_metadata(game_key, clear).has_value());
+    auto const cleared = fix.store.get(game_key);
+    REQUIRE(cleared.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    CHECK_FALSE(cleared->eco.has_value());
+    CHECK_FALSE(cleared->provenance.source_label.has_value());
+    CHECK(cleared->provenance.review_status == "studied");  // an omitted field keeps its value
+    // NOLINTEND(bugprone-unchecked-optional-access)
+    CHECK(fix.count_rows("game_tag") == 0);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("game_store: a site edit is applied or refused, never dropped, and never rewrites a shared event",
+          "[motif_db][game_store][patch]")
+{
+    db_fixture fix;
+    auto const first = insert_manual_game(fix, make_game_with_event("Shared Open"));
+    auto second_game = make_game_with_event("Shared Open");
+    second_game.white.name = "Other White";
+    auto const second = insert_manual_game(fix, second_game);
+    REQUIRE(fix.count_rows("event") == 1);
+
+    auto const site_of = [&](motif::db::game_id const key) -> std::optional<std::string>
+    {
+        auto const loaded = fix.store.get(key);
+        REQUIRE(loaded.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(loaded->event_details.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        return loaded->event_details->site;
+    };
+    auto const event_of = [&](motif::db::game_id const key) -> std::string
+    {
+        auto const loaded = fix.store.get(key);
+        REQUIRE(loaded.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        REQUIRE(loaded->event_details.has_value());
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        return loaded->event_details->name;
+    };
+    auto const refuses = [&](motif::db::game_id const key, motif::db::game_patch const& patch) -> bool
+    {
+        auto const outcome = fix.store.patch_metadata(key, patch);
+        return !outcome.has_value() && outcome.error() == motif::db::error_code::invalid_argument && !outcome.error().message.empty();
+    };
+
+    // A different site for an event two games share is refused; neither game changes.
+    auto other_site = motif::db::game_patch {};
+    other_site.site = "Paris";
+    other_site.eco = "A00";  // a valid companion field: the refusal applies nothing at all
+    CHECK(refuses(first, other_site));
+    CHECK(site_of(first) == "London");
+    CHECK(site_of(second) == "London");
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_FALSE(fix.store.get(first)->eco.has_value());
+    CHECK(fix.count_rows("event") == 1);
+
+    // Clearing the site is a site change too.
+    auto clear_site = motif::db::game_patch {};
+    clear_site.site = "";
+    CHECK(refuses(first, clear_site));
+    CHECK(site_of(second) == "London");
+
+    // Restating the stored site is a valid no-op.
+    auto same_site = motif::db::game_patch {};
+    same_site.site = " London ";
+    REQUIRE(fix.store.patch_metadata(first, same_site).has_value());
+    CHECK(site_of(first) == "London");
+
+    // Moving to an existing event with another site is refused as well: the existing row wins.
+    auto move_to_existing = motif::db::game_patch {};
+    move_to_existing.event = "Shared Open";
+    move_to_existing.site = "Paris";
+    CHECK(refuses(first, move_to_existing));
+
+    // The supported way: a new event name carries its own site; the shared row is untouched.
+    auto new_event = motif::db::game_patch {};
+    new_event.event = "Paris Open";
+    new_event.site = "Paris";
+    REQUIRE(fix.store.patch_metadata(first, new_event).has_value());
+    CHECK(event_of(first) == "Paris Open");
+    CHECK(site_of(first) == "Paris");
+    CHECK(event_of(second) == "Shared Open");
+    CHECK(site_of(second) == "London");
+    CHECK(fix.count_rows("event") == 2);
+
+    // A site edit on the now-private event is still refused: event rows are keyed by name,
+    // so the store never rewrites one from a game's patch.
+    auto rewrite = motif::db::game_patch {};
+    rewrite.site = "Rome";
+    CHECK(refuses(first, rewrite));
+    CHECK(site_of(first) == "Paris");
+
+    // A site needs an event: a game without one cannot carry it.
+    auto const eventless = insert_manual_game(fix, make_game("No", "Event"));
+    CHECK(refuses(eventless, rewrite));
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_FALSE(fix.store.get(eventless)->event_details.has_value());
+    auto no_site = motif::db::game_patch {};
+    no_site.site = "  ";
+    REQUIRE(fix.store.patch_metadata(eventless, no_site).has_value());
+    // Naming the event in the same patch makes the site representable.
+    auto with_event = motif::db::game_patch {};
+    with_event.event = "Brand New Open";
+    with_event.site = "Oslo";
+    REQUIRE(fix.store.patch_metadata(eventless, with_event).has_value());
+    CHECK(event_of(eventless) == "Brand New Open");
+    CHECK(site_of(eventless) == "Oslo");
 }

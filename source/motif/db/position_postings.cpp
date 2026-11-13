@@ -27,7 +27,7 @@ namespace
 {
 
 constexpr auto magic = std::array<char, 8> {'M', 'O', 'T', 'I', 'F', 'P', 'O', '2'};
-constexpr auto format_version = std::uint32_t {6};
+constexpr auto format_version = position_postings_format_version;
 constexpr auto byte_bits = std::size_t {8};
 constexpr auto byte_mask = std::uint64_t {0xff};
 
@@ -826,7 +826,14 @@ auto position_postings::append(std::span<position_row const> rows) -> result<voi
     if (spill_threshold_ == 0U) {
         return tl::unexpected {error_code::invalid_argument};
     }
-    records_.reserve(std::min(records_.size() + rows.size(), spill_threshold_));
+    // Geometric growth up to the spill threshold. An exact-size reserve here would
+    // reallocate and copy the whole buffer on every game (quadratic), and each fresh
+    // multi-megabyte block is a new mmap whose pages fault in one by one until glibc's
+    // dynamic mmap threshold adapts -- a ~13 s kernel-time penalty on the first build
+    // in a process.
+    if (auto const needed = records_.size() + rows.size(); needed > records_.capacity()) {
+        records_.reserve(std::min(std::max(needed, records_.capacity() * 2U), spill_threshold_));
+    }
     for (auto const& row : rows) {
         if (row.game_id.value == 0U) {
             return tl::unexpected {error_code::invalid_argument};
@@ -1811,6 +1818,87 @@ auto position_postings::occurrences(zobrist_hash const hash, std::size_t const l
                                           .black_elo = metadata_iterator->black_elo});
     }
     return matches;
+}
+
+// ── Metadata overlay ─────────────────────────────────────────────────────────
+
+namespace
+{
+
+auto valid_after_image(position_metadata_after_image const& image) noexcept -> bool
+{
+    // One content revision per game in this version; result is the 3-valued code.
+    return image.id.value != 0U && image.content_revision == 1U && image.result >= -1 && image.result <= 1;
+}
+
+}  // namespace
+
+auto position_postings::apply_metadata_overlay(std::span<position_metadata_after_image const> const sorted_records) -> result<void>
+{
+    // Validate everything first: an invalid chain must leave the baseline
+    // untouched.
+    auto slots = std::vector<std::size_t> {};
+    slots.reserve(sorted_records.size());
+    auto cursor = metadata_.begin();
+    auto previous = std::optional<game_id> {};
+    for (auto const& image : sorted_records) {
+        if (!valid_after_image(image) || (previous && !(*previous < image.id))) {
+            return tl::unexpected {error {error_code::io_failure, "metadata after-image is invalid or out of order"}};
+        }
+        previous = image.id;
+        cursor = std::ranges::lower_bound(cursor, metadata_.end(), image.id, {}, [](auto const& record) -> game_id { return record.id; });
+        if (cursor == metadata_.end() || cursor->id != image.id) {
+            return tl::unexpected {error {error_code::io_failure, "metadata after-image names an unknown document"}};
+        }
+        slots.push_back(static_cast<std::size_t>(cursor - metadata_.begin()));
+    }
+    for (std::size_t index = 0; index < sorted_records.size(); ++index) {
+        auto& slot = metadata_[slots[index]];
+        slot.result = sorted_records[index].result;
+        slot.white_elo = sorted_records[index].white_elo;
+        slot.black_elo = sorted_records[index].black_elo;
+    }
+    return {};
+}
+
+auto position_postings::prepare_metadata_update(position_metadata_after_image const& image) const -> result<position_metadata_slot>
+{
+    if (!valid_after_image(image)) {
+        return tl::unexpected {error {error_code::io_failure, "metadata after-image is invalid"}};
+    }
+    auto const found = std::ranges::lower_bound(metadata_, image.id, {}, [](auto const& record) -> game_id { return record.id; });
+    if (found == metadata_.end() || found->id != image.id) {
+        return tl::unexpected {error {error_code::not_found, "metadata after-image names an unknown document"}};
+    }
+    return position_metadata_slot {.index = static_cast<std::size_t>(found - metadata_.begin()), .image = image};
+}
+
+void position_postings::install_metadata_update(position_metadata_slot const& slot) noexcept
+{
+    // prepare_metadata_update() verified the slot against this very table, which
+    // nothing resizes after open(); these are scalar assignments only.
+    auto& entry = metadata_[slot.index];
+    entry.result = slot.image.result;
+    entry.white_elo = slot.image.white_elo;
+    entry.black_elo = slot.image.black_elo;
+}
+
+auto position_postings::metadata_for(game_id const game) const -> std::optional<position_metadata_after_image>
+{
+    auto const found = std::ranges::lower_bound(metadata_, game, {}, [](auto const& record) -> game_id { return record.id; });
+    if (found == metadata_.end() || found->id != game) {
+        return std::nullopt;
+    }
+    return position_metadata_after_image {
+        .id = found->id, .content_revision = 1, .result = found->result, .white_elo = found->white_elo, .black_elo = found->black_elo};
+}
+
+void position_postings::for_each_metadata(std::function<void(position_metadata_after_image const&)> const& visitor) const
+{
+    for (auto const& record : metadata_) {
+        visitor(position_metadata_after_image {
+            .id = record.id, .content_revision = 1, .result = record.result, .white_elo = record.white_elo, .black_elo = record.black_elo});
+    }
 }
 
 }  // namespace motif::db

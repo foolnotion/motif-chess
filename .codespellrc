@@ -3,5 +3,5 @@ builtin = clear,rare,en-GB_to_en-US,names,informal,code
 check-filenames =
 check-hidden =
 skip = */.git,*/build,*/prefix,*.pgn
-ignore-words-list = copyable,analogue,deque,analyses
+ignore-words-list = copyable,analogue,deque,analyses,stoll
 quiet-level = 2

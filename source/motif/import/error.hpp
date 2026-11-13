@@ -20,6 +20,11 @@ enum class error_code : std::uint8_t
     duplicate,
     not_found,
     empty_game,
+    // The raw-import identity index could not be restored (deduplicate()
+    // failed): the database lacks its uniqueness guarantee and may hold
+    // unreconciled duplicates until it is reopened (open() repairs it) or the
+    // import is resumed (resume repairs it first).
+    recovery_required,
 };
 
 struct error
@@ -64,6 +69,8 @@ using result = tl::expected<T, error>;
             return "not_found";
         case error_code::empty_game:
             return "empty_game";
+        case error_code::recovery_required:
+            return "recovery_required";
     }
 
     return "unknown";

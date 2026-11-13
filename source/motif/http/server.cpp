@@ -36,10 +36,13 @@
 #include "motif/chess/chess.hpp"
 #include "motif/db/database_manager.hpp"
 #include "motif/db/error.hpp"
+#include "motif/db/game_store.hpp"
+#include "motif/db/manifest.hpp"
 #include "motif/db/types.hpp"
 #include "motif/engine/engine_manager.hpp"
 #include "motif/engine/error.hpp"
 #include "motif/http/error.hpp"
+#include "motif/import/checkpoint.hpp"
 #include "motif/import/error.hpp"
 #include "motif/import/import_pipeline.hpp"
 #include "motif/import/import_worker.hpp"
@@ -51,6 +54,68 @@ struct glz::meta<motif::db::game_id>
 {
     using T = motif::db::game_id;  // NOLINT(readability-identifier-naming) — glaze convention
     static constexpr auto value = &T::value;
+};
+
+// A rating in a PATCH body is three-state: an absent key leaves the rating
+// alone (the custom reader never runs), an integer sets it, and JSON null clears
+// it. Floats, strings and booleans are parse errors (HTTP 400); an integer
+// outside the signed 16-bit rating domain is rejected by the patch itself, so
+// the 64-bit reading is only saturated to int32, never clamped into range.
+template<>
+struct glz::meta<motif::db::rating_patch>
+{
+    using T = motif::db::rating_patch;  // NOLINT(readability-identifier-naming) — glaze convention
+    static constexpr auto read_rating = [](T& patch, std::optional<std::int64_t> const& value) -> void
+    {
+        if (!value) {
+            patch = T::clear();
+            return;
+        }
+        auto const low = static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min());
+        auto const high = static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max());
+        patch = T::set(static_cast<std::int32_t>(std::clamp(*value, low, high)));
+    };
+    static constexpr auto write_rating = [](T const& patch) -> std::optional<std::int64_t>
+    {
+        if (patch.kind == T::action::set) {
+            return patch.value;
+        }
+        return std::nullopt;
+    };
+    static constexpr auto value = glz::custom<read_rating, write_rating>;
+};
+
+// The wire names are the documented ones (docs/api/openapi.yaml: `white`,
+// `black`), mapped explicitly onto the domain fields so the two cannot drift
+// apart by accident. An unknown key is a parse error (HTTP 400).
+template<>
+struct glz::meta<motif::db::game_patch>
+{
+    using T = motif::db::game_patch;  // NOLINT(readability-identifier-naming) — glaze convention
+    static constexpr auto value = glz::object("white",
+                                              &T::white_name,
+                                              "white_elo",
+                                              &T::white_elo,
+                                              "black",
+                                              &T::black_name,
+                                              "black_elo",
+                                              &T::black_elo,
+                                              "event",
+                                              &T::event,
+                                              "site",
+                                              &T::site,
+                                              "date",
+                                              &T::date,
+                                              "result",
+                                              &T::result,
+                                              "eco",
+                                              &T::eco,
+                                              "source_label",
+                                              &T::source_label,
+                                              "review_status",
+                                              &T::review_status,
+                                              "notes",
+                                              &T::notes);
 };
 
 // These structs must live in a named namespace — glaze reflection cannot
@@ -286,11 +351,45 @@ auto is_valid_review_status(std::string_view const val) -> bool
     return std::ranges::any_of(valid_review_statuses, [&](std::string_view entry) -> bool { return entry == val; });
 }
 
+// The same source comparison import_pipeline uses to match a checkpoint to a
+// requested file. A path that cannot be made absolute never matches.
+auto is_same_import_source(std::filesystem::path const& lhs, std::filesystem::path const& rhs) -> bool
+{
+    std::error_code lhs_err {};
+    std::error_code rhs_err {};
+    auto const lhs_abs = std::filesystem::absolute(lhs, lhs_err).lexically_normal();
+    auto const rhs_abs = std::filesystem::absolute(rhs, rhs_err).lexically_normal();
+    return !lhs_err && !rhs_err && lhs_abs == rhs_abs;
+}
+
+// Only a successful upload may be removed. Keep it if its checkpoint still
+// names it or cannot be read. Sync the bundle directory before unlinking where
+// supported; Windows directory-entry durability is best-effort.
+// The two paths are distinct: callers pass database.dir() first and the uploaded PGN second.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+void settle_upload_file(std::filesystem::path const& db_dir, std::filesystem::path const& upload)
+{
+    auto const checkpoint = motif::import::read_checkpoint(db_dir);
+    if (!checkpoint.has_value() && checkpoint.error() != motif::import::error_code::not_found) {
+        return;
+    }
+    if ((checkpoint.has_value() && is_same_import_source(std::filesystem::path {checkpoint->source_path}, upload))
+        || !motif::db::sync_filesystem_path(db_dir, /*directory=*/true))
+    {
+        return;
+    }
+    std::error_code remove_err {};
+    std::filesystem::remove(upload, remove_err);
+}
+
 constexpr std::chrono::milliseconds sse_poll_interval {250};
 constexpr std::chrono::minutes sse_max_wait {30};
 
 constexpr std::string_view fail_next_import_worker_start_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_START"};
 constexpr std::string_view fail_next_import_worker_run_env {"MOTIF_HTTP_TEST_FAIL_NEXT_IMPORT_WORKER_RUN"};
+// Test seam: the next upload's import is asked to stop before it starts, so it
+// ends interrupted with its import checkpoint in place, with no timing race.
+constexpr std::string_view cancel_next_upload_import_env {"MOTIF_HTTP_TEST_CANCEL_NEXT_UPLOAD_IMPORT"};
 
 auto env_flag_enabled(std::string_view const name) -> bool
 {
@@ -668,7 +767,9 @@ struct server::impl
 {
     httplib::Server svr;
     motif::engine::engine_manager engine_mgr;
-    std::mutex database_mutex;
+    // Guards the sessions map and import_workers list only. All database access is
+    // serialized by database_manager::lock_generation(), which handlers hold across
+    // each whole logical read or mutation.
     std::mutex sessions_mutex;
     gtl::flat_hash_map<std::string, std::shared_ptr<detail::import_session>> sessions;
     // Each entry pairs an import_id with its worker thread for lifecycle tracking.
@@ -679,6 +780,7 @@ struct server::impl
     gtl::flat_hash_map<std::string, std::shared_ptr<analysis_sse_session>> analyses;
     std::atomic<bool> fail_next_import_worker_start_for_test {false};
     std::atomic<bool> fail_next_import_worker_run_for_test {false};
+    std::atomic<bool> cancel_next_upload_import_for_test {false};
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     motif::db::database_manager& database;
     std::vector<std::string> allowed_origins;
@@ -702,6 +804,7 @@ struct server::impl
 server::impl::impl(motif::db::database_manager& mgr)
     : fail_next_import_worker_start_for_test {env_flag_enabled(fail_next_import_worker_start_env)}
     , fail_next_import_worker_run_for_test {env_flag_enabled(fail_next_import_worker_run_env)}
+    , cancel_next_upload_import_for_test {env_flag_enabled(cancel_next_upload_import_env)}
     , database {mgr}
 {
     register_cors(svr, {});
@@ -925,6 +1028,19 @@ void server::impl::setup_routes()
                 }
 
                 if (has_limit && limit == 0) {
+                    // An empty page is still an answer about the index: a stale,
+                    // missing or unavailable one must fail exactly as it does for
+                    // a nonzero limit, so check coverage before returning [].
+                    // (find() treats limit 0 as "no limit", so it cannot be used.)
+                    auto const coverage = [this]() -> decltype(database.derived_index_status())
+                    {
+                        auto const scope = database.lock_generation();
+                        return database.derived_index_status();
+                    }();
+                    if (!coverage || !coverage->postings_usable) {
+                        set_json_error(res, http_internal_error, "search failed");
+                        return;
+                    }
                     res.set_content("[]", "application/json");
                     res.status = http_ok;
                     return;
@@ -933,7 +1049,7 @@ void server::impl::setup_routes()
                 auto matches = [this, hash_val, limit, offset]() -> decltype(motif::search::position_search::find(
                                                                      database, motif::db::zobrist_hash {hash_val}, limit, offset))
                 {
-                    std::scoped_lock const lock {database_mutex};
+                    auto const scope = database.lock_generation();
                     return motif::search::position_search::find(database, motif::db::zobrist_hash {hash_val}, limit, offset);
                 }();
                 if (!matches) {
@@ -968,7 +1084,7 @@ void server::impl::setup_routes()
                 auto query_result =
                     [this, hash_val]() -> decltype(motif::search::opening_stats::query(database, motif::db::zobrist_hash {hash_val}))
                 {
-                    std::scoped_lock const lock {database_mutex};
+                    auto const scope = database.lock_generation();
                     return motif::search::opening_stats::query(database, motif::db::zobrist_hash {hash_val});
                 }();
                 if (!query_result) {
@@ -1065,7 +1181,7 @@ void server::impl::setup_routes()
 
                 auto games = [this, &filter]() -> decltype(database.find_games(filter))
                 {
-                    std::scoped_lock const lock {database_mutex};
+                    auto const scope = database.lock_generation();
                     return database.find_games(filter);
                 }();
                 if (!games) {
@@ -1095,7 +1211,7 @@ void server::impl::setup_routes()
 
                 auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
                 {
-                    std::scoped_lock const lock {database_mutex};
+                    auto const scope = database.lock_generation();
                     return database.store().get(*game_id);
                 }();
                 if (!game_result) {
@@ -1123,7 +1239,7 @@ void server::impl::setup_routes()
 
                 auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
                 {
-                    std::scoped_lock const lock {database_mutex};
+                    auto const scope = database.lock_generation();
                     return database.store().get(*game_id);
                 }();
                 if (!game_result) {
@@ -1182,7 +1298,9 @@ void server::impl::setup_routes()
 
                  auto game_id = motif::db::game_id {};
                  {
-                     std::scoped_lock const lock {database_mutex};
+                     // One generation scope spans insert, provenance flip, and the compensating
+                     // remove so no reader can observe the intermediate imported-source state.
+                     auto const scope = database.lock_generation();
                      motif::import::import_worker worker {database};
                      auto worker_result = worker.process(pgn_game);
 
@@ -1233,7 +1351,7 @@ void server::impl::setup_routes()
             {
                 auto count = [this]() -> decltype(database.store().count_games())
                 {
-                    std::scoped_lock const lock {database_mutex};
+                    auto const scope = database.lock_generation();
                     return database.store().count_games();
                 }();
                 if (!count) {
@@ -1249,7 +1367,7 @@ void server::impl::setup_routes()
     svr.Post("/api/positions/rebuild",
              [this](httplib::Request const& /*req*/, httplib::Response& res) -> void
              {
-                 std::scoped_lock const lock {database_mutex};
+                 auto const scope = database.lock_generation();
                  auto rebuild_res = database.rebuild_position_postings();
                  if (!rebuild_res) {
                      set_json_error(res, http_internal_error, "position store rebuild failed");
@@ -1274,6 +1392,16 @@ void server::impl::setup_routes()
                       return;
                   }
 
+                  // Every string field is trimmed and an empty player name, event name or date
+                  // is refused here, before any enum check sees the untrimmed value. The store
+                  // applies the same normalization, so a direct caller gets the same contract.
+                  auto normalized = motif::db::normalize_game_patch(std::move(patch));
+                  if (!normalized) {
+                      set_json_error(res, http_bad_request, normalized.error().message);
+                      return;
+                  }
+                  patch = std::move(*normalized);
+
                   if (patch.result.has_value() && !is_valid_result(*patch.result)) {
                       set_json_error(res, http_bad_request, "invalid result; allowed: 1-0, 0-1, 1/2-1/2, *");
                       return;
@@ -1284,34 +1412,51 @@ void server::impl::setup_routes()
                       return;
                   }
 
-                  auto patch_result = [this, &game_id, &patch]() -> motif::db::result<void>
-                  {
-                      std::scoped_lock const lock {database_mutex};
-                      return database.patch_game_metadata(*game_id, patch);
-                  }();
+                  // The patch and the read-back of the patched row form one logical operation:
+                  // hold a single generation scope across both and release before serialization.
+                  auto scope = database.lock_generation();
+                  auto const patch_result = database.patch_game_metadata(*game_id, patch);
 
                   if (!patch_result) {
-                      if (patch_result.error() == motif::db::error_code::not_found) {
+                      auto const& failure = patch_result.error();
+                      if (failure == motif::db::error_code::not_found) {
                           set_json_error(res, http_not_found, "not_found");
                           return;
                       }
-                      if (patch_result.error() == motif::db::error_code::not_editable) {
-                          set_json_error(res, http_conflict, "game is not user-added and cannot be modified");
+                      if (failure == motif::db::error_code::not_editable) {
+                          // Result and ratings may be corrected on any game; every other
+                          // field only on a user-added one, and the whole patch is refused.
+                          set_json_error(
+                              res,
+                              http_conflict,
+                              "this field cannot be edited on an imported game; only result, white_elo and black_elo can be corrected");
                           return;
                       }
-                      if (patch_result.error() == motif::db::error_code::duplicate) {
+                      if (failure == motif::db::error_code::duplicate) {
                           set_json_error(res, http_conflict, "patch would create a duplicate game");
+                          return;
+                      }
+                      if (failure == motif::db::error_code::invalid_argument) {
+                          set_json_error(res, http_bad_request, failure.message.empty() ? std::string {"invalid patch"} : failure.message);
+                          return;
+                      }
+                      // A result or rating correction needs the position indexes to be current: it
+                      // is refused before any change when an earlier insert/removal left them stale.
+                      // Only that gate is 503. Any other failure stays a 500 even when it leaves the
+                      // indexes unusable (an unknown COMMIT outcome, say): the index state does not
+                      // say why the edit failed.
+                      if (failure == motif::db::error_code::index_stale) {
+                          set_json_error(res,
+                                         http_service_unavailable,
+                                         "position index is not current; rebuild it before correcting a result or rating");
                           return;
                       }
                       set_json_error(res, http_internal_error, "patch failed");
                       return;
                   }
 
-                  auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
-                  {
-                      std::scoped_lock const lock {database_mutex};
-                      return database.store().get(*game_id);
-                  }();
+                  auto game_result = database.store().get(*game_id);
+                  scope.unlock();
                   if (!game_result) {
                       set_json_error(res, http_internal_error, "game retrieval failed after patch");
                       return;
@@ -1337,7 +1482,7 @@ void server::impl::setup_routes()
                    }
 
                    {
-                       std::scoped_lock const lock {database_mutex};
+                       auto const scope = database.lock_generation();
                        auto delete_result = database.remove_user_game(*game_id);
 
                        if (!delete_result) {
@@ -1369,7 +1514,7 @@ void server::impl::setup_routes()
 
                 auto game_result = [this, game_id]() -> decltype(database.store().get(*game_id))
                 {
-                    std::scoped_lock const lock {database_mutex};
+                    auto const scope = database.lock_generation();
                     return database.store().get(*game_id);
                 }();
                 if (!game_result) {
@@ -1662,7 +1807,9 @@ void server::impl::setup_routes()
                      auto worker = std::jthread {
                          [this, session, pgn_path, simulate_run_failure]() -> void
                          {
-                             std::scoped_lock const lock {database_mutex};
+                             // run() reads the checkpoint before run_from() takes its own
+                             // (recursive) generation lock; hold one here for the whole run.
+                             auto const scope = database.lock_generation();
                              auto result = simulate_run_failure ? motif::import::result<motif::import::import_summary> {tl::unexpected {
                                                                       motif::import::error_code::invalid_state}}
                                                                 : session->pipeline->run(pgn_path, {});
@@ -1727,50 +1874,65 @@ void server::impl::setup_routes()
                      session->pipeline = std::make_unique<motif::import::import_pipeline>(database);
                      sessions.emplace(import_id, session);
                  }
-                 temp_path = std::filesystem::temp_directory_path() / fmt::format("motif_upload_{}.pgn", import_id);
+                 // Keep the sole uploaded copy in the bundle, not a temporary
+                 // directory that can be cleared on reboot. Never replace an
+                 // existing file even if a generated session ID collides.
+                 std::error_code path_error {};
+                 auto const upload_dir = std::filesystem::absolute(database.dir(), path_error);
+                 if (path_error) {
+                     std::scoped_lock const lock {sessions_mutex};
+                     sessions.erase(import_id);
+                     set_json_error(res, http_internal_error, "failed to resolve bundle directory");
+                     return;
+                 }
+                 temp_path = upload_dir / fmt::format("motif_upload_{}.pgn", import_id);
                  {
-                     std::ofstream tmp {temp_path, std::ios::binary};
+                     std::ofstream tmp {temp_path, std::ios::binary | std::ios::out | std::ios::noreplace};
                      if (!tmp.is_open()) {
                          std::scoped_lock const lock {sessions_mutex};
                          sessions.erase(import_id);
-                         set_json_error(res, http_internal_error, "failed to create temporary file");
+                         set_json_error(res, http_internal_error, "failed to create upload file");
                          return;
                      }
                      tmp.write(file_content.data(), static_cast<std::streamsize>(file_content.size()));
-                     if (tmp.fail()) {
+                     tmp.close();
+                     if (tmp.fail() || !motif::db::sync_filesystem_path(temp_path, /*directory=*/false)
+                         || !motif::db::sync_filesystem_path(upload_dir, /*directory=*/true))
+                     {
                          std::error_code remove_err {};
                          std::filesystem::remove(temp_path, remove_err);
                          std::scoped_lock const lock {sessions_mutex};
                          sessions.erase(import_id);
-                         set_json_error(res, http_internal_error, "failed to write temporary file");
+                         set_json_error(res, http_internal_error, "failed to persist upload file");
                          return;
                      }
                  }
 
+                 auto const simulate_cancel = cancel_next_upload_import_for_test.exchange(false);
                  try {
-                     auto worker = std::jthread {[this, session, pgn_path = temp_path]() -> void
+                     auto worker = std::jthread {[this, session, pgn_path = temp_path, simulate_cancel]() -> void
                                                  {
                                                      try {
-                                                         std::scoped_lock const lock {database_mutex};
+                                                         auto const scope = database.lock_generation();
+                                                         if (simulate_cancel) {
+                                                             session->pipeline->request_stop();
+                                                         }
                                                          auto result = session->pipeline->run(pgn_path, {});
                                                          if (result) {
                                                              session->summary = *result;
+                                                             settle_upload_file(database.dir(), pgn_path);
                                                          } else {
                                                              session->error_message = fmt::format(R"(import failed: "{}")",
                                                                                                   motif::import::to_string(result.error()));
                                                              session->failed.store(true, std::memory_order_release);
                                                          }
                                                      } catch (...) {
-                                                         std::error_code remove_err {};
-                                                         std::filesystem::remove(pgn_path, remove_err);
                                                          session->error_message = "import failed: unexpected error";
                                                          session->failed.store(true, std::memory_order_release);
                                                          session->done.store(true, std::memory_order_release);
                                                          session->cv.notify_all();
                                                          return;
                                                      }
-                                                     std::error_code remove_err {};
-                                                     std::filesystem::remove(pgn_path, remove_err);
                                                      session->done.store(true, std::memory_order_release);
                                                      session->cv.notify_all();
                                                  }};
