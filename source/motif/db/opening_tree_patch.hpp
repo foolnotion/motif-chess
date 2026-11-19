@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -12,6 +13,7 @@
 
 #include "motif/db/error.hpp"
 #include "motif/db/manifest.hpp"
+#include "motif/db/opening_tree_index.hpp"
 #include "motif/db/opening_tree_stats.hpp"
 #include "motif/db/types.hpp"
 
@@ -40,6 +42,14 @@ namespace motif::db
 //   EOF    : exactly after the last record; the artifact descriptor's FNV-1a-64
 //            covers header and body.
 //
+// validity_mask: invalidate_min_ply(1) / invalidate_samples(2) make the edge's minimum
+// root ply / sample game-id bounds unknown after a retraction; candidates(4) carries a
+// contribution that is min/max-combined with the base while the base is still exact;
+// exact_extrema(8) carries the EXACT extrema of the games that remain once a retraction
+// has been applied (always together with candidates): they replace the base's values, which
+// stay exact instead of being invalidated. Only a retraction (negative frequency delta) may
+// carry it, and never together with an invalidate bit.
+//
 // operation_flags: metadata(1) = result/rating deltas only; membership(2) = the
 // run may add or remove games (source/node/frequency deltas, validity-mask
 // bits). Unknown bits are rejected. A run without the membership bit must have
@@ -52,7 +62,8 @@ inline constexpr std::uint32_t tree_patch_operation_mask = 3;
 inline constexpr std::uint64_t tree_patch_mask_invalidate_min_ply = 1;
 inline constexpr std::uint64_t tree_patch_mask_invalidate_samples = 2;
 inline constexpr std::uint64_t tree_patch_mask_candidates = 4;
-inline constexpr std::uint64_t tree_patch_mask_all = 7;
+inline constexpr std::uint64_t tree_patch_mask_exact_extrema = 8;
+inline constexpr std::uint64_t tree_patch_mask_all = 15;
 
 // A single run file larger than this is refused before it is read.
 inline constexpr std::uint64_t tree_patch_max_encoded_bytes = std::uint64_t {64} << 20U;
@@ -147,6 +158,14 @@ struct tree_patch_expectation
 
 // ── Patch producer ───────────────────────────────────────────────────────────
 
+// The exact extrema of one edge over a set of games.
+struct tree_exact_extrema
+{
+    std::uint16_t min_root_ply {};
+    std::uint32_t sample_min {};
+    std::uint32_t sample_max {};
+};
+
 struct tree_game_state
 {
     game_id id {};
@@ -155,6 +174,10 @@ struct tree_game_state
     std::optional<std::int32_t> white_elo;
     std::optional<std::int32_t> black_elo;
 };
+
+// Resolves the extrema of an edge once the game being removed is gone; see
+// tree_patch_builder::add_game_removal.
+using tree_removal_extrema_resolver = std::function<result<std::optional<tree_exact_extrema>>(game_tree_edge const&)>;
 
 // Accumulates per-game contributions into one coalesced run using the shared
 // tree_contribution_enumerator (so traversal and dedup are never reimplemented)
@@ -174,10 +197,19 @@ class tree_patch_builder
     // covered edge; node and source counts do not change. The two states must
     // describe the same moves.
     [[nodiscard]] auto add_metadata_edit(tree_game_state const& before, tree_game_state const& after) -> result<void>;
-    // Whole-game membership: +C with extrema candidates (insert) or -C with
-    // extrema invalidation (remove), and +/-1 on every covered root.
+    // Whole-game membership: +C with extrema candidates (insert) or -C (remove),
+    // and +/-1 on every covered root.
+    //
+    // A removal without `resolver` invalidates the extrema the game could have
+    // witnessed on every edge it uses. With one, the resolver is asked for each
+    // edge, in the enumerator's order: it returns the exact extrema of the games
+    // that remain (the edge then carries them, replacing the base's), or nullopt
+    // when the game was no witness or the edge disappears with it (no extrema
+    // information is recorded). Only one such removal fits a run, and no other
+    // membership operation may share it: the resolver describes the corpus with
+    // that single game removed.
     [[nodiscard]] auto add_game_insertion(tree_game_state const& game) -> result<void>;
-    [[nodiscard]] auto add_game_removal(tree_game_state const& game) -> result<void>;
+    [[nodiscard]] auto add_game_removal(tree_game_state const& game, tree_removal_extrema_resolver const& resolver = {}) -> result<void>;
 
     // Finishes the run for (from, to]. An empty run is valid: it certifies an
     // epoch whose numerical delta is empty.

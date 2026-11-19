@@ -435,7 +435,8 @@ TEST_CASE("opening_stats::query returns empty statistics for missing positions",
     CHECK(stats->continuations.empty());
 }
 
-TEST_CASE("opening_stats::query fails closed on a game-count mismatch and recovers after rebuild", "[motif-search][opening_stats]")
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear sequence.
+TEST_CASE("opening_stats::query serves a removal immediately and a rebuild answers identically", "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"orphaned-row"};
 
@@ -461,32 +462,32 @@ TEST_CASE("opening_stats::query fails closed on a game-count mismatch and recove
     auto rebuilt = manager->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
-    // Removing a game directly through the SQLite store (bypassing
-    // database_manager::remove_game(), which would mark postings stale
-    // immediately) changes the canonical game count without touching
-    // postings at all. The next query must detect the mismatch and fail
-    // closed rather than silently serving an index that no longer describes
-    // canonical SQLite.
+    // remove_game() on covering postings retracts the game incrementally: the very next query is exact, without a rebuild, and no
+    // longer sees the removed game.
     auto removed = manager->remove_game(*removed_game_id);
     REQUIRE(removed.has_value());
 
-    auto stale_stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
-    REQUIRE_FALSE(stale_stats.has_value());
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear check.
+    auto const check_only_surviving_game = [&]() -> void
+    {
+        auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
+        REQUIRE(stats.has_value());
+        CHECK(stats->total_games == 1);
+        REQUIRE(stats->continuations.size() == 1);
+
+        auto const& continuation = stats->continuations.front();
+        CHECK(continuation.san == "Nc3");
+        CHECK(continuation.frequency == 1);
+        CHECK(continuation.white_wins == 0);
+        CHECK(continuation.draws == 0);
+        CHECK(continuation.black_wins == 1);
+        CHECK(continuation.eco == std::optional<std::string> {"C25"});
+        CHECK(continuation.opening_name == std::optional<std::string> {"Vienna Game"});
+    };
+    check_only_surviving_game();
 
     REQUIRE(manager->rebuild_position_postings().has_value());
-
-    auto stats = motif::search::opening_stats::query(*manager, hash_after_sans({"e4", "e5"}));
-    REQUIRE(stats.has_value());
-    REQUIRE(stats->continuations.size() == 1);
-
-    auto const& continuation = stats->continuations.front();
-    CHECK(continuation.san == "Nc3");
-    CHECK(continuation.frequency == 1);
-    CHECK(continuation.white_wins == 0);
-    CHECK(continuation.draws == 0);
-    CHECK(continuation.black_wins == 1);
-    CHECK(continuation.eco == std::optional<std::string> {"C25"});
-    CHECK(continuation.opening_name == std::optional<std::string> {"Vienna Game"});
+    check_only_surviving_game();
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -641,7 +642,7 @@ TEST_CASE("opening_stats::query total_games excludes duplicate position rows", "
     CHECK(std::cmp_equal(stats_after->total_games, *game_count));
 }
 
-TEST_CASE("delete_by_game_id removes position rows and total_games stays consistent", "[motif-db][position_postings]")
+TEST_CASE("a removal retracts the game's position rows immediately and total_games stays consistent", "[motif-db][position_postings]")
 {
     tmp_dir const tdir {"delete_consistency"};
 
@@ -676,14 +677,16 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
     auto const delete_res = manager->remove_game(*game1_id);
     REQUIRE(delete_res.has_value());
 
-    // remove_game() marks postings stale immediately: the query fails closed
-    // until an explicit rebuild rather than serving a game count that no
-    // longer matches canonical SQLite.
+    // remove_game() retracts the game incrementally: the query answers at once with the remaining game's count, and an explicit rebuild
+    // agrees.
     auto stats_immediately_after = motif::search::opening_stats::query(*manager, start_hash);
-    REQUIRE_FALSE(stats_immediately_after.has_value());
+    REQUIRE(stats_immediately_after.has_value());
+    CHECK(stats_immediately_after->total_games == 1);
+    REQUIRE(stats_immediately_after->continuations.size() == 1);
+    CHECK(stats_immediately_after->continuations.front().san == "e4");
+    CHECK(stats_immediately_after->continuations.front().frequency == 1);
 
     REQUIRE(manager->rebuild_position_postings().has_value());
-
     auto stats_after = motif::search::opening_stats::query(*manager, start_hash);
     REQUIRE(stats_after.has_value());
     CHECK(stats_after->total_games == 1);
@@ -692,7 +695,8 @@ TEST_CASE("delete_by_game_id removes position rows and total_games stays consist
     CHECK(stats_after->continuations.front().frequency == 1);
 }
 
-TEST_CASE("opening_stats::query fails closed for a game removed outside remove_game() until rebuilt", "[motif-search][opening_stats]")
+TEST_CASE("opening_stats::query counts only the remaining game after a removal, before and after a rebuild",
+          "[motif-search][opening_stats]")
 {
     tmp_dir const tdir {"orphan_total_games"};
 
@@ -716,16 +720,16 @@ TEST_CASE("opening_stats::query fails closed for a game removed outside remove_g
     auto rebuilt = manager->rebuild_position_postings();
     REQUIRE(rebuilt.has_value());
 
-    // Removing game1 directly through the SQLite store -- bypassing
-    // database_manager::remove_game(), which would mark postings stale
-    // immediately -- silently changes the canonical game count under
-    // postings' feet. The next query must detect the count mismatch and
-    // fail closed rather than serving stale, orphaned data.
+    // Removing game1 retracts it incrementally: the very next query already excludes it, and a rebuild changes nothing.
     auto removed = manager->remove_game(*game1_id);
     REQUIRE(removed.has_value());
 
-    auto stale_stats = motif::search::opening_stats::query(*manager, start_hash);
-    REQUIRE_FALSE(stale_stats.has_value());
+    auto immediate = motif::search::opening_stats::query(*manager, start_hash);
+    REQUIRE(immediate.has_value());
+    CHECK(immediate->total_games == 1);
+    REQUIRE(immediate->continuations.size() == 1);
+    CHECK(immediate->continuations.front().san == "e4");
+    CHECK(immediate->continuations.front().frequency == 1);
 
     REQUIRE(manager->rebuild_position_postings().has_value());
 
@@ -1768,15 +1772,16 @@ TEST_CASE("a canonical mutation invalidates same-count postings after replacemen
     REQUIRE(old_summary.has_value());
     REQUIRE(old_summary->has_value());
 
-    // remove_game() advances the mutation sequence immediately; the replacement
-    // game below brings the canonical game count back to 1 -- the same count the
-    // still-published (but now superseded) postings generation had -- so a
-    // count check alone would wrongly consider them valid. The snapshot keeps
-    // describing the old files, but its covered sequence is behind, so every
-    // position query is refused until a rebuild.
+    // remove_game() on covering postings publishes incrementally, so the postings stay usable and already describe one game fewer. The
+    // replacement game below brings the canonical game count back to 1 -- the same count the original postings generation had -- so a
+    // count check alone would wrongly consider the now-superseded postings valid. The insert leaves the snapshot's covered sequence
+    // behind, so every position query is refused until a rebuild.
     REQUIRE(manager->remove_game(*old_game).has_value());
     CHECK(manager->manifest().postings() != nullptr);
-    CHECK_FALSE(manager->derived_index_status()->postings_usable);
+    CHECK(manager->derived_index_status()->postings_usable);
+    auto const old_after_removal = motif::search::opening_stats::query(*manager, old_hash);
+    REQUIRE(old_after_removal.has_value());
+    CHECK(old_after_removal->total_games == 0U);
     REQUIRE(manager
                 ->insert_game(make_game({.sans = {"d4", "d5", "c4"},
                                          .result = "0-1",

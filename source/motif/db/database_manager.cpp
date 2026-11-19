@@ -1894,7 +1894,8 @@ auto load_snapshot_readers(std::filesystem::path const& dir, db_manifest const& 
                                   metadata_artifact_identity {.bundle_id = *bundle_id, .index_semantics = index_semantics_version});
         // Never serve the embedded baseline as if it were current, and never
         // apply only a surviving suffix: a bad chain disables postings.
-        if (!overlay || !postings.apply_metadata_overlay(*overlay)) {
+        // The live count after the tombstones must be the snapshot's canonical count.
+        if (!overlay || !postings.apply_metadata_overlay(*overlay) || postings.indexed_game_count() != manifest.canonical_game_count) {
             outcome.metadata_chain_invalid = true;
             // apply_metadata_overlay is all-or-nothing, so the reader is still
             // the pure baseline when only the overlay failed.
@@ -2170,9 +2171,10 @@ auto validate_tree_candidate(std::filesystem::path const& path, std::uint64_t co
 // Folds the live tree chain plus one more run into a single checkpoint at path.
 auto write_folded_tree_checkpoint(composite_opening_tree const& live,
                                   std::vector<tree_patch_run_ptr> const& runs,
+                                  tree_child_frequency_mode const mode,
                                   std::filesystem::path const& path) -> result<void>
 {
-    auto folded = fold_tree_chain(live.checkpoint(), runs, live.child_frequency_mode(), path);
+    auto folded = fold_tree_chain(live.checkpoint(), runs, mode, path);
     if (!folded) {
         return tl::unexpected {folded.error()};
     }
@@ -2359,7 +2361,16 @@ auto database_manager::publish_prepared(snapshot_payload payload,
     // build_manifest validates the payload structure (chains reach the covered
     // sequence, intervals are contiguous, every artifact is referenced once).
     // An edit's snapshot covers the sequence its own transaction advances to.
-    auto next = build_manifest(gate->generation, gate->mutation_seq + (edit != nullptr ? 1U : 0U), gate->game_count, std::move(payload));
+    // The row stamps the canonical game count AFTER the edit.
+    auto stamped_games = gate->game_count;
+    if (edit != nullptr && edit->game_count_delta != 0) {
+        auto const adjusted = static_cast<std::int64_t>(stamped_games) + edit->game_count_delta;
+        if (adjusted < 0) {
+            return io_failure_because("the edit would leave a negative canonical game count");
+        }
+        stamped_games = static_cast<std::uint64_t>(adjusted);
+    }
+    auto next = build_manifest(gate->generation, gate->mutation_seq + (edit != nullptr ? 1U : 0U), stamped_games, std::move(payload));
     if (!next) {
         return tl::unexpected {next.error()};
     }
@@ -2433,11 +2444,27 @@ auto database_manager::repair_metadata_chain(position_postings baseline) -> resu
     baseline.for_each_metadata([&baseline_images](position_metadata_after_image const& image) -> void
                                { baseline_images.push_back(image); });
 
+    // Baseline documents the canonical store no longer has are removed games: their
+    // tombstones are part of the repaired checkpoint, so a chain lost after removals
+    // still reconstructs exactly. A canonical game the baseline lacks (an insert) is
+    // not repairable here: the full rebuild takes over.
     auto overrides = std::vector<position_metadata_after_image> {};
     auto cursor = std::size_t {0};
+    auto const retire_baseline_document = [&](std::size_t const index) -> void
+    {
+        overrides.push_back(position_metadata_after_image {.id = baseline_images[index].id,
+                                                           .content_revision = 1,
+                                                           .result = 0,
+                                                           .white_elo = std::nullopt,
+                                                           .black_elo = std::nullopt,
+                                                           .retired = true});
+    };
     auto const scanned = store_->for_each_metadata_row(
         [&](canonical_metadata_row const& row) -> result<void>
         {
+            while (cursor < baseline_images.size() && baseline_images[cursor].id < row.id) {
+                retire_baseline_document(cursor++);
+            }
             if (cursor >= baseline_images.size() || baseline_images[cursor].id != row.id || row.content_revision != 1U) {
                 return tl::unexpected {error {error_code::io_failure, "canonical membership differs from the verified baseline"}};
             }
@@ -2457,8 +2484,8 @@ auto database_manager::repair_metadata_chain(position_postings baseline) -> resu
     if (!scanned) {
         return tl::unexpected {scanned.error()};
     }
-    if (cursor != baseline_images.size()) {
-        return tl::unexpected {error {error_code::io_failure, "canonical membership differs from the verified baseline"}};
+    while (cursor < baseline_images.size()) {
+        retire_baseline_document(cursor++);
     }
 
     auto artifact = metadata_artifact {.identity = {.bundle_id = *bundle_id, .index_semantics = index_semantics_version},
@@ -2855,7 +2882,8 @@ auto require_free_space(std::uint64_t const needed_bytes, std::filesystem::path 
 
 }  // namespace
 
-// Working state of one indexed patch, threaded through its phases.
+// Working state of one indexed edit (a patch or a removal), threaded through its
+// phases.
 struct database_manager::indexed_patch_context
 {
     std::uint64_t base_seq {};
@@ -2864,9 +2892,18 @@ struct database_manager::indexed_patch_context
     std::uint64_t segment_source_seq {};
     bool tree_usable {false};
     identity_bytes bundle_id {};
+    // The metadata after-image of the edit: the corrected values, or the
+    // tombstone of a removal.
     position_metadata_after_image image {};
     position_metadata_slot slot {};
+    // The installed postings reader, set by begin_indexed_edit once it has checked
+    // that one is installed.
+    position_postings const* postings {nullptr};
     patch_report report {};
+    // The child-frequency mode the edit's tree is published in (a removal needs
+    // the postings mode) and the canonical game count the snapshot stamps.
+    tree_child_frequency_mode tree_mode {tree_child_frequency_mode::checkpoint};
+    std::uint64_t games_after {};
     // The installed tree, set only when the edit contributes a tree run.
     composite_opening_tree const* live_tree {nullptr};
     std::optional<tree_patch_run> tree_run;
@@ -2880,11 +2917,46 @@ struct database_manager::indexed_patch_context
     std::vector<staged_derived_artifact> staged_files;
 };
 
-// ── Gates: nothing has been written, nothing is staged ───────────────────────
-auto database_manager::prepare_indexed_patch(prepared_metadata_patch const& plan, indexed_patch_context& ctx) const -> result<void>
+// ── Gates every indexed edit shares: nothing has been written ────────────────
+auto database_manager::begin_indexed_edit(indexed_patch_context& ctx, derived_index_report const& status, bool const removal) const
+    -> result<void>
 {
     constexpr auto int64_max = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
 
+    auto const base_seq = status.mutation_seq;
+    if (manifest_.publication_generation >= int64_max || base_seq >= int64_max - 1U) {
+        return io_failure_because("publication generation or mutation sequence exhausted");
+    }
+    auto const* segment = manifest_.postings();
+    auto const bundle_id = identity_from_hex(manifest_.payload.bundle.id);
+    if (segment == nullptr || !bundle_id || !position_postings_) {
+        return io_failure_because("the installed snapshot is not a complete postings snapshot");
+    }
+    if (removal && manifest_.canonical_game_count == 0U) {
+        return io_failure_because("the snapshot covers no game to remove");
+    }
+    ctx.base_seq = base_seq;
+    ctx.to_seq = base_seq + 1U;
+    ctx.generation = manifest_.publication_generation + 1U;
+    ctx.segment_source_seq = segment->source_mutation_seq;
+    ctx.tree_usable = status.tree_usable;
+    ctx.bundle_id = *bundle_id;
+    ctx.postings = &*position_postings_;
+    // A membership run (a removed game) is only valid under the postings mode:
+    // from then on every child count is resolved from the live postings.
+    ctx.tree_mode = tree_child_frequency_mode::checkpoint;
+    if (removal) {
+        ctx.tree_mode = tree_child_frequency_mode::postings;
+    } else if (composite_tree_) {
+        ctx.tree_mode = composite_tree_->child_frequency_mode();
+    }
+    ctx.games_after = manifest_.canonical_game_count - (removal ? 1U : 0U);
+    return {};
+}
+
+// ── Gates: nothing has been written, nothing is staged ───────────────────────
+auto database_manager::prepare_indexed_patch(prepared_metadata_patch const& plan, indexed_patch_context& ctx) const -> result<void>
+{
     if (dir_.empty() || !store_) {
         return tl::unexpected {error_code::invalid_argument};
     }
@@ -2903,14 +2975,8 @@ auto database_manager::prepare_indexed_patch(prepared_metadata_patch const& plan
         return tl::unexpected {error {error_code::index_stale,
                                       "the position index does not cover the bundle; rebuild it before correcting a result or rating"}};
     }
-    auto const base_seq = status->mutation_seq;
-    if (manifest_.publication_generation >= int64_max || base_seq >= int64_max - 1U) {
-        return io_failure_because("publication generation or mutation sequence exhausted");
-    }
-    auto const* segment = manifest_.postings();
-    auto const bundle_id = identity_from_hex(manifest_.payload.bundle.id);
-    if (segment == nullptr || !bundle_id || !position_postings_) {
-        return io_failure_because("the installed snapshot is not a complete postings snapshot");
+    if (auto begun = begin_indexed_edit(ctx, *status, /*removal=*/false); !begun) {
+        return begun;
     }
     if (plan.content_revision != 1U) {
         return io_failure_because("unsupported content revision");
@@ -2925,18 +2991,38 @@ auto database_manager::prepare_indexed_patch(prepared_metadata_patch const& plan
     }
     auto const image = position_metadata_after_image {
         .id = plan.id, .content_revision = 1, .result = encode_result_code(plan.after.result), .white_elo = *white, .black_elo = *black};
-    auto const slot = position_postings_->prepare_metadata_update(image);
+    auto const slot = ctx.postings->prepare_metadata_update(image);
     if (!slot) {
         return tl::unexpected {slot.error()};
     }
 
-    ctx.base_seq = base_seq;
-    ctx.to_seq = base_seq + 1U;
-    ctx.generation = manifest_.publication_generation + 1U;
-    ctx.segment_source_seq = segment->source_mutation_seq;
-    ctx.tree_usable = status->tree_usable;
-    ctx.bundle_id = *bundle_id;
     ctx.image = image;
+    ctx.slot = *slot;
+    if (injected(fault::point::before_build, fault::artifact_kind::edit, ctx.generation)) {
+        return io_failure_because("injected failure before the edit's artifacts are built");
+    }
+    return {};
+}
+
+// ── Removal gates: the tombstone and its resident slot ───────────────────────
+auto database_manager::prepare_indexed_removal(prepared_game_removal const& plan,
+                                               derived_index_report const& status,
+                                               indexed_patch_context& ctx) const -> result<void>
+{
+    if (auto begun = begin_indexed_edit(ctx, status, /*removal=*/true); !begun) {
+        return begun;
+    }
+    if (plan.content_revision != 1U) {
+        return io_failure_because("unsupported content revision");
+    }
+    ctx.image = position_metadata_after_image {
+        .id = plan.id, .content_revision = 1, .result = 0, .white_elo = std::nullopt, .black_elo = std::nullopt, .retired = true};
+    // The canonical game exists, so its document must be live in the segment; anything
+    // else means the index and SQLite disagree, which is never reported as not_found.
+    auto const slot = ctx.postings->prepare_metadata_update(ctx.image);
+    if (!slot) {
+        return io_failure_because("the game is not a live document of the postings segment");
+    }
     ctx.slot = *slot;
     if (injected(fault::point::before_build, fault::artifact_kind::edit, ctx.generation)) {
         return io_failure_because("injected failure before the edit's artifacts are built");
@@ -2985,6 +3071,112 @@ auto database_manager::build_patch_tree_run(prepared_metadata_patch const& plan,
         ctx.report.replayed_games = 1;
         ctx.report.replayed_plies = record->moves.size();
     }
+    return {};
+}
+
+namespace
+{
+
+// The extrema of the edge a removed game used, once the game is gone, when the game
+// could have witnessed them: the merged tree says which of the edge's minimum root
+// ply and sample bounds the game may own, and the postings scan recomputes exactly
+// those from the games that remain. nullopt means the game owned none of them (the
+// edge keeps its extrema) or was the edge's only game (the edge disappears).
+// `scans` counts the postings scans made.
+auto removal_edge_extrema(composite_opening_tree const& tree,
+                          position_postings const& postings,
+                          game_id const removed,
+                          game_tree_edge const& edge,
+                          std::uint64_t& scans) -> result<std::optional<tree_exact_extrema>>
+{
+    auto const node = tree.query_raw_node(zobrist_hash {edge.root_hash});
+    if (!node) {
+        return tl::unexpected {node.error()};
+    }
+    if (!node->has_value()) {
+        return io_failure_because("the removed game's root is missing from the opening tree");
+    }
+    auto const key = tree_edge_key {.encoded_move = edge.encoded_move, .child_hash = edge.child_hash};
+    auto const& edges = node->value().edges;
+    auto const found = std::ranges::lower_bound(edges, key, {}, &raw_edge::key);
+    if (found == edges.end() || found->key != key || found->stats.frequency < 1) {
+        return io_failure_because("the removed game's edge is missing from the opening tree");
+    }
+    if (found->stats.frequency == 1) {
+        return std::optional<tree_exact_extrema> {};
+    }
+    // An exact base minimum cannot exceed the game's own ply, and the game owns it when they are equal.
+    auto const exact_min = found->min_root_ply_valid;
+    auto const exact_samples = found->sample_bounds_valid;
+    auto const want_min = !exact_min || edge.min_root_ply <= found->min_root_ply;
+    auto const want_low = !exact_samples || removed.value == found->sample_min;
+    auto const want_high = !exact_samples || removed.value == found->sample_max;
+    if (!want_min && !want_low && !want_high) {
+        return std::optional<tree_exact_extrema> {};
+    }
+    ++scans;
+    auto const scanned = postings.edge_extrema(
+        position_edge_scan {.root = zobrist_hash {edge.root_hash},
+                            .child = zobrist_hash {edge.child_hash},
+                            .excluded = removed,
+                            .max_root_ply = tree.max_root_ply(),
+                            .any_root_ply = edge.root_hash == opening_tree_start_hash(),
+                            .sample_ceiling = exact_samples ? std::optional<game_id> {game_id {found->sample_max}} : std::nullopt,
+                            .want_min_ply = want_min,
+                            .min_ply_floor = exact_min ? found->min_root_ply : std::uint16_t {0},
+                            .want_sample_min = want_low,
+                            .want_sample_max = want_high});
+    if (!scanned) {
+        return tl::unexpected {scanned.error()};
+    }
+    if (!scanned->has_value()) {
+        return io_failure_because("the opening tree counts a game the postings do not hold");
+    }
+    auto const& extrema = scanned->value();
+    return std::optional<tree_exact_extrema> {tree_exact_extrema {.min_root_ply = want_min ? extrema.min_root_ply : found->min_root_ply,
+                                                                  .sample_min = want_low ? extrema.sample_min.value : found->sample_min,
+                                                                  .sample_max = want_high ? extrema.sample_max.value : found->sample_max}};
+}
+
+}  // namespace
+
+// ── The one-game retraction of a removal, only when a usable tree exists ─────
+auto database_manager::build_removal_tree_run(prepared_game_removal const& plan, indexed_patch_context& ctx) const -> result<void>
+{
+    auto const* tree_descriptor_now = manifest_.tree();
+    if (!ctx.tree_usable || !composite_tree_ || tree_descriptor_now == nullptr) {
+        return {};
+    }
+    ctx.live_tree = &*composite_tree_;
+    auto builder = tree_patch_builder {tree_patch_identity {.bundle_id = ctx.bundle_id,
+                                                            .index_semantics = index_semantics_version,
+                                                            .canonical_start_hash = opening_tree_start_hash(),
+                                                            .max_root_ply = tree_descriptor_now->max_root_ply}};
+    // Negative numeric contributions on every distinct covered edge and -1 on every
+    // covered root. An edge whose minimum root ply or sample bounds the game may have
+    // witnessed carries the exact extrema of the games that remain (from the postings,
+    // not from a replay), so the merged tree stays exact and keeps answering queries.
+    auto const& postings = *ctx.postings;
+    auto const resolver =
+        tree_removal_extrema_resolver {[&](game_tree_edge const& edge) -> result<std::optional<tree_exact_extrema>>
+                                       { return removal_edge_extrema(*ctx.live_tree, postings, plan.id, edge, ctx.report.extrema_scans); }};
+    if (auto removed = builder.add_game_removal(tree_game_state {.id = plan.id,
+                                                                 .moves = plan.moves,
+                                                                 .result = encode_result_code(plan.before.result),
+                                                                 .white_elo = plan.before.white_elo,
+                                                                 .black_elo = plan.before.black_elo},
+                                                resolver);
+        !removed)
+    {
+        return tl::unexpected {removed.error()};
+    }
+    auto built = builder.build(ctx.base_seq, ctx.to_seq);
+    if (!built) {
+        return tl::unexpected {built.error()};
+    }
+    ctx.tree_run = std::move(*built);
+    ctx.report.replayed_games = 1;
+    ctx.report.replayed_plies = plan.moves.size();
     return {};
 }
 
@@ -3051,7 +3243,7 @@ auto database_manager::extend_patch_tree_reader(indexed_patch_context& ctx) cons
     if (injected(fault::point::before_artifact_validation, fault::artifact_kind::edit, ctx.generation)) {
         return io_failure_because("injected failure before the tree run is validated");
     }
-    auto extended = ctx.live_tree->with_appended_run(ctx.tree_run_ptr, chain_limits_.hard_decoded_bytes);
+    auto extended = ctx.live_tree->with_appended_run(ctx.tree_run_ptr, chain_limits_.hard_decoded_bytes, ctx.tree_mode);
     if (!extended) {
         return tl::unexpected {extended.error()};
     }
@@ -3143,6 +3335,7 @@ auto database_manager::stage_patch_tree(indexed_patch_context& ctx) -> result<vo
         return {};
     }
     auto& tree_payload = *ctx.payload.tree;
+    tree_payload.child_frequency_mode = ctx.tree_mode;
     if (ctx.fold_tree) {
         return stage_folded_tree(ctx, tree_payload);
     }
@@ -3166,7 +3359,7 @@ auto database_manager::stage_folded_tree(indexed_patch_context& ctx, tree_descri
     auto descriptor = stage_patch_artifact(ctx,
                                            derived_artifact_family::tree_checkpoint,
                                            [&ctx, &runs](std::filesystem::path const& path) -> result<void>
-                                           { return write_folded_tree_checkpoint(*ctx.live_tree, runs, path); });
+                                           { return write_folded_tree_checkpoint(*ctx.live_tree, runs, ctx.tree_mode, path); });
     if (!descriptor) {
         return tl::unexpected {descriptor.error()};
     }
@@ -3176,34 +3369,28 @@ auto database_manager::stage_folded_tree(indexed_patch_context& ctx, tree_descri
     tree_payload.patch_runs.clear();
     // Validate the final-named checkpoint before committing its snapshot.
     ctx.readers.tree_loader = make_checkpoint_loader(checkpoint_loader_spec {.final_path = ctx.staged_files.back().final_path,
-                                                                             .mode = ctx.live_tree->child_frequency_mode(),
+                                                                             .mode = ctx.tree_mode,
                                                                              .decoded_byte_cap = chain_limits_.hard_decoded_bytes,
-                                                                             .source_games = manifest_.canonical_game_count,
+                                                                             .source_games = ctx.games_after,
                                                                              .generation = ctx.generation});
     ctx.report.tree_folded = true;
     return {};
 }
 
-// The index-relevant half of an edit. Everything below runs under the generation
-// lock and writes nothing canonical until the one FULL transaction:
-//   prepare   gates, metadata slot, one-game contribution (only with a tree),
-//             admission (append, or fold when a hard cap would be crossed)
+// The shared tail of an indexed edit (a patch or a removal). Everything below runs
+// under the generation lock and writes nothing canonical until the one FULL
+// transaction:
+//   admit     append each chain, or fold it when a hard cap would be crossed
 //   install   random exclusive staging, fsync, no-replace rename, directory fsync
 //             (publish_prepared)
-//   commit    canonical UPDATE(s) + single sequence advance + snapshot row, one
+//   commit    canonical write + single sequence advance + snapshot row, one
 //             COMMIT; ambiguous COMMIT reconciled against the stored row
 //   install   noexcept slot/tree/payload swap, data revision, manifest mirror, GC
-auto database_manager::publish_indexed_patch(prepared_metadata_patch const& plan) -> result<void>
+auto database_manager::finish_indexed_edit(indexed_patch_context& ctx,
+                                           canonical_edit_steps steps,
+                                           std::int64_t const game_count_delta,
+                                           patch_report& report) -> result<void>
 {
-    auto const lock = std::scoped_lock {generation_mutex_};
-    auto ctx = indexed_patch_context {};
-
-    if (auto prepared = prepare_indexed_patch(plan, ctx); !prepared) {
-        return prepared;
-    }
-    if (auto built = build_patch_tree_run(plan, ctx); !built) {
-        return built;
-    }
     if (injected(fault::point::after_build, fault::artifact_kind::edit, ctx.generation)) {
         return io_failure_because("injected failure after the edit's artifacts are built");
     }
@@ -3228,11 +3415,7 @@ auto database_manager::publish_indexed_patch(prepared_metadata_patch const& plan
     }
 
     // ── Publish: durable artifacts, ONE FULL transaction, install ────────────
-    auto edit = prepared_edit {
-        .steps = canonical_edit_steps {.base_mutation_seq = ctx.base_seq,
-                                       .apply = [this, &plan]() -> result<void> { return store_->apply_metadata_patch(plan); },
-                                       .advance = [this]() -> result<void> { return store_->advance_mutation_seq(); }},
-        .slot = ctx.slot};
+    auto edit = prepared_edit {.steps = std::move(steps), .slot = ctx.slot, .game_count_delta = game_count_delta};
     // From here publish_prepared owns the staged files (it removes them on a
     // failure before COMMIT and keeps them when the outcome is unknown).
     cleanup_staged.release();
@@ -3243,8 +3426,30 @@ auto database_manager::publish_indexed_patch(prepared_metadata_patch const& plan
     ctx.report.published = true;
     ctx.report.tree_runs = composite_tree_ ? composite_tree_->runs().size() : 0U;
     ctx.report.metadata_runs = manifest_.payload.metadata.runs.size();
-    last_patch_report_ = ctx.report;
+    report = ctx.report;
     return {};
+}
+
+// The index-relevant half of a result/rating patch: prepare the derived state
+// (gates, metadata slot, one-game contribution only with a tree), then finish.
+auto database_manager::publish_indexed_patch(prepared_metadata_patch const& plan) -> result<void>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    auto ctx = indexed_patch_context {};
+
+    if (auto prepared = prepare_indexed_patch(plan, ctx); !prepared) {
+        return prepared;
+    }
+    if (auto built = build_patch_tree_run(plan, ctx); !built) {
+        return built;
+    }
+    return finish_indexed_edit(
+        ctx,
+        canonical_edit_steps {.base_mutation_seq = ctx.base_seq,
+                              .apply = [this, &plan]() -> result<void> { return store_->apply_metadata_patch(plan); },
+                              .advance = [this]() -> result<void> { return store_->advance_mutation_seq(); }},
+        0,
+        last_patch_report_);
 }
 
 auto database_manager::patch_game_metadata(game_id const game_key, game_patch const& patch) -> result<void>
@@ -3278,14 +3483,59 @@ auto database_manager::patch_game_metadata(game_id const game_key, game_patch co
     return publish_indexed_patch(*plan);
 }
 
+// The index-relevant half of remove_game: the tombstone and, only with a usable
+// tree, the game's moves for the one-game tree retraction (no other game is
+// replayed), then the shared tail; the canonical DELETE runs inside the snapshot
+// transaction.
+auto database_manager::publish_indexed_removal(game_id const game_key, derived_index_report const& status) -> result<void>
+{
+    auto const lock = std::scoped_lock {generation_mutex_};
+    auto const with_tree = status.tree_usable && composite_tree_.has_value() && manifest_.tree() != nullptr;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- the caller checked store_.
+    auto plan = store_->prepare_removal(game_key, with_tree);
+    if (!plan) {
+        return tl::unexpected {plan.error()};
+    }
+    auto ctx = indexed_patch_context {};
+    if (auto prepared = prepare_indexed_removal(*plan, status, ctx); !prepared) {
+        return prepared;
+    }
+    if (auto built = build_removal_tree_run(*plan, ctx); !built) {
+        return built;
+    }
+    return finish_indexed_edit(ctx,
+                               canonical_edit_steps {.base_mutation_seq = ctx.base_seq,
+                                                     .apply = [this, &plan]() -> result<void> { return store_->apply_removal(*plan); },
+                                                     .advance = [this]() -> result<void> { return store_->advance_mutation_seq(); }},
+                               -1,
+                               last_removal_report_);
+}
+
 auto database_manager::remove_game(game_id const game_key) -> result<void>
 {
     auto const lock = std::scoped_lock {generation_mutex_};
+    last_removal_report_ = {};
     if (!store_) {
         return tl::unexpected {error_code::io_failure};
     }
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- store_ presence is checked at function entry.
-    return store_->remove(game_key);
+    // Incremental maintenance needs a quiet connection of our own (no canonical
+    // transaction open or pending) and a snapshot that currently covers the bundle.
+    // Anything else keeps the canonical-only removal: SQLite changes and the indexes
+    // stay stale until the next rebuild, as they always did.
+    if (!dir_.empty() && !store_->has_pending_canonical_change() && sqlite3_get_autocommit(conn_) != 0) {
+        auto const status = coverage_locked();
+        if (!status) {
+            return tl::unexpected {status.error()};
+        }
+        if (status->postings_usable && position_postings_) {
+            return publish_indexed_removal(game_key, *status);
+        }
+    }
+    if (auto removed = store_->remove(game_key); !removed) {
+        return removed;
+    }
+    last_removal_report_.canonical_only = true;
+    return {};
 }
 
 auto database_manager::remove_user_game(game_id const game_key) -> result<void>
@@ -3380,10 +3630,11 @@ auto database_manager::query_unfiltered_opening_stats(zobrist_hash const hash) c
         return exact_postings();
     }
     auto const& tree = *composite_tree_;
-    // The merged tree answers; should it be unable to (an edge whose extrema a
-    // retraction made inexact needs a live witness, or the postings-mode child
-    // count cannot be resolved), exact postings still can -- never a wrong or
-    // missing answer.
+    // The merged tree answers. Its extrema stay exact through every retraction this manager
+    // publishes (a removal carries the exact extrema of the remaining games), but a chain may
+    // also hold an older retraction run that merely invalidated them; a node such an edge sits
+    // in cannot be presented, and only then do exact postings answer instead. Any other tree
+    // failure is an inconsistent index and is reported, not papered over with a replay.
     auto const from_tree = [&]() -> result<std::vector<opening_stat_agg_row>>
     {
         auto resolver = tree_child_frequency_resolver {};
@@ -3401,7 +3652,14 @@ auto database_manager::query_unfiltered_opening_stats(zobrist_hash const hash) c
         if (rows) {
             return rows;
         }
-        return exact_postings();
+        auto const node = tree.query_raw_node(hash);
+        if (node && node->has_value()
+            && std::ranges::any_of((*node)->edges,
+                                   [](raw_edge const& edge) -> bool { return !edge.min_root_ply_valid || !edge.sample_bounds_valid; }))
+        {
+            return exact_postings();
+        }
+        return rows;
     };
     // A complete node (currently only the canonical starting position, see
     // opening_tree_index.cpp's format_version v5 comment) was aggregated from

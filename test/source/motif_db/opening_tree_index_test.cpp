@@ -535,13 +535,15 @@ TEST_CASE("database_manager::rebuild_opening_tree_index rejects equal-count stal
     REQUIRE(first.has_value());
     REQUIRE(manager->rebuild_position_postings().has_value());
 
-    // Delete and reinsert: the canonical game count is back to what the
-    // published postings indexed, but the game set is different.
+    // Remove (an incremental publication that keeps the postings current) and reinsert: the canonical game count is back to what the
+    // original snapshot indexed, but the game set is different and the insert leaves the postings behind the canonical sequence.
     REQUIRE(manager->remove_game(*first).has_value());
+    CHECK(manager->derived_index_status()->postings_usable);
     REQUIRE(manager->insert_game(make_game({.sans = {"d4"}, .result = "0-1", .white_elo = 2000, .black_elo = 1900})).has_value());
+    CHECK_FALSE(manager->derived_index_status()->postings_usable);
     auto const count = manager->store().count_games();
     REQUIRE(count.has_value());
-    CHECK(std::cmp_equal(*count, manager->manifest().postings()->document_count));
+    CHECK(*count == 1);
 
     auto const rebuilt = manager->rebuild_opening_tree_index();
     REQUIRE_FALSE(rebuilt.has_value());

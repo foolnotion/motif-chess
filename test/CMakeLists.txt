@@ -28,6 +28,7 @@ add_executable(motif_db_test
     source/motif_db/composite_snapshot_test.cpp
     source/motif_db/edit_publication_test.cpp
     source/motif_db/edit_failure_test.cpp
+    source/motif_db/removal_publication_test.cpp
 )
 target_link_libraries(motif_db_test PRIVATE motif_db Catch2::Catch2WithMain)
 target_compile_features(motif_db_test PRIVATE cxx_std_23)

@@ -698,7 +698,13 @@ auto validate_manifest(db_manifest const& manifest) -> result<void>
         return fail("built snapshot must reference exactly one postings segment");
     }
     auto const& segment = payload.segments.front();
-    if (segment.document_count != manifest.canonical_game_count || segment.source_mutation_seq > covered) {
+    // Without a metadata chain every document of the segment is a live game. Removed
+    // games are retired documents (tombstones in the chain) that stay in the segment,
+    // so a chain can only lower the live count below the segment's document count; the
+    // exact figure is verified against the chain when the readers load.
+    if (segment.document_count < manifest.canonical_game_count
+        || (payload.metadata.empty() && segment.document_count != manifest.canonical_game_count) || segment.source_mutation_seq > covered)
+    {
         return fail("postings segment disagrees with snapshot coverage");
     }
     auto const metadata_end = validate_chain(segment.source_mutation_seq, payload.metadata.checkpoint, payload.metadata.runs);

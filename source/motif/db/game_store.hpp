@@ -81,6 +81,20 @@ struct prepared_metadata_patch
     [[nodiscard]] auto is_noop() const noexcept -> bool { return !indexed_change && !other_fields; }
 };
 
+// A validated removal of one game: what a manager needs to retract the game
+// from the derived indexes before the canonical DELETE. Producing one writes
+// nothing.
+struct prepared_game_removal
+{
+    game_id id {};
+    std::uint64_t content_revision {};
+    // The stored result and ratings, re-verified when the DELETE runs.
+    indexed_game_metadata before;
+    // The game's moves, loaded only when a derived tree must retract its
+    // contribution (see game_store::prepare_removal).
+    std::vector<std::uint16_t> moves;
+};
+
 // Trims every string field of the patch (ASCII whitespace) and rejects what the
 // contract forbids: an empty white, black, event or date is invalid_argument.
 // An empty site, eco, source_label or notes is kept: it clears the value (an
@@ -259,6 +273,23 @@ class game_store
     // back transaction may have filled; tell cache holders canonical data changed.
     void discard_id_caches() noexcept;
     void note_data_changed() noexcept;
+
+    // ── Removal ─────────────────────────────────────────────────────────────
+    //
+    // Like a metadata patch, a removal has two owners: the standalone remove()
+    // above (the DELETE and the sequence advance in a transaction of its own),
+    // and the database_manager, which prepares, builds the derived state, and
+    // runs apply_removal inside the one FULL-synchronous transaction that also
+    // advances the sequence once and replaces the published snapshot.
+    //
+    // Reads the game's index-relevant metadata (and its moves when
+    // `load_moves`); not_found when the id does not exist. Never writes.
+    auto prepare_removal(game_id game_key, bool load_moves) const -> result<prepared_game_removal>;
+    // The canonical DELETE (game_tag rows cascade; players and events stay),
+    // after re-verifying that the stored game is still the prepared one. Runs
+    // inside the caller's transaction; it does not advance the sequence or
+    // commit. advance_mutation_seq() above is the matching advance.
+    auto apply_removal(prepared_game_removal const& plan) -> result<void>;
     // Moves and indexed fields of one game (the replay input of a one-game tree
     // contribution).
     auto get_replay_record(game_id game_key) const -> result<replay_game_record>;

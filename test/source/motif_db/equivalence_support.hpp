@@ -220,15 +220,95 @@ inline auto probe_hashes(std::vector<model_game> const& corpus, std::mt19937_64&
     return {hashes.begin(), hashes.end()};
 }
 
+// The live game ids a patched bundle reports, one per corpus game (ascending). A fresh rebuild numbers the same corpus 1..N, so its ids
+// are translated back through this list before comparing.
+inline auto remap_matches(std::vector<position_match> matches, std::vector<game_id> const& ids) -> std::vector<position_match>
+{
+    for (auto& match : matches) {
+        match.game_id = ids.at(match.game_id.value - 1U);
+    }
+    return matches;
+}
+
+inline auto contiguous_ids(std::size_t const count) -> std::vector<game_id>
+{
+    auto ids = std::vector<game_id> {};
+    for (std::size_t index = 0; index < count; ++index) {
+        ids.push_back(game_id {static_cast<std::uint32_t>(index + 1U)});
+    }
+    return ids;
+}
+
+// A fresh rebuild numbers the corpus 1..N; the patched bundle keeps its original (gapped) ids. Zero ("no game") stays zero.
+inline auto remap_game_number(std::uint32_t const value, std::vector<game_id> const& ids) -> std::uint32_t
+{
+    return value == 0U ? 0U : ids.at(value - 1U).value;
+}
+
+// Aggregate rows carry two game ids (the lowest and highest game playing a continuation); translate a fresh rebuild's into the patched
+// bundle's id space.
+inline auto remap_rows(std::vector<opening_stat_agg_row> rows, std::vector<game_id> const& ids) -> std::vector<opening_stat_agg_row>
+{
+    for (auto& row : rows) {
+        row.eco_sample_min = game_id {remap_game_number(row.eco_sample_min.value, ids)};
+        row.eco_sample_max = game_id {remap_game_number(row.eco_sample_max.value, ids)};
+    }
+    return rows;
+}
+
+// A merged tree edge of the patched composite against the same edge of a fresh checkpoint. The additive statistics must be equal, and so
+// must the non-additive ones: the minimum root ply and the sample game-id bounds stay certified through every edit and every removal (a
+// removal carries the exact extrema of the remaining games), with sample ids in the patched bundle's id space. A postings child-frequency
+// mode does not trust the cached child frequency, which is resolved from the live postings at presentation.
+inline auto edges_equivalent(raw_edge const& got, raw_edge const& want, std::vector<game_id> const& ids, bool const cached_child_frequency)
+    -> bool
+{
+    if (got.key != want.key || !(got.stats == want.stats)) {
+        return false;
+    }
+    if (!got.min_root_ply_valid || !got.sample_bounds_valid || got.min_root_ply != want.min_root_ply
+        || got.sample_min != remap_game_number(want.sample_min, ids) || got.sample_max != remap_game_number(want.sample_max, ids))
+    {
+        return false;
+    }
+    return !cached_child_frequency || got.child_frequency == want.child_frequency;
+}
+
+inline auto nodes_equivalent(std::vector<raw_node> const& got,
+                             std::vector<raw_node> const& want,
+                             std::vector<game_id> const& ids,
+                             bool const cached_child_frequency) -> bool
+{
+    if (got.size() != want.size()) {
+        return false;
+    }
+    for (std::size_t node = 0; node < got.size(); ++node) {
+        auto const& lhs = got[node];
+        auto const& rhs = want[node];
+        if (lhs.root_hash != rhs.root_hash || lhs.game_count != rhs.game_count || lhs.complete != rhs.complete
+            || lhs.edges.size() != rhs.edges.size())
+        {
+            return false;
+        }
+        for (std::size_t edge = 0; edge < lhs.edges.size(); ++edge) {
+            if (!edges_equivalent(lhs.edges[edge], rhs.edges[edge], ids, cached_child_frequency)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // Every query family on the patched bundle must equal a fresh rebuild from the
 // canonical data, and the unfiltered/Elo answers must equal an independent oracle.
 // One linear sequence of Catch2 assertions per query family; splitting it would scatter the shared fixtures.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-inline void require_equivalent_to_fresh(database_manager& mgr,
-                                        std::filesystem::path const& bundle,
-                                        std::vector<model_game> const& corpus,
-                                        bool const with_tree,
-                                        std::uint64_t const seed)
+inline void require_equivalent_to_fresh_ids(database_manager& mgr,
+                                            std::filesystem::path const& bundle,
+                                            std::vector<model_game> const& corpus,
+                                            std::vector<game_id> const& ids,
+                                            bool const with_tree,
+                                            std::uint64_t const seed)
 {
     auto rng = std::mt19937_64 {seed};
     temp_dir const fresh_dir {"fresh"};
@@ -245,17 +325,21 @@ inline void require_equivalent_to_fresh(database_manager& mgr,
         REQUIRE(composite.has_value());
         auto fresh_index = opening_tree_index::open(fresh_dir.path / "db" / fresh.manifest().tree()->checkpoint.filename);
         REQUIRE(fresh_index.has_value());
-        REQUIRE(collect_nodes(*composite) == collect_nodes(*fresh_index));
+        REQUIRE(nodes_equivalent(collect_nodes(*composite),
+                                 collect_nodes(*fresh_index),
+                                 ids,
+                                 mgr.manifest().tree()->child_frequency_mode == tree_child_frequency_mode::checkpoint));
         REQUIRE(composite->source_game_count() == corpus.size());
     }
 
-    auto all_ids = std::vector<game_id> {};
-    for (std::size_t index = 0; index < corpus.size(); ++index) {
-        all_ids.push_back(game_id {static_cast<std::uint32_t>(index + 1)});
-    }
+    REQUIRE(ids.size() == corpus.size());
+    auto const& all_ids = ids;
+    auto const fresh_all_ids = contiguous_ids(corpus.size());
     auto some_ids = std::vector<game_id> {};
+    auto fresh_some_ids = std::vector<game_id> {};
     for (std::size_t index = 0; index < all_ids.size(); index += 2) {
         some_ids.push_back(all_ids[index]);
+        fresh_some_ids.push_back(fresh_all_ids[index]);
     }
 
     for (auto const hash : probe_hashes(corpus, rng)) {
@@ -265,7 +349,7 @@ inline void require_equivalent_to_fresh(database_manager& mgr,
         auto const want = fresh.query_unfiltered_opening_stats(key);
         REQUIRE(got.has_value());
         REQUIRE(want.has_value());
-        REQUIRE(rows_equal(*got, *want));
+        REQUIRE(rows_equal(*got, remap_rows(*want, ids)));
 
         // The independent oracle agrees on the quantities it defines.
         auto const expected_edges = oracle_edges(corpus, hash);
@@ -292,10 +376,10 @@ inline void require_equivalent_to_fresh(database_manager& mgr,
         }
 
         auto const filtered_got = mgr.query_filtered_opening_stats(key, some_ids);
-        auto const filtered_want = fresh.query_filtered_opening_stats(key, some_ids);
+        auto const filtered_want = fresh.query_filtered_opening_stats(key, fresh_some_ids);
         REQUIRE(filtered_got.has_value());
         REQUIRE(filtered_want.has_value());
-        REQUIRE(rows_equal(*filtered_got, *filtered_want));
+        REQUIRE(rows_equal(*filtered_got, remap_rows(*filtered_want, ids)));
 
         for (auto const width : {25, 100}) {
             auto const dist_got = mgr.query_elo_distribution(key, search_filter {}, width);
@@ -326,12 +410,12 @@ inline void require_equivalent_to_fresh(database_manager& mgr,
         auto const matches_want = fresh.query_position_matches(key);
         REQUIRE(matches_got.has_value());
         REQUIRE(matches_want.has_value());
-        REQUIRE(same_matches(*matches_got, *matches_want));
+        REQUIRE(same_matches(*matches_got, remap_matches(*matches_want, ids)));
         auto const first_got = mgr.query_position_first_matches(key, all_ids);
-        auto const first_want = fresh.query_position_first_matches(key, all_ids);
+        auto const first_want = fresh.query_position_first_matches(key, fresh_all_ids);
         REQUIRE(first_got.has_value());
         REQUIRE(first_want.has_value());
-        REQUIRE(same_matches(*first_got, *first_want));
+        REQUIRE(same_matches(*first_got, remap_matches(*first_want, ids)));
 
         auto list_filter = search_filter {};
         list_filter.position = key;
@@ -344,7 +428,7 @@ inline void require_equivalent_to_fresh(database_manager& mgr,
         REQUIRE(games_got->total_count == games_want->total_count);
         REQUIRE(games_got->games.size() == games_want->games.size());
         for (std::size_t index = 0; index < games_got->games.size(); ++index) {
-            CHECK(games_got->games[index].id == games_want->games[index].id);
+            CHECK(games_got->games[index].id == ids.at(games_want->games[index].id.value - 1U));
             CHECK(games_got->games[index].result == games_want->games[index].result);
             CHECK(games_got->games[index].white_elo == games_want->games[index].white_elo);
         }
@@ -354,7 +438,23 @@ inline void require_equivalent_to_fresh(database_manager& mgr,
         REQUIRE(summary_got.has_value());
         REQUIRE(summary_want.has_value());
         REQUIRE(summary_got->has_value() == summary_want->has_value());
+        if (summary_got->has_value() && summary_want->has_value()) {
+            CHECK(summary_got->value().occurrence_count == summary_want->value().occurrence_count);
+            CHECK(summary_got->value().distinct_game_count == summary_want->value().distinct_game_count);
+            CHECK(summary_got->value().min_ply == summary_want->value().min_ply);
+            CHECK(summary_got->value().max_ply == summary_want->value().max_ply);
+        }
     }
+}
+
+// Every query family on a bundle whose games kept ids 1..N must equal a fresh rebuild.
+inline void require_equivalent_to_fresh(database_manager& mgr,
+                                        std::filesystem::path const& bundle,
+                                        std::vector<model_game> const& corpus,
+                                        bool const with_tree,
+                                        std::uint64_t const seed)
+{
+    require_equivalent_to_fresh_ids(mgr, bundle, corpus, contiguous_ids(corpus.size()), with_tree, seed);
 }
 
 }  // namespace motif_test

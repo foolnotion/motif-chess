@@ -62,10 +62,21 @@ Engine analysis flow:
 
 ## Known Limitations
 
-- an insert, removal or dedup leaves the derived indexes stale (queries fail closed until rebuild); a result or
-  rating correction (`PATCH /api/games/{id}`, `database_manager::patch_game_metadata`) does not: it publishes
-  its derived state incrementally in the same FULL SQLite commit as the canonical edit, but requires the
-  indexes to be current and overwrites the stored value (no undo)
+- an insert or dedup leaves the derived indexes stale (queries fail closed until rebuild); a result or
+  rating correction (`PATCH /api/games/{id}`, `database_manager::patch_game_metadata`) and a removal
+  (`database_manager::remove_game`) do not: each publishes its derived state incrementally in the same FULL
+  SQLite commit as the canonical change, but requires the indexes to be current (a removal while they are
+  stale stays canonical-only and leaves them stale) and a correction overwrites the stored value (no undo).
+  A removed game is a retired document in the immutable postings segment until the next postings rebuild;
+  until then aggregates over positions it reached decode that hash's posting block (the live summary of up to
+  16,384 recently asked hashes is remembered, and a paginated occurrence or game-id listing pages over the
+  live entries and holds only its page, though it still decodes and validates the whole posting block). The
+  tree keeps answering: each tree edge the removed game may have witnessed the minimum root ply or sample
+  game ids of gets the exact extrema of the remaining games, recomputed from a join of two posting blocks,
+  so no node is invalidated and no game is replayed to answer an opening-explorer query. A chain run
+  written by an older writer that only invalidated extrema is still honoured: the nodes it affects are
+  answered from exact postings. Chains that reach their hard cap (64 runs) are still folded synchronously
+  inside the edit that crosses it (a checkpoint-sized write under the generation lock)
 - the Slint shell covers workspace lifecycle, game browsing, board/notation navigation, PGN import, and
   position search/opening-explorer parity; the engine analysis panel from the historical Qt spec has not
   yet been ported

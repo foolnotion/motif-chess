@@ -679,7 +679,8 @@ TEST_CASE("database_manager::rebuild_position_postings indexes every distinct ha
 // ── remove_game
 // ───────────────────────────────────────────────────────────────
 
-TEST_CASE("database_manager::remove_game deletes the SQLite row and marks postings stale", "[motif-db][database_manager]")
+TEST_CASE("database_manager::remove_game deletes the SQLite row and retracts the game without invalidating postings",
+          "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"remove_game"};
 
@@ -696,6 +697,8 @@ TEST_CASE("database_manager::remove_game deletes the SQLite row and marks postin
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto const published_file = tdir.path / mgr->manifest().postings()->artifact.filename;
 
+    auto const before = mgr->derived_index_status();
+    REQUIRE(before.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->remove_game(*gid).has_value());
 
@@ -705,19 +708,30 @@ TEST_CASE("database_manager::remove_game deletes the SQLite row and marks postin
     REQUIRE_FALSE(get_res.has_value());
     CHECK(get_res.error() == motif::db::error_code::not_found);
 
-    // remove_game() advanced the mutation sequence in its own transaction: the
-    // last published snapshot stays referenced (and its file on disk) but no
-    // longer covers canonical state, so every position query fails closed.
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    auto const stale = mgr->derived_index_status();
-    REQUIRE(stale.has_value());
-    CHECK_FALSE(stale->postings_usable);
-    CHECK(stale->mutation_seq > stale->covered_mutation_seq.value_or(0));
+    // remove_game() on covering indexes is one publication: the sequence and the generation advance once and the published snapshot
+    // covers canonical state again, so position queries keep answering -- without a rebuild -- and no longer see the game.
+    auto const current = mgr->derived_index_status();
+    REQUIRE(current.has_value());
+    CHECK(current->postings_usable);
+    CHECK(current->mutation_seq == before->mutation_seq + 1U);
+    CHECK(current->covered_mutation_seq == std::optional<std::uint64_t> {current->mutation_seq});
+    CHECK(current->publication_generation == before->publication_generation + 1U);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK(mgr->manifest().postings() != nullptr);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(mgr->manifest().postings()->artifact.filename == published_file.filename().string());
     CHECK(std::filesystem::exists(published_file));
-    CHECK_FALSE(mgr->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).has_value());
+    auto const start = motif::db::zobrist_hash {chesslib::board {}.hash()};
+    auto const matches = mgr->query_position_matches(start);
+    REQUIRE(matches.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK(matches->empty());
+    auto const summary = mgr->position_summary(start);
+    REQUIRE(summary.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_FALSE(summary->has_value());
 
+    // An explicit rebuild still works and answers the same: the empty set.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     REQUIRE(mgr->rebuild_position_postings().has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -765,7 +779,7 @@ TEST_CASE("database_manager::remove_user_game rejects imported games without cha
     CHECK(mgr->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).has_value());
 }
 
-TEST_CASE("database_manager::remove_user_game deletes a manual game and marks postings stale", "[motif-db][database_manager]")
+TEST_CASE("database_manager::remove_user_game deletes a manual game and keeps postings usable", "[motif-db][database_manager]")
 {
     tmp_dir const tdir {"remove_manual_game"};
 
@@ -781,11 +795,14 @@ TEST_CASE("database_manager::remove_user_game deletes a manual game and marks po
     auto const game = mgr->store().get(*gid);
     REQUIRE_FALSE(game.has_value());
     CHECK(game.error() == motif::db::error_code::not_found);
-    // The removal advanced the sequence; the last snapshot is retained but stale.
-    auto const stale = mgr->derived_index_status();
-    REQUIRE(stale.has_value());
-    CHECK_FALSE(stale->postings_usable);
-    CHECK(mgr->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()}).error() == motif::db::error_code::io_failure);
+    // The removal published incrementally: the snapshot covers the new sequence and the game is gone from every position query.
+    auto const current = mgr->derived_index_status();
+    REQUIRE(current.has_value());
+    CHECK(current->postings_usable);
+    CHECK(current->covered_mutation_seq == std::optional<std::uint64_t> {current->mutation_seq});
+    auto const matches = mgr->query_position_matches(motif::db::zobrist_hash {chesslib::board {}.hash()});
+    REQUIRE(matches.has_value());
+    CHECK(matches->empty());
 
     REQUIRE(mgr->rebuild_position_postings().has_value());
     REQUIRE(mgr->manifest().postings() != nullptr);

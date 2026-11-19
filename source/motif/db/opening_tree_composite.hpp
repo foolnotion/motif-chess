@@ -58,8 +58,14 @@ class composite_opening_tree
     // per-edit candidate state; it fails (leaving this composite untouched) on
     // a discontiguous or foreign run, a decoded-memory overflow, or any merged
     // row violation.
+    //
+    // `mode` replaces the child-frequency mode of the candidate: a membership run
+    // (a removed game) requires the postings mode, so the first one switches a
+    // checkpoint-mode tree over (cached child counts stop being trusted); runs
+    // already in the chain stay valid under it. Omitted, the mode is kept.
     [[nodiscard]] auto with_appended_run(tree_patch_run_ptr run,
-                                         std::uint64_t max_decoded_bytes = patch_chain_limits {}.hard_decoded_bytes) const
+                                         std::uint64_t max_decoded_bytes = patch_chain_limits {}.hard_decoded_bytes,
+                                         std::optional<tree_child_frequency_mode> mode = std::nullopt) const
         -> result<composite_opening_tree>;
 
     [[nodiscard]] auto game_count(zobrist_hash hash) const -> result<std::uint32_t>;
@@ -69,8 +75,9 @@ class composite_opening_tree
     // The one raw -> presentation conversion over the merged node. In
     // "postings" mode the resolver supplies every child count; in "checkpoint"
     // mode the cached counts are used and the resolver is ignored. An edge whose
-    // extrema are not exact (a retraction invalidated them) cannot be presented
-    // and fails the call; callers fall back to exact postings.
+    // extrema are not exact (a retraction run without exact extrema invalidated
+    // them) cannot be presented and fails the call. The database manager never
+    // publishes such a run: its removals carry the exact extrema.
     [[nodiscard]] auto query_opening_stats(zobrist_hash hash, tree_child_frequency_resolver const& resolver = {}) const
         -> result<std::vector<opening_stat_agg_row>>;
     // Every merged node in ascending root order, one node at a time.

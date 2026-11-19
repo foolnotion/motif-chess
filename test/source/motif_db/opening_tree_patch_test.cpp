@@ -980,10 +980,14 @@ TEST_CASE("chain growth is classified against the soft and hard thresholds", "[m
 
     CHECK(classify_chain_growth(limits, usage(0), one) == patch_chain_admission::admit);
     CHECK(classify_chain_growth(limits, usage(1), one) == patch_chain_admission::admit);
-    CHECK(classify_chain_growth(limits, usage(7), one) == patch_chain_admission::admit);  // reaches the soft cap of 8
-    CHECK(classify_chain_growth(limits, usage(8), one) == patch_chain_admission::admit_and_recommend_fold);
-    CHECK(classify_chain_growth(limits, usage(15), one) == patch_chain_admission::admit_and_recommend_fold);  // 16 = hard cap, allowed
-    CHECK(classify_chain_growth(limits, usage(16), one) == patch_chain_admission::fold_required);
+    constexpr auto soft = default_soft_chain_runs;
+    constexpr auto hard = default_hard_chain_runs;
+    static_assert(soft > 1 && soft < hard);
+    CHECK(classify_chain_growth(limits, usage(soft - 1U), one) == patch_chain_admission::admit);  // reaches the soft cap
+    CHECK(classify_chain_growth(limits, usage(soft), one) == patch_chain_admission::admit_and_recommend_fold);
+    CHECK(classify_chain_growth(limits, usage(hard - 1U), one)
+          == patch_chain_admission::admit_and_recommend_fold);  // the hard cap, allowed
+    CHECK(classify_chain_growth(limits, usage(hard), one) == patch_chain_admission::fold_required);
 
     // Bytes: soft 4 MiB, hard 16 MiB; decoded memory hard 64 MiB.
     auto const mib = std::uint64_t {1} << 20U;
@@ -1283,4 +1287,234 @@ TEST_CASE("membership edit sequences applied as signed runs equal a fresh rebuil
         }
         CHECK(retractions > 0);
     }
+}
+
+// ── Exact-extrema removal ─────────────────────────────────────────────────────
+
+namespace
+{
+
+using live_game = std::pair<std::uint32_t, motif_test::model_game>;
+
+// The exact extrema of `edge` over `live`, by the enumerator's own traversal rule: what a rebuild of those games would store.
+auto brute_force_extrema(std::vector<live_game> const& live, game_tree_edge const& edge) -> std::optional<tree_exact_extrema>
+{
+    auto enumerator = tree_contribution_enumerator {default_horizon, opening_tree_start_hash(), /*collect_visited=*/false};
+    auto found = std::optional<tree_exact_extrema> {};
+    for (auto const& [number, game] : live) {
+        REQUIRE(enumerator.enumerate(game.moves).has_value());
+        for (auto const& candidate : enumerator.edges()) {
+            if (candidate.root_hash != edge.root_hash || candidate.encoded_move != edge.encoded_move
+                || candidate.child_hash != edge.child_hash)
+            {
+                continue;
+            }
+            if (!found) {
+                found = tree_exact_extrema {.min_root_ply = candidate.min_root_ply, .sample_min = number, .sample_max = number};
+            } else {
+                found->min_root_ply = std::min(found->min_root_ply, candidate.min_root_ply);
+                found->sample_min = std::min(found->sample_min, number);
+                found->sample_max = std::max(found->sample_max, number);
+            }
+        }
+    }
+    return found;
+}
+
+// A removal run of corpus[index] whose resolver answers from the games that remain.
+auto exact_removal_run(small_tree const& tree, std::size_t const index, std::uint64_t& resolved) -> tree_patch_run
+{
+    auto live = std::vector<live_game> {};
+    for (std::size_t other = 0; other < tree.corpus.size(); ++other) {
+        if (other != index) {
+            live.emplace_back(static_cast<std::uint32_t>(other + 1U), tree.corpus[other]);
+        }
+    }
+    auto builder = tree_patch_builder {patch_identity()};
+    auto const resolver = tree_removal_extrema_resolver {[&](game_tree_edge const& edge) -> result<std::optional<tree_exact_extrema>>
+                                                         {
+                                                             auto const exact = brute_force_extrema(live, edge);
+                                                             resolved += exact.has_value() ? 1U : 0U;
+                                                             return exact;
+                                                         }};
+    REQUIRE(builder.add_game_removal(tree_state_of(tree.corpus[index], static_cast<std::uint32_t>(index + 1U)), resolver).has_value());
+    auto run = builder.build(0, 1);
+    REQUIRE(run.has_value());
+    return std::move(*run);
+}
+
+// Compares a merged tree after removing corpus[removed] (ids keep their gaps) with a rebuild of the remaining games: every extremum must be
+// certified and equal.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear comparison.
+void require_exact_after_removal(small_tree const& tree, std::size_t const removed, tree_patch_run run)
+{
+    auto const composite = open_composite(tree, {std::move(run)}, tree_child_frequency_mode::postings);
+    INFO((composite.has_value() ? std::string {} : composite.error().message));
+    REQUIRE(composite.has_value());
+    auto remaining = tree.corpus;
+    remaining.erase(remaining.begin() + static_cast<std::ptrdiff_t>(removed));
+    auto const fresh = rebuilt_nodes(tree.dir.path / "exact_fresh.idx", remaining);
+    auto const merged = collect_nodes(*composite);
+    REQUIRE(merged.size() == fresh.size());
+    // A fresh id j names the (j)th remaining game: the original id skips the removed one.
+    auto const original_id = [removed](std::uint32_t const fresh_id) -> std::uint32_t
+    { return fresh_id <= removed ? fresh_id : fresh_id + 1U; };
+    for (std::size_t node = 0; node < merged.size(); ++node) {
+        REQUIRE(merged[node].root_hash == fresh[node].root_hash);
+        REQUIRE(merged[node].edges.size() == fresh[node].edges.size());
+        for (std::size_t edge = 0; edge < merged[node].edges.size(); ++edge) {
+            auto const& got = merged[node].edges[edge];
+            auto const& want = fresh[node].edges[edge];
+            REQUIRE(got.key == want.key);
+            CHECK(got.stats == want.stats);
+            CHECK(got.min_root_ply_valid);
+            CHECK(got.sample_bounds_valid);
+            CHECK(got.min_root_ply == want.min_root_ply);
+            CHECK(got.sample_min == original_id(want.sample_min));
+            CHECK(got.sample_max == original_id(want.sample_max));
+        }
+    }
+}
+
+}  // namespace
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("an exact-extrema removal hands the minimum ply and sample bounds to the games that remain", "[motif-db][pr7][patch][merge]")
+{
+    // Game 1 reaches e2e4 from the start at ply 0; game 2 only at ply 24, after the knight shuffle has returned to the
+    // start. Removing game 1 therefore moves that edge's minimum root ply from 0 to 24 and both sample bounds from 1/2 to 2.
+    auto const fixtures = motif_test::fixture_games();
+    constexpr auto ruy_lopez = std::size_t {4};
+    constexpr auto late_return = std::size_t {2};
+    constexpr auto late_ply = std::uint16_t {24};
+    small_tree const tree {{fixtures[ruy_lopez], fixtures[late_return]}};
+    auto resolved = std::uint64_t {0};
+    auto run = exact_removal_run(tree, 0, resolved);
+    CHECK(resolved > 0U);
+    auto exact_edges = std::size_t {0};
+    for (auto const& edge : run.edges) {
+        if ((edge.validity_mask & tree_patch_mask_exact_extrema) != 0U) {
+            ++exact_edges;
+            CHECK((edge.validity_mask & tree_patch_mask_candidates) != 0U);
+            CHECK(edge.delta.frequency == -1);
+        }
+    }
+    CHECK(exact_edges == resolved);
+
+    // The run survives its own file format.
+    auto const encoded = encode_tree_patch_run(run);
+    REQUIRE(encoded.has_value());
+    auto const decoded = decode_tree_patch_run(*encoded, expectation_of(run));
+    REQUIRE(decoded.has_value());
+    CHECK(decoded->edges == run.edges);
+
+    auto const composite = open_composite(tree, {run}, tree_child_frequency_mode::postings);
+    REQUIRE(composite.has_value());
+    auto const start = composite->query_raw_node(zobrist_hash {opening_tree_start_hash()});
+    REQUIRE(start.has_value());
+    REQUIRE(start->has_value());
+    auto const opening_move = motif_test::uci_moves({"e2e4"}).front();
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- REQUIREd just above
+    auto const found = std::ranges::find_if((*start)->edges,
+                                            [opening_move](raw_edge const& edge) -> bool { return edge.key.encoded_move == opening_move; });
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- REQUIREd just above
+    REQUIRE(found != (*start)->edges.end());
+    CHECK(found->stats.frequency == 1);
+    CHECK(found->min_root_ply_valid);
+    CHECK(found->min_root_ply == late_ply);
+    CHECK(found->sample_bounds_valid);
+    CHECK(found->sample_min == 2U);
+    CHECK(found->sample_max == 2U);
+    require_exact_after_removal(tree, 0, std::move(run));
+}
+
+TEST_CASE("every game of a corpus removes with exact extrema and equals a rebuild of the rest", "[motif-db][pr7][patch][merge]")
+{
+    constexpr auto corpus_seed = 71U;
+    constexpr auto corpus_size = 14U;
+    small_tree const tree {motif_test::make_corpus(corpus_seed, corpus_size)};
+    auto resolved = std::uint64_t {0};
+    for (std::size_t victim = 0; victim < tree.corpus.size(); ++victim) {
+        INFO("removing game " << victim + 1U);
+        require_exact_after_removal(tree, victim, exact_removal_run(tree, victim, resolved));
+    }
+    CHECK(resolved > 0U);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("an exact-extrema run is refused unless it is a retraction that carries its candidates", "[motif-db][pr7][patch]")
+{
+    auto const fixtures = motif_test::fixture_games();
+    small_tree const tree {{fixtures[4], fixtures[2]}};
+    auto resolved = std::uint64_t {0};
+    auto const good = exact_removal_run(tree, 0, resolved);
+    REQUIRE(encode_tree_patch_run(good).has_value());
+    auto const is_exact = [](tree_patch_edge const& edge) -> bool { return (edge.validity_mask & tree_patch_mask_exact_extrema) != 0U; };
+    auto const exact_index = static_cast<std::size_t>(std::ranges::find_if(good.edges, is_exact) - good.edges.begin());
+    REQUIRE(exact_index < good.edges.size());
+    auto const refused = [&](auto const& mutate) -> bool
+    {
+        auto run = good;
+        mutate(run.edges[exact_index]);
+        return !encode_tree_patch_run(run).has_value();
+    };
+    // Exact extrema without the candidates that carry them.
+    CHECK(refused(
+        [](tree_patch_edge& edge) -> void
+        {
+            edge.validity_mask = tree_patch_mask_exact_extrema;
+            edge.candidate_min_root_ply = 0;
+            edge.candidate_sample_min = 0;
+            edge.candidate_sample_max = 0;
+        }));
+    // Alongside an invalidation, which says the opposite.
+    CHECK(refused([](tree_patch_edge& edge) -> void { edge.validity_mask |= tree_patch_mask_invalidate_min_ply; }));
+    CHECK(refused([](tree_patch_edge& edge) -> void { edge.validity_mask |= tree_patch_mask_invalidate_samples; }));
+    // On an edge that gains games instead of losing one.
+    CHECK(refused([](tree_patch_edge& edge) -> void
+                  { edge.delta = raw_edge_stats {.frequency = 1, .white_wins = 1, .draws = 0, .black_wins = 0}; }));
+    // Bits above the defined ones stay unknown.
+    CHECK(refused([](tree_patch_edge& edge) -> void { edge.validity_mask |= 16U; }));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear scenario.
+TEST_CASE("an exact-extrema removal cannot share its run with another membership operation", "[motif-db][pr7][patch]")
+{
+    auto const fixtures = motif_test::fixture_games();
+    auto const never = tree_removal_extrema_resolver {[](game_tree_edge const&) -> result<std::optional<tree_exact_extrema>>
+                                                      { return std::optional<tree_exact_extrema> {}; }};
+    auto const failing = tree_removal_extrema_resolver {[](game_tree_edge const&) -> result<std::optional<tree_exact_extrema>>
+                                                        { return tl::unexpected {error {error_code::io_failure, "resolver failed"}}; }};
+    auto const ruy = tree_state_of(fixtures[4], 1);
+    auto const shuffle = tree_state_of(fixtures[2], 2);
+
+    // Exact first: nothing else may follow.
+    auto first = tree_patch_builder {patch_identity()};
+    REQUIRE(first.add_game_removal(ruy, never).has_value());
+    CHECK_FALSE(first.add_game_removal(shuffle, never).has_value());
+    CHECK_FALSE(first.add_game_removal(shuffle).has_value());
+    CHECK_FALSE(first.add_game_insertion(shuffle).has_value());
+
+    // Exact last: a prior membership operation makes the resolver's description of the corpus false.
+    auto second = tree_patch_builder {patch_identity()};
+    REQUIRE(second.add_game_removal(shuffle).has_value());
+    CHECK_FALSE(second.add_game_removal(ruy, never).has_value());
+    auto third = tree_patch_builder {patch_identity()};
+    REQUIRE(third.add_game_insertion(shuffle).has_value());
+    CHECK_FALSE(third.add_game_removal(ruy, never).has_value());
+
+    // A resolver failure is the builder's failure, not a silently invalidated edge.
+    auto fourth = tree_patch_builder {patch_identity()};
+    auto const failed = fourth.add_game_removal(ruy, failing);
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error() == error_code::io_failure);
+
+    // With no resolver the edge is invalidated as before.
+    auto fifth = tree_patch_builder {patch_identity()};
+    REQUIRE(fifth.add_game_removal(ruy).has_value());
+    auto const invalidating = fifth.build(0, 1);
+    REQUIRE(invalidating.has_value());
+    CHECK(std::ranges::all_of(invalidating->edges,
+                              [](tree_patch_edge const& edge) -> bool
+                              { return edge.validity_mask == (tree_patch_mask_invalidate_min_ply | tree_patch_mask_invalidate_samples); }));
 }

@@ -2054,6 +2054,50 @@ auto game_store::apply_metadata_patch(prepared_metadata_patch const& plan) -> re
     return {};
 }
 
+auto game_store::prepare_removal(game_id const game_key, bool const load_moves) const -> result<prepared_game_removal>
+{
+    auto stored = read_indexed_metadata(game_key);
+    if (!stored) {
+        return tl::unexpected {stored.error()};
+    }
+    auto plan = prepared_game_removal {.id = game_key, .content_revision = stored->second, .before = std::move(stored->first), .moves = {}};
+    if (load_moves) {
+        auto record = get_replay_record(game_key);
+        if (!record) {
+            return tl::unexpected {record.error()};
+        }
+        plan.moves = std::move(record->moves);
+    }
+    return plan;
+}
+
+auto game_store::apply_removal(prepared_game_removal const& plan) -> result<void>
+{
+    // The prepared game must still be the stored one: nothing else may have
+    // written it between prepare and the transaction.
+    auto const live = read_indexed_metadata(plan.id);
+    if (!live) {
+        return tl::unexpected {live.error()};
+    }
+    if (live->first != plan.before || live->second != plan.content_revision) {
+        return tl::unexpected {error {error_code::io_failure, "the game changed after the removal was prepared"}};
+    }
+    // ON DELETE CASCADE in game_tag handles tag row cleanup automatically.
+    auto stmt = prepare(db_, "DELETE FROM game WHERE id = ?");
+    if (!stmt) {
+        return tl::unexpected {stmt.error()};
+    }
+    sqlite3_bind_int64(stmt->get(), 1, static_cast<std::int64_t>(plan.id.value));
+    if (sqlite3_step(stmt->get()) != SQLITE_DONE) {
+        return tl::unexpected {error {error_code::io_failure, sqlite3_errmsg(db_)}};
+    }
+    // sqlite3_changes() excludes ON DELETE CASCADE row changes: the game rows removed.
+    if (sqlite3_changes(db_) != 1) {
+        return tl::unexpected {error {error_code::io_failure, "the game disappeared during its removal"}};
+    }
+    return {};
+}
+
 auto game_store::advance_mutation_seq() -> result<void>
 {
     return writer_->record_canonical_change();
