@@ -7,6 +7,10 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -466,19 +470,28 @@ struct decoded_occurrence
 };
 
 // Decodes and validates one posting block while retaining only the requested
-// occurrence window. The complete byte stream is still checked so pagination
-// cannot hide corruption after the returned rows.
+// window of LIVE occurrences: `is_retired` is asked once per distinct game, in
+// ascending id order, and a retired game's occurrences neither count towards
+// `skip` nor are returned. The complete byte stream is still checked so
+// pagination cannot hide corruption after the returned rows (nor can a retired
+// document hide corruption inside it). At most min(limit, occurrences) rows are
+// ever held, whatever the block's size.
+template<typename RetiredProbe>
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- validates each dependent field of one compact binary block in decode order.
 auto decode_posting_block_window(std::span<char const> const bytes,
                                  directory_block_entry const& entry,
                                  std::size_t const limit,
-                                 std::size_t const skip) -> result<std::vector<decoded_occurrence>>
+                                 std::size_t const skip,
+                                 RetiredProbe is_retired) -> result<std::vector<decoded_occurrence>>
 {
+    // The raw block bounds the live window from above, so it also bounds the allocation.
     auto const begin = std::min(skip, static_cast<std::size_t>(entry.occurrence_count));
     auto const remaining = static_cast<std::size_t>(entry.occurrence_count) - begin;
     auto const count = limit == 0U ? remaining : std::min(limit, remaining);
     std::vector<decoded_occurrence> occurrences;
     occurrences.reserve(count);
-    auto occurrence_index = std::size_t {0};
+    auto raw_index = std::uint64_t {0};
+    auto live_index = std::size_t {0};
     auto offset = std::size_t {0};
     auto previous_game_id = std::uint64_t {0};
     auto min_ply = std::numeric_limits<std::uint16_t>::max();
@@ -495,6 +508,7 @@ auto decode_posting_block_window(std::span<char const> const bytes,
             return tl::unexpected {error_code::schema_mismatch};
         }
         previous_game_id = current_game_id;
+        auto const retired = is_retired(game_id {static_cast<std::uint32_t>(current_game_id)});
         auto ply_count = std::uint64_t {};
         auto first_ply = std::uint64_t {};
         if (!read_uleb128(bytes, offset, ply_count) || ply_count == 0U || !read_uleb128(bytes, offset, first_ply)
@@ -505,10 +519,13 @@ auto decode_posting_block_window(std::span<char const> const bytes,
         auto ply = static_cast<std::uint16_t>(first_ply);
         auto append_if_requested = [&]() -> void
         {
-            if (occurrence_index >= begin && occurrences.size() < count) {
-                occurrences.push_back(decoded_occurrence {.id = game_id {static_cast<std::uint32_t>(current_game_id)}, .ply = ply});
+            if (!retired) {
+                if (live_index >= begin && occurrences.size() < count) {
+                    occurrences.push_back(decoded_occurrence {.id = game_id {static_cast<std::uint32_t>(current_game_id)}, .ply = ply});
+                }
+                ++live_index;
             }
-            ++occurrence_index;
+            ++raw_index;
             min_ply = std::min(min_ply, ply);
             max_ply = std::max(max_ply, ply);
         };
@@ -524,18 +541,43 @@ auto decode_posting_block_window(std::span<char const> const bytes,
             append_if_requested();
         }
     }
-    if (offset != bytes.size() || occurrence_index != entry.occurrence_count || min_ply != entry.min_ply || max_ply != entry.max_ply) {
+    if (offset != bytes.size() || raw_index != entry.occurrence_count || min_ply != entry.min_ply || max_ply != entry.max_ply) {
         return tl::unexpected {error_code::schema_mismatch};
     }
     return occurrences;
 }
 
-// Decodes only the distinct game ids from a posting block, skipping (but
-// still validating the varint framing of) every ply value.
-auto decode_posting_block_game_ids(std::span<char const> const bytes, directory_block_entry const& entry) -> result<std::vector<game_id>>
+// What the metadata table says of one document named by a posting block.
+enum class document_standing : std::uint8_t
 {
+    live,
+    retired,
+    unknown,  // the block names a document the artifact holds no metadata for: the artifact is inconsistent
+};
+
+// Decodes and validates one posting block (skipping, but still validating the
+// framing of, every ply value) while retaining only the requested window of
+// LIVE distinct game ids: `standing` is asked once per distinct game in ascending
+// id order, a retired game neither counts towards `skip` nor is returned, and a
+// game that is `unknown` makes the whole block an error wherever it sits. The
+// complete byte stream is checked whatever the window, so a page cannot hide
+// corruption after its rows. At most min(limit, distinct games) ids are ever held.
+// limit == 0 means no limit.
+template<typename StandingProbe>
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- validates each dependent field of one compact binary block in decode order.
+auto decode_posting_block_game_window(std::span<char const> const bytes,
+                                      directory_block_entry const& entry,
+                                      std::size_t const limit,
+                                      std::size_t const skip,
+                                      StandingProbe standing) -> result<std::vector<game_id>>
+{
+    // The block's distinct games bound the live window from above, so they also bound the allocation.
+    auto const begin = std::min(skip, static_cast<std::size_t>(entry.distinct_game_count));
+    auto const remaining = static_cast<std::size_t>(entry.distinct_game_count) - begin;
+    auto const count = limit == 0U ? remaining : std::min(limit, remaining);
     std::vector<game_id> game_ids;
-    game_ids.reserve(entry.distinct_game_count);
+    game_ids.reserve(count);
+    auto live_index = std::size_t {0};
     auto offset = std::size_t {0};
     auto previous_game_id = std::uint64_t {0};
     auto total_occurrences = std::uint64_t {0};
@@ -553,6 +595,11 @@ auto decode_posting_block_game_ids(std::span<char const> const bytes, directory_
             return tl::unexpected {error_code::schema_mismatch};
         }
         previous_game_id = current_game_id;
+        auto const current = game_id {static_cast<std::uint32_t>(current_game_id)};
+        auto const document = standing(current);
+        if (document == document_standing::unknown) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
         auto ply_count = std::uint64_t {};
         auto first_ply = std::uint64_t {};
         if (!read_uleb128(bytes, offset, ply_count) || ply_count == 0U || !read_uleb128(bytes, offset, first_ply)
@@ -577,7 +624,12 @@ auto decode_posting_block_game_ids(std::span<char const> const bytes, directory_
         if (!checked_add(total_occurrences, ply_count, total_occurrences)) {
             return tl::unexpected {error_code::schema_mismatch};
         }
-        game_ids.push_back(game_id {static_cast<std::uint32_t>(current_game_id)});
+        if (document == document_standing::live) {
+            if (live_index >= begin && game_ids.size() < count) {
+                game_ids.push_back(current);
+            }
+            ++live_index;
+        }
     }
     if (offset != bytes.size() || total_occurrences != entry.occurrence_count || min_ply != entry.min_ply || max_ply != entry.max_ply) {
         return tl::unexpected {error_code::schema_mismatch};
@@ -648,6 +700,259 @@ auto decode_posting_block_first_occurrences(std::span<char const> const bytes,
     return occurrences;
 }
 
+// Decodes and validates one posting block exactly like the decoders above (the
+// whole block is checked against its directory entry, so retired documents can
+// never hide corruption) and summarizes only the games `is_retired` does not
+// reject. `is_retired` is called once per distinct game in ascending id order.
+// A block whose games are all retired yields distinct_game_count == 0.
+template<typename RetiredProbe>
+auto decode_posting_block_live_summary(std::span<char const> const bytes, directory_block_entry const& entry, RetiredProbe is_retired)
+    -> result<position_postings_summary>
+{
+    auto offset = std::size_t {0};
+    auto previous_game_id = std::uint64_t {0};
+    auto total_occurrences = std::uint64_t {0};
+    auto block_min_ply = std::numeric_limits<std::uint16_t>::max();
+    auto block_max_ply = std::uint16_t {0};
+    auto live_occurrences = std::uint64_t {0};
+    auto live_games = std::uint32_t {0};
+    auto live_min_ply = std::numeric_limits<std::uint16_t>::max();
+    auto live_max_ply = std::uint16_t {0};
+    for (std::uint32_t group = 0; group < entry.distinct_game_count; ++group) {
+        auto game_id_delta = std::uint64_t {};
+        if (!read_uleb128(bytes, offset, game_id_delta) || (group > 0U && game_id_delta == 0U)
+            || previous_game_id > std::numeric_limits<std::uint64_t>::max() - game_id_delta)
+        {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        auto const current_game_id = previous_game_id + game_id_delta;
+        if (current_game_id == 0U || current_game_id > std::numeric_limits<std::uint32_t>::max()) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        previous_game_id = current_game_id;
+        auto ply_count = std::uint64_t {};
+        auto first_ply = std::uint64_t {};
+        if (!read_uleb128(bytes, offset, ply_count) || ply_count == 0U || !read_uleb128(bytes, offset, first_ply)
+            || first_ply > std::numeric_limits<std::uint16_t>::max())
+        {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        auto ply = static_cast<std::uint16_t>(first_ply);
+        auto game_min_ply = ply;
+        auto game_max_ply = ply;
+        for (std::uint64_t index = 1; index < ply_count; ++index) {
+            auto ply_delta = std::uint64_t {};
+            if (!read_uleb128(bytes, offset, ply_delta) || ply_delta == 0U
+                || static_cast<std::uint64_t>(ply) + ply_delta > std::numeric_limits<std::uint16_t>::max())
+            {
+                return tl::unexpected {error_code::schema_mismatch};
+            }
+            ply = static_cast<std::uint16_t>(ply + ply_delta);
+            game_max_ply = ply;
+        }
+        if (!checked_add(total_occurrences, ply_count, total_occurrences)) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        block_min_ply = std::min(block_min_ply, game_min_ply);
+        block_max_ply = std::max(block_max_ply, game_max_ply);
+        if (!is_retired(game_id {static_cast<std::uint32_t>(current_game_id)})) {
+            live_occurrences += ply_count;
+            ++live_games;
+            live_min_ply = std::min(live_min_ply, game_min_ply);
+            live_max_ply = std::max(live_max_ply, game_max_ply);
+        }
+    }
+    if (offset != bytes.size() || total_occurrences != entry.occurrence_count || block_min_ply != entry.min_ply
+        || block_max_ply != entry.max_ply)
+    {
+        return tl::unexpected {error_code::schema_mismatch};
+    }
+    if (live_games == 0U) {
+        return position_postings_summary {.occurrence_count = 0, .distinct_game_count = 0, .min_ply = 0, .max_ply = 0};
+    }
+    return position_postings_summary {
+        .occurrence_count = live_occurrences, .distinct_game_count = live_games, .min_ply = live_min_ply, .max_ply = live_max_ply};
+}
+
+// Serves the posting blocks of a front-to-back directory walk out of large reads: a block already
+// inside the last chunk costs no I/O at all, so a pass over every block pays per megabyte, not per hash.
+// A block larger than a chunk gets a buffer of its own size, as a single-block read always did.
+class posting_chunk_reader
+{
+  public:
+    static constexpr auto chunk_bytes = std::size_t {1U << 20U};
+
+    explicit posting_chunk_reader(std::ifstream& input)
+        : input_ {&input}
+    {
+    }
+
+    // The bytes of [offset, offset + length), valid until the next call.
+    [[nodiscard]] auto block(std::uint64_t const offset, std::uint64_t const length) -> result<std::span<char const>>
+    {
+        if (offset < start_ || offset - start_ + length > size_) {
+            buffer_.resize(std::max<std::size_t>(chunk_bytes, static_cast<std::size_t>(length)));
+            input_->clear();
+            input_->seekg(static_cast<std::streamoff>(offset));
+            input_->read(buffer_.data(), static_cast<std::streamsize>(buffer_.size()));
+            start_ = offset;
+            size_ = static_cast<std::size_t>(input_->gcount());
+            if (size_ < length) {
+                start_ = 0;
+                size_ = 0;
+                return tl::unexpected {error_code::io_failure};
+            }
+        }
+        return std::span<char const> {buffer_}.subspan(static_cast<std::size_t>(offset - start_), static_cast<std::size_t>(length));
+    }
+
+  private:
+    std::ifstream* input_;
+    std::vector<char> buffer_;
+    std::uint64_t start_ {0};
+    std::size_t size_ {0};
+};
+
+// Reads the whole posting block `entry` describes.
+auto read_posting_block(std::ifstream& input, directory_block_entry const& entry) -> result<std::vector<char>>
+{
+    auto bytes = std::vector<char>(entry.posting_byte_length);
+    input.clear();
+    input.seekg(static_cast<std::streamoff>(entry.posting_offset));
+    if (!input || !input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    return bytes;
+}
+
+// Walks the (game, plies) groups of one posting block in ascending game order,
+// checking the framing of every group it decodes. The plies buffer is reused, so
+// a walk allocates once whatever the block's size. A walk that stops early calls
+// finish() to validate what it did not read, so that it accepts exactly the blocks
+// the whole-block decoders accept.
+class posting_group_cursor
+{
+  public:
+    posting_group_cursor(std::span<char const> const bytes, directory_block_entry const& entry) noexcept
+        : bytes_ {bytes}
+        , entry_ {entry}
+        , remaining_ {entry.distinct_game_count}
+    {
+    }
+
+    // True when a group was decoded, false at the end of the block.
+    [[nodiscard]] auto advance() -> result<bool> { return decode_group(/*keep_plies=*/true); }
+
+    // Validates the groups not yet walked (without materializing their plies) and then
+    // the whole block against its directory entry: every byte consumed, and the
+    // occurrence count and ply envelope the entry records.
+    [[nodiscard]] auto finish() -> result<void>
+    {
+        for (;;) {
+            auto const more = decode_group(/*keep_plies=*/false);
+            if (!more) {
+                return tl::unexpected {more.error()};
+            }
+            if (!*more) {
+                break;
+            }
+        }
+        if (offset_ != bytes_.size() || occurrences_ != entry_.occurrence_count || min_ply_ != entry_.min_ply || max_ply_ != entry_.max_ply)
+        {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        return {};
+    }
+
+    [[nodiscard]] auto id() const noexcept -> game_id { return game_id {static_cast<std::uint32_t>(previous_id_)}; }
+
+    [[nodiscard]] auto plies() const noexcept -> std::span<std::uint16_t const> { return plies_; }
+
+  private:
+    [[nodiscard]] auto decode_group(bool const keep_plies) -> result<bool>
+    {
+        if (remaining_ == 0U) {
+            return false;
+        }
+        --remaining_;
+        auto delta = std::uint64_t {};
+        if (!read_uleb128(bytes_, offset_, delta) || (started_ && delta == 0U)
+            || previous_id_ > std::numeric_limits<std::uint64_t>::max() - delta)
+        {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        started_ = true;
+        previous_id_ += delta;
+        if (previous_id_ == 0U || previous_id_ > std::numeric_limits<std::uint32_t>::max()) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        auto ply_count = std::uint64_t {};
+        auto ply = std::uint64_t {};
+        if (!read_uleb128(bytes_, offset_, ply_count) || ply_count == 0U || ply_count > bytes_.size() || !read_uleb128(bytes_, offset_, ply)
+            || ply > std::numeric_limits<std::uint16_t>::max())
+        {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        // Plies ascend strictly within a group, so its first and last are its extremes.
+        min_ply_ = std::min(min_ply_, static_cast<std::uint16_t>(ply));
+        if (keep_plies) {
+            plies_.clear();
+            plies_.push_back(static_cast<std::uint16_t>(ply));
+        }
+        for (std::uint64_t index = 1; index < ply_count; ++index) {
+            auto ply_delta = std::uint64_t {};
+            if (!read_uleb128(bytes_, offset_, ply_delta) || ply_delta == 0U || ply + ply_delta > std::numeric_limits<std::uint16_t>::max())
+            {
+                return tl::unexpected {error_code::schema_mismatch};
+            }
+            ply += ply_delta;
+            if (keep_plies) {
+                plies_.push_back(static_cast<std::uint16_t>(ply));
+            }
+        }
+        max_ply_ = std::max(max_ply_, static_cast<std::uint16_t>(ply));
+        if (!checked_add(occurrences_, ply_count, occurrences_)) {
+            return tl::unexpected {error_code::schema_mismatch};
+        }
+        return true;
+    }
+
+    std::span<char const> bytes_;
+    directory_block_entry entry_;
+    std::size_t offset_ {0};
+    std::uint32_t remaining_ {};
+    std::uint64_t previous_id_ {0};
+    std::uint64_t occurrences_ {0};
+    std::uint16_t min_ply_ {std::numeric_limits<std::uint16_t>::max()};
+    std::uint16_t max_ply_ {0};
+    bool started_ {false};
+    std::vector<std::uint16_t> plies_;
+};
+
+// The smallest ply p of `root_plies` (ascending, p <= horizon unless `unbounded`)
+// whose successor p + 1 is in `child_plies` (ascending); nullopt when none is.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- the two ply lists are the root and child of one edge; the names state the roles.
+auto first_edge_ply(std::span<std::uint16_t const> const root_plies,
+                    std::span<std::uint16_t const> const child_plies,
+                    std::uint16_t const horizon,
+                    bool const unbounded) -> std::optional<std::uint16_t>
+{
+    auto next_child = std::size_t {0};
+    for (auto const ply : root_plies) {
+        if (!unbounded && ply > horizon) {
+            break;
+        }
+        auto const successor = static_cast<std::uint32_t>(ply) + 1U;
+        while (next_child < child_plies.size() && child_plies[next_child] < successor) {
+            ++next_child;
+        }
+        if (next_child < child_plies.size() && child_plies[next_child] == successor) {
+            return ply;
+        }
+    }
+    return std::nullopt;
+}
+
 // Removes a fixed set of owned scratch paths on destruction, always --
 // success or failure -- so a merge that fails partway through never leaks
 // .spill*/.dirspool/.tmp files. Never touches the final artifact path
@@ -688,6 +993,19 @@ class temp_artifact_guard
 
 }  // namespace
 
+// Live summaries of recently asked hashes, valid for one retired set. The
+// capacity bounds the memory (about a megabyte); a full cache is emptied
+// rather than evicting entry by entry, since a navigation session re-asks the same
+// handful of positions.
+struct position_postings::live_summary_cache
+{
+    static constexpr std::size_t capacity = 16384;
+
+    std::mutex mutex;
+    std::uint64_t epoch {};
+    gtl::flat_hash_map<std::uint64_t, std::optional<position_postings_summary>> entries;
+};
+
 position_postings::position_postings(std::filesystem::path path, std::size_t spill_threshold)
     : path_ {std::move(path)}
     , spill_threshold_ {spill_threshold}
@@ -719,6 +1037,9 @@ auto position_postings::operator=(position_postings&& other) noexcept -> positio
         game_metadata_ = std::move(other.game_metadata_);
         spill_paths_ = std::move(other.spill_paths_);
         indexed_game_count_ = other.indexed_game_count_;
+        retired_count_ = other.retired_count_;
+        retired_epoch_ = other.retired_epoch_;
+        live_summaries_ = std::move(other.live_summaries_);
         metrics_ = other.metrics_;
         is_open_ = other.is_open_;
         metadata_ = std::move(other.metadata_);
@@ -1407,6 +1728,9 @@ auto position_postings::open() -> result<void>
 {
     is_open_ = false;
     metadata_.clear();
+    retired_count_ = 0;
+    ++retired_epoch_;
+    live_summaries_ = std::make_unique<live_summary_cache>();
     sparse_directory_.clear();
 
     std::ifstream input {path_, std::ios::binary};
@@ -1571,7 +1895,31 @@ auto position_postings::open() -> result<void>
 
 auto position_postings::indexed_game_count() const noexcept -> std::uint64_t
 {
-    return indexed_game_count_;
+    // retired_count_ only ever counts distinct documents of metadata_, so it
+    // never exceeds the artifact's document count.
+    return indexed_game_count_ - retired_count_;
+}
+
+auto position_postings::probe_retired(std::vector<metadata_record> const& table,
+                                      std::vector<metadata_record>::const_iterator& cursor,
+                                      game_id const game_key) noexcept -> bool
+{
+    auto const end = table.cend();
+    if (cursor != end && cursor->id < game_key) {
+        // Ids arrive ascending and usually close together, so gallop from the last position instead of searching
+        // the whole remainder: the cost follows the distance travelled, and the table is read front to back.
+        auto low = cursor;
+        auto high = end;
+        for (auto step = std::ptrdiff_t {1}; end - low > step; step *= 2) {
+            if (!(low[step].id < game_key)) {
+                high = low + step;
+                break;
+            }
+            low += step;
+        }
+        cursor = std::ranges::lower_bound(low + 1, high, game_key, {}, [](auto const& record) -> game_id { return record.id; });
+    }
+    return cursor != end && cursor->id == game_key && cursor->retired;
 }
 
 namespace
@@ -1592,6 +1940,8 @@ auto find_sparse_block(std::span<position_postings::sparse_entry const> const sp
 
 }  // namespace
 
+// A sequential directory, retired-id and postings walk propagates errors at each step.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 auto position_postings::for_each_summary(std::function<result<void>(zobrist_hash, position_postings_summary const&)> const& visitor) const
     -> result<void>
 {
@@ -1602,6 +1952,23 @@ auto position_postings::for_each_summary(std::function<result<void>(zobrist_hash
     if (!input) {
         return tl::unexpected {error_code::io_failure};
     }
+    // Retired documents need each hash's posting block: a second stream reads them front to back in
+    // large chunks, and the retired ids (few, sorted) are probed in a small array instead of the table.
+    std::ifstream postings;
+    auto retired_ids = std::vector<game_id> {};
+    if (retired_count_ != 0U) {
+        postings.open(path_, std::ios::binary);
+        if (!postings) {
+            return tl::unexpected {error_code::io_failure};
+        }
+        retired_ids.reserve(static_cast<std::size_t>(retired_count_));
+        for (auto const& record : metadata_) {
+            if (record.retired) {
+                retired_ids.push_back(record.id);
+            }
+        }
+    }
+    auto chunks = posting_chunk_reader {postings};
     for (auto const& sparse : sparse_directory_) {
         std::vector<char> block(sparse.block_byte_length);
         input.clear();
@@ -1614,11 +1981,29 @@ auto position_postings::for_each_summary(std::function<result<void>(zobrist_hash
             return tl::unexpected {entries.error()};
         }
         for (auto const& entry : *entries) {
-            auto const visited = visitor(entry.hash,
-                                         position_postings_summary {.occurrence_count = entry.occurrence_count,
-                                                                    .distinct_game_count = entry.distinct_game_count,
-                                                                    .min_ply = entry.min_ply,
-                                                                    .max_ply = entry.max_ply});
+            auto summary = position_postings_summary {.occurrence_count = entry.occurrence_count,
+                                                      .distinct_game_count = entry.distinct_game_count,
+                                                      .min_ply = entry.min_ply,
+                                                      .max_ply = entry.max_ply};
+            if (retired_count_ != 0U) {
+                // The directory describes the raw block; the live part needs the block itself.
+                auto const bytes = chunks.block(entry.posting_offset, entry.posting_byte_length);
+                if (!bytes) {
+                    return tl::unexpected {bytes.error()};
+                }
+                auto live = decode_posting_block_live_summary(*bytes,
+                                                              entry,
+                                                              [&retired_ids](game_id const game_key) -> bool
+                                                              { return std::ranges::binary_search(retired_ids, game_key); });
+                if (!live) {
+                    return tl::unexpected {live.error()};
+                }
+                if (live->distinct_game_count == 0U) {
+                    continue;
+                }
+                summary = *live;
+            }
+            auto const visited = visitor(entry.hash, summary);
             if (!visited) {
                 return tl::unexpected {visited.error()};
             }
@@ -1667,6 +2052,20 @@ auto position_postings::summary(zobrist_hash const hash) const -> result<std::op
     if (!is_open_) {
         return tl::unexpected {error_code::invalid_argument};
     }
+    // With retired documents the answer needs the posting block; a remembered one skips
+    // even the directory lookup.
+    auto const retired = retired_count_ != 0U;
+    auto* const cache = retired ? live_summaries_.get() : nullptr;
+    if (cache != nullptr) {
+        auto const lock = std::scoped_lock {cache->mutex};
+        if (cache->epoch != retired_epoch_) {
+            cache->entries.clear();
+            cache->epoch = retired_epoch_;
+        }
+        if (auto const hit = cache->entries.find(hash.value); hit != cache->entries.end()) {
+            return hit->second;
+        }
+    }
     auto entry_result = find_directory_block_entry(path_, sparse_directory_, hash);
     if (!entry_result) {
         return tl::unexpected {entry_result.error()};
@@ -1676,13 +2075,136 @@ auto position_postings::summary(zobrist_hash const hash) const -> result<std::op
         return std::optional<position_postings_summary> {};
     }
     auto const entry = *entry_option;
-    return position_postings_summary {.occurrence_count = entry.occurrence_count,
-                                      .distinct_game_count = entry.distinct_game_count,
-                                      .min_ply = entry.min_ply,
-                                      .max_ply = entry.max_ply};
+    if (!retired) {
+        return position_postings_summary {.occurrence_count = entry.occurrence_count,
+                                          .distinct_game_count = entry.distinct_game_count,
+                                          .min_ply = entry.min_ply,
+                                          .max_ply = entry.max_ply};
+    }
+    std::ifstream input {path_, std::ios::binary};
+    if (!input) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const bytes = read_posting_block(input, entry);
+    if (!bytes) {
+        return tl::unexpected {bytes.error()};
+    }
+    auto cursor = metadata_.cbegin();
+    auto const live = decode_posting_block_live_summary(
+        *bytes, entry, [this, &cursor](game_id const game_key) -> bool { return probe_retired(metadata_, cursor, game_key); });
+    if (!live) {
+        return tl::unexpected {live.error()};
+    }
+    auto const answer =
+        live->distinct_game_count == 0U ? std::optional<position_postings_summary> {} : std::optional<position_postings_summary> {*live};
+    if (cache != nullptr) {
+        auto const lock = std::scoped_lock {cache->mutex};
+        if (cache->epoch == retired_epoch_) {
+            if (cache->entries.size() >= live_summary_cache::capacity) {
+                cache->entries.clear();
+            }
+            cache->entries.insert_or_assign(hash.value, answer);
+        }
+    }
+    return answer;
+}
+
+// Every cursor step of the ascending merge join must propagate its decode error.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+auto position_postings::edge_extrema(position_edge_scan const& scan) const -> result<std::optional<position_edge_extrema>>
+{
+    if (!is_open_) {
+        return tl::unexpected {error_code::invalid_argument};
+    }
+    auto const root_entry = find_directory_block_entry(path_, sparse_directory_, scan.root);
+    auto const child_entry = find_directory_block_entry(path_, sparse_directory_, scan.child);
+    if (!root_entry || !child_entry) {
+        return tl::unexpected {root_entry ? child_entry.error() : root_entry.error()};
+    }
+    auto const& root_block = *root_entry;
+    auto const& child_block = *child_entry;
+    if (!root_block || !child_block) {
+        return std::optional<position_edge_extrema> {};
+    }
+    std::ifstream input {path_, std::ios::binary};
+    if (!input) {
+        return tl::unexpected {error_code::io_failure};
+    }
+    auto const root_bytes = read_posting_block(input, *root_block);
+    auto const child_bytes = read_posting_block(input, *child_block);
+    if (!root_bytes || !child_bytes) {
+        return tl::unexpected {root_bytes ? child_bytes.error() : root_bytes.error()};
+    }
+    auto root_cursor = posting_group_cursor {*root_bytes, *root_block};
+    auto child_cursor = posting_group_cursor {*child_bytes, *child_block};
+    auto have_root = root_cursor.advance();
+    auto have_child = child_cursor.advance();
+
+    auto retired_cursor = metadata_.cbegin();
+    auto found = std::optional<position_edge_extrema> {};
+    auto const settled = [&scan, &found]() -> bool
+    {
+        // The first match settles the smallest id; a minimum ply is settled once it reaches the floor.
+        return found && !scan.want_sample_max && (!scan.want_min_ply || found->min_root_ply <= scan.min_ply_floor);
+    };
+    // Ascending merge join on game id. Ids above the ceiling cannot reach the edge, so the
+    // walk ends there; at the ceiling itself it ends after that game.
+    while (have_root && *have_root && have_child && *have_child) {
+        auto const root_id = root_cursor.id();
+        auto const child_id = child_cursor.id();
+        if (scan.sample_ceiling && (root_id > *scan.sample_ceiling || child_id > *scan.sample_ceiling)) {
+            break;
+        }
+        if (root_id < child_id) {
+            have_root = root_cursor.advance();
+            continue;
+        }
+        if (child_id < root_id) {
+            have_child = child_cursor.advance();
+            continue;
+        }
+        if (root_id != scan.excluded && !probe_retired(metadata_, retired_cursor, root_id)) {
+            auto const ply = first_edge_ply(root_cursor.plies(), child_cursor.plies(), scan.max_root_ply, scan.any_root_ply);
+            if (ply) {
+                if (!found) {
+                    found = position_edge_extrema {.min_root_ply = *ply, .sample_min = root_id, .sample_max = root_id};
+                } else {
+                    found->min_root_ply = std::min(found->min_root_ply, *ply);
+                    found->sample_max = root_id;
+                }
+                if (settled()) {
+                    break;
+                }
+            }
+        }
+        if (scan.sample_ceiling && root_id >= *scan.sample_ceiling) {
+            break;
+        }
+        have_root = root_cursor.advance();
+        have_child = child_cursor.advance();
+    }
+    if (!have_root || !have_child) {
+        return tl::unexpected {have_root ? have_child.error() : have_root.error()};
+    }
+    // An early exit decides what the join found, never whether the blocks are sound: the rest of
+    // each block is checked like every other reader checks the whole of what it decodes.
+    if (auto const root_sound = root_cursor.finish(); !root_sound) {
+        return tl::unexpected {root_sound.error()};
+    }
+    if (auto const child_sound = child_cursor.finish(); !child_sound) {
+        return tl::unexpected {child_sound.error()};
+    }
+    return found;
 }
 
 auto position_postings::distinct_game_ids(zobrist_hash const hash) const -> result<std::vector<game_id>>
+{
+    return distinct_game_ids(hash, 0U, 0U);
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- public pagination order matches query_position_matches(limit, offset).
+auto position_postings::distinct_game_ids(zobrist_hash const hash, std::size_t const limit, std::size_t const offset) const
+    -> result<std::vector<game_id>>
 {
     if (!is_open_) {
         return tl::unexpected {error_code::invalid_argument};
@@ -1702,34 +2224,21 @@ auto position_postings::distinct_game_ids(zobrist_hash const hash) const -> resu
     if (!input || !input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
         return tl::unexpected {error_code::io_failure};
     }
-    auto game_ids = decode_posting_block_game_ids(bytes, entry);
-    if (!game_ids) {
-        return tl::unexpected {game_ids.error()};
-    }
-    for (auto const game_key : *game_ids) {
-        auto const metadata = std::ranges::lower_bound(metadata_, game_key, {}, [](auto const& record) -> game_id { return record.id; });
-        if (metadata == metadata_.end() || metadata->id != game_key) {
-            return tl::unexpected {error_code::schema_mismatch};
-        }
-    }
-    return *game_ids;
-}
-
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- public pagination order matches query_position_matches(limit, offset).
-auto position_postings::distinct_game_ids(zobrist_hash const hash, std::size_t const limit, std::size_t const offset) const
-    -> result<std::vector<game_id>>
-{
-    auto game_ids = distinct_game_ids(hash);
-    if (!game_ids) {
-        return tl::unexpected {game_ids.error()};
-    }
-    if (offset >= game_ids->size()) {
-        return std::vector<game_id> {};
-    }
-    auto const begin = game_ids->begin() + static_cast<std::ptrdiff_t>(offset);
-    auto const remaining = static_cast<std::size_t>(game_ids->end() - begin);
-    auto const end = limit == 0U ? game_ids->end() : begin + static_cast<std::ptrdiff_t>(std::min(limit, remaining));
-    return std::vector<game_id> {begin, end};
+    // The window is taken over the LIVE distinct games while the block is decoded, so a page
+    // holds at most `limit` ids however many games the block names, retired ones included.
+    auto cursor = metadata_.cbegin();
+    return decode_posting_block_game_window(bytes,
+                                            entry,
+                                            limit,
+                                            offset,
+                                            [this, &cursor](game_id const game_key) -> document_standing
+                                            {
+                                                auto const retired = probe_retired(metadata_, cursor, game_key);
+                                                if (cursor == metadata_.cend() || cursor->id != game_key) {
+                                                    return document_standing::unknown;
+                                                }
+                                                return retired ? document_standing::retired : document_standing::live;
+                                            });
 }
 
 auto position_postings::first_occurrences(zobrist_hash const hash, std::span<game_id const> const requested_game_ids) const
@@ -1768,6 +2277,9 @@ auto position_postings::first_occurrences(zobrist_hash const hash, std::span<gam
         if (metadata_iterator == metadata_.end() || metadata_iterator->id != occurrence.id) {
             return tl::unexpected {error_code::schema_mismatch};
         }
+        if (metadata_iterator->retired) {
+            continue;
+        }
         matches.push_back(position_match {.game_id = occurrence.id,
                                           .ply = occurrence.ply,
                                           .result = metadata_iterator->result,
@@ -1798,7 +2310,15 @@ auto position_postings::occurrences(zobrist_hash const hash, std::size_t const l
     if (!input || !input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
         return tl::unexpected {error_code::io_failure};
     }
-    auto decoded = decode_posting_block_window(bytes, entry, limit, offset);
+    // The window is taken over the LIVE occurrences while the block is decoded, so a
+    // page costs the block's bytes and at most `limit` rows, retired documents or not.
+    auto cursor = metadata_.cbegin();
+    auto decoded = decode_posting_block_window(bytes,
+                                               entry,
+                                               limit,
+                                               offset,
+                                               [this, &cursor](game_id const game_key) -> bool
+                                               { return retired_count_ != 0U && probe_retired(metadata_, cursor, game_key); });
     if (!decoded) {
         return tl::unexpected {decoded.error()};
     }
@@ -1828,7 +2348,8 @@ namespace
 auto valid_after_image(position_metadata_after_image const& image) noexcept -> bool
 {
     // One content revision per game in this version; result is the 3-valued code.
-    return image.id.value != 0U && image.content_revision == 1U && image.result >= -1 && image.result <= 1;
+    return image.id.value != 0U && image.content_revision == 1U && image.result >= -1 && image.result <= 1
+        && (!image.retired || (image.result == 0 && !image.white_elo && !image.black_elo));
 }
 
 }  // namespace
@@ -1854,10 +2375,20 @@ auto position_postings::apply_metadata_overlay(std::span<position_metadata_after
     }
     for (std::size_t index = 0; index < sorted_records.size(); ++index) {
         auto& slot = metadata_[slots[index]];
-        slot.result = sorted_records[index].result;
-        slot.white_elo = sorted_records[index].white_elo;
-        slot.black_elo = sorted_records[index].black_elo;
+        auto const& image = sorted_records[index];
+        if (slot.retired != image.retired) {
+            if (image.retired) {
+                ++retired_count_;
+            } else {
+                --retired_count_;
+            }
+        }
+        slot.result = image.result;
+        slot.white_elo = image.white_elo;
+        slot.black_elo = image.black_elo;
+        slot.retired = image.retired;
     }
+    ++retired_epoch_;
     return {};
 }
 
@@ -1870,6 +2401,11 @@ auto position_postings::prepare_metadata_update(position_metadata_after_image co
     if (found == metadata_.end() || found->id != image.id) {
         return tl::unexpected {error {error_code::not_found, "metadata after-image names an unknown document"}};
     }
+    if (found->retired) {
+        // A retired document is gone: it can be neither edited nor retired again.
+        return tl::unexpected {image.retired ? error {error_code::io_failure, "document is already retired"}
+                                             : error {error_code::not_found, "metadata after-image names a retired document"}};
+    }
     return position_metadata_slot {.index = static_cast<std::size_t>(found - metadata_.begin()), .image = image};
 }
 
@@ -1881,12 +2417,17 @@ void position_postings::install_metadata_update(position_metadata_slot const& sl
     entry.result = slot.image.result;
     entry.white_elo = slot.image.white_elo;
     entry.black_elo = slot.image.black_elo;
+    if (slot.image.retired && !entry.retired) {
+        entry.retired = true;
+        ++retired_count_;
+        ++retired_epoch_;
+    }
 }
 
 auto position_postings::metadata_for(game_id const game) const -> std::optional<position_metadata_after_image>
 {
     auto const found = std::ranges::lower_bound(metadata_, game, {}, [](auto const& record) -> game_id { return record.id; });
-    if (found == metadata_.end() || found->id != game) {
+    if (found == metadata_.end() || found->id != game || found->retired) {
         return std::nullopt;
     }
     return position_metadata_after_image {
@@ -1896,6 +2437,9 @@ auto position_postings::metadata_for(game_id const game) const -> std::optional<
 void position_postings::for_each_metadata(std::function<void(position_metadata_after_image const&)> const& visitor) const
 {
     for (auto const& record : metadata_) {
+        if (record.retired) {
+            continue;
+        }
         visitor(position_metadata_after_image {
             .id = record.id, .content_revision = 1, .result = record.result, .white_elo = record.white_elo, .black_elo = record.black_elo});
     }

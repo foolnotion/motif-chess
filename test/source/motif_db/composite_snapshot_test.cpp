@@ -240,6 +240,60 @@ struct harness
         CHECK(status->tree_usable == with_tree);
     }
 
+    // Emulates a removal published by an older writer: the game's row goes, the sequence advances once, and the
+    // snapshot gets a tombstone run and a retraction run that INVALIDATES the extrema the game could have witnessed
+    // (no exact extrema), in the postings child-frequency mode.
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this one linear removal sequence.
+    void remove_with_invalidated_extrema(std::size_t const index)
+    {
+        REQUIRE(with_tree);
+        auto const removed = corpus[index];
+        auto const from = sequence();
+        {
+            auto const connection = sql_connection {bundle / "games.db"};
+            connection.exec("DELETE FROM game WHERE id = " + std::to_string(index + 1) + ";");
+            connection.exec("UPDATE mutation_state SET mutation_seq = mutation_seq + 1 WHERE id = 1;");
+        }
+        auto const to_seq = from + 1;
+        auto payload = manager->manifest().payload;
+        auto staged_files = std::vector<staged_derived_artifact> {};
+        auto metadata = metadata_artifact {.identity = {.bundle_id = identity(), .index_semantics = index_semantics_version},
+                                           .kind = metadata_artifact_kind::run,
+                                           .from_exclusive_seq = from,
+                                           .to_inclusive_seq = to_seq,
+                                           .records = {position_metadata_after_image {.id = game_id {static_cast<std::uint32_t>(index + 1)},
+                                                                                      .content_revision = 1,
+                                                                                      .result = 0,
+                                                                                      .white_elo = std::nullopt,
+                                                                                      .black_elo = std::nullopt,
+                                                                                      .retired = true}},
+                                           .encoded_bytes = 0};
+        auto [metadata_staged, metadata_descriptor] =
+            stage(derived_artifact_family::postings_metadata,
+                  [&](std::filesystem::path const& path) -> result<void> { return write_metadata_artifact(path, metadata); });
+        staged_files.push_back(metadata_staged);
+        payload.metadata.runs.push_back(
+            patch_run_descriptor {.artifact = metadata_descriptor, .from_exclusive_seq = from, .to_inclusive_seq = to_seq});
+
+        auto builder = tree_patch_builder {tree_identity()};
+        REQUIRE(builder.add_game_removal(motif_test::tree_state_of(removed, static_cast<std::uint32_t>(index + 1))).has_value());
+        auto run = builder.build(from, to_seq);
+        REQUIRE(run.has_value());
+        auto [tree_staged, tree_descriptor] =
+            stage(derived_artifact_family::tree_patch,
+                  [&](std::filesystem::path const& path) -> result<void> { return write_tree_patch_run(path, *run); });
+        staged_files.push_back(tree_staged);
+        auto& tree_payload = motif_test::require_value(payload.tree);
+        tree_payload.patch_runs.push_back(
+            patch_run_descriptor {.artifact = tree_descriptor, .from_exclusive_seq = from, .to_inclusive_seq = to_seq});
+        tree_payload.covered_mutation_seq = to_seq;
+        tree_payload.child_frequency_mode = tree_child_frequency_mode::postings;
+        auto const published = publish(snapshot_chain_publication {.payload = std::move(payload), .staged = std::move(staged_files)});
+        INFO((published.has_value() ? std::string {} : published.error().message));
+        REQUIRE(published.has_value());
+        corpus.erase(corpus.begin() + static_cast<std::ptrdiff_t>(index));
+    }
+
     [[nodiscard]] auto tree_identity() const -> tree_patch_identity
     {
         return tree_patch_identity {.bundle_id = identity(),
@@ -568,6 +622,53 @@ void require_tree_disabled_and_postings_exact(harness& env, std::uint64_t const 
 }
 
 }  // namespace
+
+// A chain that holds a retraction run which only invalidated extrema (what an older writer published) still serves
+// exact answers: the nodes whose edges cannot be presented from the tree are answered from exact postings, and
+// every other node still comes from the tree.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear test.
+TEST_CASE("a retraction run that invalidated extrema is answered from exact postings, not refused", "[motif-db][pr7][composite][legacy]")
+{
+    constexpr auto seed = std::uint64_t {531};
+    constexpr auto random_games = std::size_t {12};
+    harness env {seed, random_games, /*tree=*/true};
+    env.remove_with_invalidated_extrema(env.corpus.size() - 1U);  // the last id: survivors keep ids 1..N
+
+    auto const status = env.manager->derived_index_status();
+    REQUIRE(status.has_value());
+    REQUIRE(status->postings_usable);
+    REQUIRE(status->tree_usable);
+    // The chain really holds inexact extrema.
+    auto const composite = motif_test::load_chain_tree(env.bundle, env.manager->manifest());
+    REQUIRE(composite.has_value());
+    auto inexact_edges = std::size_t {0};
+    REQUIRE(composite
+                ->for_each_node(
+                    [&](raw_node const& node) -> result<void>
+                    {
+                        for (auto const& edge : node.edges) {
+                            inexact_edges += (!edge.min_root_ply_valid || !edge.sample_bounds_valid) ? 1U : 0U;
+                        }
+                        return {};
+                    })
+                .has_value());
+    REQUIRE(inexact_edges > 0U);
+
+    temp_dir const fresh_dir {"fresh-legacy-retraction"};
+    auto fresh = motif_test::build_bundle(fresh_dir.path / "db", env.corpus, /*with_tree=*/true);
+    constexpr auto probe_seed = 7U;
+    auto rng = std::mt19937_64 {probe_seed};  // NOLINT(cert-msc51-cpp,cert-msc32-c) -- a fixed seed keeps the fixtures reproducible.
+    auto hashes = probe_hashes(env.corpus, rng);
+    hashes.push_back(motif_test::start_hash());
+    for (auto const hash : hashes) {
+        auto const got = env.manager->query_unfiltered_opening_stats(zobrist_hash {hash});
+        auto const want = fresh.query_unfiltered_opening_stats(zobrist_hash {hash});
+        INFO("hash " << hash);
+        REQUIRE(got.has_value());
+        REQUIRE(want.has_value());
+        REQUIRE(rows_equal(*got, *want));
+    }
+}
 
 TEST_CASE("a flipped byte in a tree run (checksum mismatch) disables the whole composite tree", "[motif-db][pr6a][composite][corruption]")
 {

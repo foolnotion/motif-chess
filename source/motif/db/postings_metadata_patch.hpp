@@ -28,14 +28,21 @@ namespace motif::db
 //   record (18 bytes, strictly ascending by (game_id, content_revision)):
 //           u32 game_id | u64 content_revision | u8 result (0 black win,
 //           1 draw/other, 2 white win -- the postings encoding) | u8 flags
-//           (bit0 white rating present, bit1 black present) | i16 white_elo bits |
-//           i16 black_elo bits (zero when the flag is clear)
+//           (bit0 white rating present, bit1 black present, bit2 retired) |
+//           i16 white_elo bits | i16 black_elo bits (zero when the flag is clear)
 //   EOF exactly after the last record; the descriptor's FNV-1a-64 covers it all.
 //
 // A RUN holds the latest after-image of each document an epoch touched. A
 // CHECKPOINT is the accumulated sparse override set relative to the segment's
 // embedded baseline (last write wins per document); it is NOT a second full
 // metadata table. PR 6 requires content revision 1.
+//
+// A record with the retired flag is the tombstone of a removed game: the
+// document stays in the immutable segment but is invisible to every query. It
+// is canonical only with result code 1 (draw) and no ratings, and no later
+// record may follow it for the same document (a removed game never comes back;
+// game ids are never reused). Readers of format version 1 that predate the flag
+// reject the unknown bit, so such a chain is never half-applied.
 inline constexpr std::uint64_t metadata_record_bytes = 18;
 inline constexpr std::uint64_t metadata_artifact_max_encoded_bytes = std::uint64_t {64} << 20U;
 

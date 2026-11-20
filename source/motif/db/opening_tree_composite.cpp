@@ -63,13 +63,15 @@ struct patch_flags
     bool invalidate_min {};
     bool invalidate_samples {};
     bool candidates {};
+    bool exact {};
 };
 
 auto flags_of(tree_patch_edge const& patch) noexcept -> patch_flags
 {
     return {.invalidate_min = (patch.validity_mask & tree_patch_mask_invalidate_min_ply) != 0U,
             .invalidate_samples = (patch.validity_mask & tree_patch_mask_invalidate_samples) != 0U,
-            .candidates = (patch.validity_mask & tree_patch_mask_candidates) != 0U};
+            .candidates = (patch.validity_mask & tree_patch_mask_candidates) != 0U,
+            .exact = (patch.validity_mask & tree_patch_mask_exact_extrema) != 0U};
 }
 
 // A fresh edge has no live base, so its extrema come only from candidates.
@@ -92,9 +94,18 @@ void seed_extrema(raw_edge& edge, tree_patch_edge const& patch, patch_flags cons
 }
 
 // Invalid flags are sticky; candidates combine only while the base field is
-// still exact.
+// still exact. An exact patch carries the extrema of the games that remain and
+// replaces the base's (valid or not).
 void combine_extrema(raw_edge& edge, tree_patch_edge const& patch, patch_flags const flags)
 {
+    if (flags.exact) {
+        edge.min_root_ply = patch.candidate_min_root_ply;
+        edge.min_root_ply_valid = true;
+        edge.sample_min = patch.candidate_sample_min;
+        edge.sample_max = patch.candidate_sample_max;
+        edge.sample_bounds_valid = true;
+        return;
+    }
     if (flags.invalidate_min) {
         edge.min_root_ply_valid = false;
     }
@@ -508,8 +519,9 @@ auto composite_opening_tree::validate_touched_nodes(std::span<tree_patch_run_ptr
     return {};
 }
 
-auto composite_opening_tree::with_appended_run(tree_patch_run_ptr run, std::uint64_t const max_decoded_bytes) const
-    -> result<composite_opening_tree>
+auto composite_opening_tree::with_appended_run(tree_patch_run_ptr run,
+                                               std::uint64_t const max_decoded_bytes,
+                                               std::optional<tree_child_frequency_mode> const mode) const -> result<composite_opening_tree>
 {
     if (!run) {
         return corrupt("null patch run");
@@ -518,8 +530,8 @@ auto composite_opening_tree::with_appended_run(tree_patch_run_ptr run, std::uint
     tree.checkpoint_ = checkpoint_;
     tree.runs_ = runs_;
     tree.runs_.push_back(run);
-    tree.mode_ = mode_;
-    auto const source = validate_run_set(*tree.checkpoint_, tree.runs_, mode_, max_decoded_bytes);
+    tree.mode_ = mode.value_or(mode_);
+    auto const source = validate_run_set(*tree.checkpoint_, tree.runs_, tree.mode_, max_decoded_bytes);
     if (!source) {
         return tl::unexpected {source.error()};
     }

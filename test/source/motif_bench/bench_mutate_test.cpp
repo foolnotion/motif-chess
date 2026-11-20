@@ -3,24 +3,32 @@
 // opening-tree navigation) answerable again. Every mutation kind runs on a
 // fresh copy of the cached reference bundle.
 //
-// Insert and removal still invalidate the derived indexes, so queries fail
-// until they are rebuilt; await_ready() (bench_support.hpp) detects that and
-// calls the manager's rebuild entry points inside the timed window, recording
-// them separately. A result/Elo correction (patch_elo_1, patch_elo_imported_1)
-// is incremental since PR 6: one metadata run and one signed tree run are
-// published in the edit's own FULL commit, so await_ready() finds nothing to
-// rebuild, `incremental` is 1 and rebuild_*_ms are 0. When insert/removal
-// become incremental the same code reports them the same way, with no change here.
+// An insert still invalidates the derived indexes, so queries fail until they
+// are rebuilt; await_ready() (bench_support.hpp) detects that and calls the
+// manager's rebuild entry points inside the timed window, recording them
+// separately. A result/Elo correction (patch_elo_1, patch_elo_imported_1) is
+// incremental since PR 6: one metadata run and one signed tree run are published
+// in the edit's own FULL commit, so await_ready() finds nothing to rebuild,
+// `incremental` is 1 and rebuild_*_ms are 0. A removal (remove_1,
+// remove_imported_1, remove_imported_8) is incremental since PR 7 in the same
+// way: a tombstone run and, with a tree, a retraction run carrying the exact
+// extrema of the remaining games. The imported kinds delete random imported games
+// of the corpus (remove_game, not the manual fixture) so the retraction touches
+// edges near the top of the tree; remove_imported_8 deletes eight of them in a row.
 //
-// Metrics per kind K in {insert_1, insert_100, remove_1, patch_elo_1,
-// patch_elo_imported_1, patch_meta_1}: K.mutate_ms (the call itself;
+// Metrics per kind K in {insert_1, insert_100, remove_1, remove_imported_1,
+// remove_imported_8, patch_elo_1, patch_elo_imported_1, patch_meta_1}: K.mutate_ms (the call itself;
 // patch_elo_1.patch_ms is the same number), K.ready_ms (mutation start until
 // the start-position query and a full 512-position navigation pass answer
 // again), K.rebuild_ms / rebuild_postings_ms / rebuild_tree_ms, K.incremental,
-// K.nav_p50_us / nav_p99_us (warm, afterwards), K.postings_bytes / tree_bytes
+// K.nav_p50_us / nav_p99_us (warm, afterwards), K.start_p50_us / start_p99_us (the
+// warm start-position query afterwards), K.postings_bytes / tree_bytes
 // (derived index files afterwards), K.tree_patch_bytes / metadata_bytes (the
 // per-edit chain files) and K.peak_rss_mib (this kind only, where
 // /proc/self/clear_refs is available).
+//
+// `remove_chain` is the same for N sequential removals of random imported games (see the
+// test case for its metrics).
 //
 // `patch_chain` applies N = 1, 4, 8, 16 and 17 sequential Elo corrections and
 // reports nav_p50_us after each count, patch_ms for each edit, compact_ms (the
@@ -40,6 +48,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "motif/db/patch_chain.hpp"
 #include "motif_bench/bench_support.hpp"
 
 using motif_bench::await_ready;
@@ -50,6 +59,7 @@ using motif_bench::emit;
 using motif_bench::emit_latency_us;
 using motif_bench::emit_readiness;
 using motif_bench::ensure_base_bundle;
+using motif_bench::env_size;
 using motif_bench::env_string;
 using motif_bench::load_games;
 using motif_bench::make_unique_game;
@@ -79,6 +89,7 @@ constexpr std::size_t segment_inserts = 10;
 constexpr std::int32_t fallback_elo = 2000;
 constexpr std::int32_t elo_patch_delta = 37;
 constexpr std::size_t full_chain_count = 16;
+constexpr std::size_t removal_sequence_count = 8;
 
 struct fixture
 {
@@ -86,6 +97,8 @@ struct fixture
     std::vector<motif::db::zobrist_hash> sample;
     std::vector<motif::db::game> donors;
     motif::db::game_id imported_id;
+    // Imported games the removal kinds delete (the first one for remove_imported_1).
+    std::vector<motif::db::game_id> removal_ids;
     motif::db::game_patch manual_patch;
     motif::db::game_patch imported_patch;
 };
@@ -121,8 +134,28 @@ auto make_fixture() -> fixture
     data.donors = load_games(*source, sample_game_ids(*source, donor_count, donor_seed));
     REQUIRE(data.donors.size() == donor_count);
     prepare_patches(*source, data);
+    data.removal_ids = sample_game_ids(*source, removal_sequence_count, donor_seed + 3U);
+    REQUIRE(data.removal_ids.size() == removal_sequence_count);
     source->close();
     return data;
+}
+
+// The run caps of the PR 6 gate (soft 8, hard 16), which `patch_chain` keeps so its baseline stays comparable.
+auto pr6_chain_limits() -> motif::db::patch_chain_limits
+{
+    auto limits = motif::db::patch_chain_limits {};
+    limits.soft_runs = full_chain_count / 2U;
+    limits.hard_runs = full_chain_count;
+    return limits;
+}
+
+// Sets the hard run cap `remove_chain` measures up to (the soft cap is half of it).
+void apply_remove_chain_limits(motif::db::database_manager& manager, std::size_t const hard_runs)
+{
+    auto limits = manager.chain_limits();
+    limits.hard_runs = hard_runs;
+    limits.soft_runs = hard_runs / 2U;
+    manager.set_chain_limits(limits);
 }
 
 // MOTIF_BENCH_KINDS=insert_1,remove_1 restricts the mutation kinds (default:
@@ -168,6 +201,7 @@ void run_kind(fixture const& data,
     }
     emit_readiness(scenario, prefix, report);
     emit_latency_us(scenario, prefix + "nav", warm_navigation_us(*manager, data.sample));
+    emit_latency_us(scenario, prefix + "start", warm_start_us(*manager));
     auto const bytes = measure_bundle(copy);
     emit(scenario, prefix + "postings_bytes", bytes.postings);
     emit(scenario, prefix + "tree_bytes", bytes.tree);
@@ -210,6 +244,25 @@ TEST_CASE("bench: mutate", "[performance][bench]")
              "remove_1",
              [&](motif::db::database_manager& manager) -> void { REQUIRE(manager.remove_user_game(manual).has_value()); });
 
+    // A random imported game (not the manual fixture) through remove_game: the retraction touches
+    // edges near the top of the tree, whose cached extrema the removal must keep exact, and the
+    // child counts of every position it visits are resolved from the tombstoned postings.
+    run_kind(data,
+             scenario,
+             "remove_imported_1",
+             [&](motif::db::database_manager& manager) -> void { REQUIRE(manager.remove_game(data.removal_ids.front()).has_value()); });
+
+    // Eight sequential removals: eight tombstones and eight retraction runs in the chains.
+    run_kind(data,
+             scenario,
+             "remove_imported_8",
+             [&](motif::db::database_manager& manager) -> void
+             {
+                 for (auto const removal_id : data.removal_ids) {
+                     REQUIRE(manager.remove_game(removal_id).has_value());
+                 }
+             });
+
     run_kind(data,
              scenario,
              "patch_elo_1",
@@ -241,7 +294,9 @@ TEST_CASE("bench: patch_chain", "[performance][bench]")
 {
     // Sequential single-game Elo corrections on a copy of the base bundle, each a
     // separate incremental edit (one metadata run + one tree run per edit, then a
-    // synchronous fold when the hard cap of 16 runs would be exceeded).
+    // synchronous fold when the hard cap of 16 runs would be exceeded). The caps are
+    // pinned to the PR 6 values (soft 8, hard 16) so the scenario stays comparable with its
+    // baseline; the manager's defaults are longer (see patch_chain.hpp).
     //
     // Metrics: patch_<k>_ms (the k-th edit), n<N>.nav_p50_us / n<N>.nav_p99_us
     // (warm navigation after N edits, N in {1, 4, 8, 16, 17}), compact_ms (the
@@ -260,6 +315,7 @@ TEST_CASE("bench: patch_chain", "[performance][bench]")
     auto manager = motif::db::database_manager::open(copy);
     REQUIRE(manager.has_value());
     REQUIRE(tree_in_service(*manager));
+    manager->set_chain_limits(pr6_chain_limits());
     (void)navigation_pass_us(*manager, data.sample);
 
     // One edit per game, so every run carries different content; sampled from the
@@ -319,12 +375,113 @@ TEST_CASE("bench: patch_chain", "[performance][bench]")
             emit(scenario, "chain_metadata_bytes", bytes.metadata);
             manager = motif::db::database_manager::open(copy);
             REQUIRE(manager.has_value());
+            manager->set_chain_limits(pr6_chain_limits());
             (void)navigation_pass_us(*manager, data.sample);
         }
     }
     emit(scenario, "compact_ms", compact_ms);
     emit(scenario, "peak_rss_mib", peak_rss_mib());
     manager->close();
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- one measured scenario, reported linearly
+TEST_CASE("bench: remove_chain", "[performance][bench]")
+{
+    // Sequential single-game removals of random imported games on a copy of the base
+    // bundle, each a separate incremental edit (one tombstone run + one retraction run
+    // per removal, then a synchronous fold when the hard run cap would be exceeded).
+    //
+    // Metrics: remove_<k>_ms (the k-th removal), extrema_scans_<k> (edges whose extrema the
+    // removal recomputed from the postings), n<N>.nav_p50_us / n<N>.nav_p99_us and
+    // n<N>.start_p50_us / n<N>.start_p99_us (warm, after N removals, N in {1, 4, 8, cap, cap + 1}),
+    // compact_ms (the removal that folded the chains: the one after the hard cap is full),
+    // open_full_chain_median_ms (opening a bundle that holds the full chain),
+    // tree_runs / metadata_runs after each count, and rebuild_tree_after_removals_ms next to
+    // rebuild_tree_untouched_ms (the same tree rebuild on a copy that lost no game).
+    skip_unless_benchmarkable();
+    constexpr auto scenario = "remove_chain";
+    // MOTIF_BENCH_HARD_RUNS sets the hard run cap (default: the manager's) and the soft cap to half of it; the
+    // measured counts follow it, so the last count is the one that folds.
+    auto const hard_runs = env_size("MOTIF_BENCH_HARD_RUNS", motif::db::default_hard_chain_runs);
+    std::array<std::size_t, 5> const counts {1, 4, 8, hard_runs, hard_runs + 1U};
+    constexpr std::size_t open_repeats = 5;
+    auto const data = make_fixture();
+
+    scoped_work_dir const work {"remove_chain"};
+    auto const copy = work.path() / "bundle";
+    copy_bundle(data.base.dir, copy);
+    auto manager = motif::db::database_manager::open(copy);
+    REQUIRE(manager.has_value());
+    REQUIRE(tree_in_service(*manager));
+    apply_remove_chain_limits(*manager, hard_runs);
+    (void)navigation_pass_us(*manager, data.sample);
+
+    auto const targets = sample_game_ids(*manager, counts.back(), donor_seed + 4U);
+    REQUIRE(targets.size() == counts.back());
+    emit(scenario, "baseline_nav_p50_us", percentile(warm_navigation_us(*manager, data.sample), median_quantile));
+    emit(scenario, "baseline_start_p50_us", percentile(warm_start_us(*manager), median_quantile));
+
+    auto removed = std::size_t {0};
+    auto compact_ms = 0.0;
+    for (auto const count : counts) {
+        while (removed < count) {
+            auto const begin = clock_type::now();
+            REQUIRE(manager->remove_game(targets[removed]).has_value());
+            auto const remove_ms = ms_since(begin);
+            ++removed;
+            emit(scenario, fmt::format("remove_{}_ms", removed), remove_ms);
+            auto const& report = manager->last_removal_report();
+            REQUIRE(report.published);
+            emit(scenario, fmt::format("extrema_scans_{}", removed), report.extrema_scans);
+            if (report.tree_folded && compact_ms == 0.0) {
+                compact_ms = remove_ms;  // the fold cost rides inside this removal
+            }
+        }
+        auto const prefix = fmt::format("n{}", count);
+        emit_latency_us(scenario, prefix + ".nav", warm_navigation_us(*manager, data.sample));
+        emit_latency_us(scenario, prefix + ".start", warm_start_us(*manager));
+        emit(scenario, prefix + ".tree_runs", manager->last_removal_report().tree_runs);
+        emit(scenario, prefix + ".metadata_runs", manager->last_removal_report().metadata_runs);
+        if (count == hard_runs) {
+            // The chain is as long as it may get: time opening a bundle that holds it.
+            manager->close();
+            auto const full_chain = work.path() / "full_chain";
+            copy_bundle(copy, full_chain);
+            std::vector<double> samples;
+            for (std::size_t i = 0; i < open_repeats; ++i) {
+                auto const begin = clock_type::now();
+                auto opened = motif::db::database_manager::open(full_chain);
+                samples.push_back(ms_since(begin));
+                REQUIRE(opened.has_value());
+                opened->close();
+            }
+            emit(scenario, "open_full_chain_median_ms", percentile(samples, median_quantile));
+            manager = motif::db::database_manager::open(copy);
+            REQUIRE(manager.has_value());
+            apply_remove_chain_limits(*manager, hard_runs);
+            (void)navigation_pass_us(*manager, data.sample);
+        }
+    }
+    emit(scenario, "compact_ms", compact_ms);
+    emit(scenario, "peak_rss_mib", peak_rss_mib());
+
+    // A tree rebuild streams every hash's live summary out of the postings: a pass over the
+    // directory alone while nothing is retired, and over every posting block once documents
+    // are. The same rebuild on an untouched copy is the reference.
+    auto const rebuilt_ms = [](motif::db::database_manager& target) -> double
+    {
+        auto const begin = clock_type::now();
+        REQUIRE(target.rebuild_opening_tree_index().has_value());
+        return ms_since(begin);
+    };
+    emit(scenario, "rebuild_tree_after_removals_ms", rebuilt_ms(*manager));
+    manager->close();
+    auto const untouched = work.path() / "untouched";
+    copy_bundle(data.base.dir, untouched);
+    auto reference = motif::db::database_manager::open(untouched);
+    REQUIRE(reference.has_value());
+    emit(scenario, "rebuild_tree_untouched_ms", rebuilt_ms(*reference));
+    reference->close();
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- one measured scenario, reported linearly

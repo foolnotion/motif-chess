@@ -32,8 +32,10 @@ namespace
 constexpr auto metadata_magic = std::string_view {"MOTIFPM1"};
 constexpr auto flag_white = std::uint8_t {0x01};
 constexpr auto flag_black = std::uint8_t {0x02};
+// The record is the tombstone of a removed game (its document is retired).
+constexpr auto flag_retired = std::uint8_t {0x04};
 // Bits of the record flags byte that no format version defines; they must be zero.
-constexpr auto unknown_flags_mask = std::uint8_t {0xFC};
+constexpr auto unknown_flags_mask = std::uint8_t {0xF8};
 // magic (8) + format version (4) + header length (4); the header length counts these too.
 constexpr auto fixed_prefix_bytes = std::size_t {16};
 constexpr auto int64_max_u = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
@@ -68,6 +70,10 @@ auto validate_metadata_artifact(metadata_artifact const& artifact) -> result<voi
         // PR 6: one content revision per document, result in the 3-valued code.
         if (record.id.value == 0U || record.content_revision != 1U || record.result < -1 || record.result > 1) {
             return corrupt("invalid metadata record");
+        }
+        // A tombstone carries no metadata: canonical form is a draw code and no ratings.
+        if (record.retired && (record.result != 0 || record.white_elo || record.black_elo)) {
+            return corrupt("a retired metadata record must be canonical");
         }
         if (previous && !(*previous < key_of(record))) {
             return corrupt("metadata records are not strictly ascending");
@@ -105,6 +111,9 @@ auto encode_metadata_artifact(metadata_artifact const& artifact) -> result<std::
         }
         if (record.black_elo) {
             flags |= flag_black;
+        }
+        if (record.retired) {
+            flags |= flag_retired;
         }
         append_fixed_le(out, record.id.value);
         append_fixed_le(out, record.content_revision);
@@ -181,13 +190,14 @@ auto decode_metadata_artifact(std::string_view const bytes, metadata_artifact_ex
         {
             return corrupt("invalid metadata record fields");
         }
+        auto const retired = (*flags & flag_retired) != 0U;
         artifact.records.push_back(position_metadata_after_image {
             .id = game_id {*document},
             .content_revision = *revision,
             .result = static_cast<std::int8_t>(static_cast<int>(*result_byte) - 1),
             .white_elo = (*flags & flag_white) != 0U ? std::optional<std::int16_t> {static_cast<std::int16_t>(*white_bits)} : std::nullopt,
-            .black_elo =
-                (*flags & flag_black) != 0U ? std::optional<std::int16_t> {static_cast<std::int16_t>(*black_bits)} : std::nullopt});
+            .black_elo = (*flags & flag_black) != 0U ? std::optional<std::int16_t> {static_cast<std::int16_t>(*black_bits)} : std::nullopt,
+            .retired = retired});
     }
     artifact.encoded_bytes = bytes.size();
     if (auto valid = validate_metadata_artifact(artifact); !valid) {

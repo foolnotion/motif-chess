@@ -55,12 +55,13 @@ enum class artifact_kind : std::uint8_t;
 // Publication order is build -> fsync -> rename -> fsync directory -> SQLite
 // COMMIT (FULL synchronous) -> install in memory -> manifest.json mirror. The
 // COMMIT is the only publication point. A result or rating correction
-// (patch_game_metadata) is the one mutation that keeps the indexes valid: its
-// canonical UPDATE, its single sequence advance and the new snapshot row (with a
-// metadata after-image run and, when a tree exists, a signed tree-delta run)
-// share that one COMMIT. Insert, removal and dedup still invalidate the indexes
-// until the next rebuild (PR 7/8 make them incremental); metadata the indexes do
-// not embed does not invalidate them.
+// (patch_game_metadata) and a game removal (remove_game) are the mutations that
+// keep the indexes valid: the canonical write, its single sequence advance and
+// the new snapshot row (with a metadata after-image run -- a tombstone for a
+// removal -- and, when a tree exists, a signed tree-delta run) share that one
+// COMMIT. Insert and dedup still invalidate the indexes until the next rebuild
+// (PR 8 makes insert incremental); metadata the indexes do not embed does not
+// invalidate them.
 //
 // A bundle from before postings existed (games.db plus a legacy
 // positions.duckdb and no postings) is a one-release migration case: open()
@@ -267,12 +268,23 @@ class database_manager
         // and their plies.
         std::uint64_t replayed_games {};
         std::uint64_t replayed_plies {};
+        // Edges of a removed game whose extrema (minimum root ply, sample bounds) the
+        // game could have witnessed and were recomputed from the postings.
+        std::uint64_t extrema_scans {};
     };
 
     [[nodiscard]] auto last_patch_report() const noexcept -> patch_report const& { return last_patch_report_; }
 
+    // What the last remove_game call did to the derived state, in the same
+    // vocabulary: `published` (one FULL transaction removed the game and
+    // published its retraction), or `canonical_only` (the indexes did not cover
+    // the bundle, so only SQLite changed and they stay stale until a rebuild).
+    // replayed_games/replayed_plies count the one game whose moves were replayed
+    // for its tree retraction (zero without a tree). canonical_noop is never set.
+    [[nodiscard]] auto last_removal_report() const noexcept -> patch_report const& { return last_removal_report_; }
+
     // Admission thresholds for the tree-run and metadata-run chains. The defaults
-    // are the design's initial tunables (soft 8 runs / 4 MiB, hard 16 runs /
+    // are tunables (soft 32 runs / 4 MiB, hard 64 runs /
     // 16 MiB, 64 MiB decoded); tests pass small values to cross the caps.
     //
     // The hard run count and hard decoded size are clamped to what open() accepts
@@ -282,10 +294,42 @@ class database_manager
 
     [[nodiscard]] auto chain_limits() const noexcept -> patch_chain_limits const& { return chain_limits_; }
 
-    // Delete a game from the SQLite game store; the mutation sequence advances
-    // in the same transaction, so a same-count delete + insert can never leave
-    // the old snapshot looking valid.
-    // Returns error_code::not_found if the game does not exist.
+    // Delete a game. The mutation sequence advances in the same transaction, so
+    // a same-count delete + insert can never leave the old snapshot looking
+    // valid.
+    //
+    // While the derived indexes cover the bundle (derived_index_status()
+    // reports usable postings, no canonical transaction open) the removal is
+    // INCREMENTAL and exact: no corpus replay, no postings or tree rebuild. Under
+    // the generation lock it reads the game (and, only when a tree exists, its
+    // moves), durably installs the small unreferenced artifacts it needs -- one
+    // metadata run holding the game's tombstone (its document stays in the
+    // immutable postings segment but is retired, so every query behaves as if
+    // the segment had been built without it) and, with a tree, one signed
+    // tree-delta run that retracts the game's numeric contributions and, on
+    // every edge the game may have witnessed the extrema of, replaces them with
+    // the exact extrema of the remaining games recomputed from the postings (a
+    // join of two posting blocks per such edge, not a replay of any game), so
+    // the tree keeps answering instead of invalidating whole nodes (a chain written
+    // by an older writer that only invalidated them is still answered, from exact
+    // postings, for the nodes it affects) -- or the
+    // checkpoint that folds a chain that would otherwise pass its hard cap; then commits ONE FULL-synchronous
+    // SQLite transaction holding the canonical DELETE, the single mutation-
+    // sequence advance and the new published_snapshot row. Queries stay
+    // available and equal a rebuild of the remaining games; the snapshot's
+    // canonical game count drops by one. Retired documents are reclaimed by the
+    // next postings rebuild. A hash that a retired game reached costs one decode
+    // of its posting block per cache miss instead of a directory read (see
+    // position_postings::summary).
+    //
+    // When the indexes do not cover the bundle (unbuilt, stale after an insert,
+    // or inside an open canonical transaction) only SQLite changes, exactly as
+    // before; they stay stale until the next rebuild.
+    //
+    // Returns error_code::not_found if the game does not exist. A failure of
+    // the incremental removal leaves the game, the sequence and the snapshot
+    // untouched (io_failure), except an unknown COMMIT outcome, which is
+    // reconciled against the stored snapshot row.
     auto remove_game(game_id game_key) -> result<void>;
 
     // Delete a manually-added game. Imported games return
@@ -397,6 +441,7 @@ class database_manager
     // last patch_game_metadata call. Both are guarded by generation_mutex_.
     patch_chain_limits chain_limits_ {};
     patch_report last_patch_report_ {};
+    patch_report last_removal_report_ {};
 
     // Caller must hold generation_mutex_. The one shared coverage computation
     // behind every position-dependent API; see derived_index_status().
@@ -482,6 +527,9 @@ class database_manager
     {
         canonical_edit_steps steps;
         position_metadata_slot slot;
+        // Change of the canonical game count the edit makes (-1 for a removal):
+        // the snapshot row stamps the count AFTER the edit.
+        std::int64_t game_count_delta {0};
     };
 
     // Readers a publication installs: either given by the caller (already
@@ -528,10 +576,21 @@ class database_manager
     // Working state of one indexed patch, threaded through the phases below
     // (defined with publish_indexed_patch).
     struct indexed_patch_context;
+    // The gates every indexed edit shares, after coverage proved the postings
+    // usable: sequence/generation headroom, the postings segment and bundle
+    // identity, then the sequences, tree usability and game count of the edit.
+    [[nodiscard]] auto begin_indexed_edit(indexed_patch_context& ctx, derived_index_report const& status, bool removal) const
+        -> result<void>;
     // Gates, the metadata after-image and its resident slot.
     [[nodiscard]] auto prepare_indexed_patch(prepared_metadata_patch const& plan, indexed_patch_context& ctx) const -> result<void>;
+    // Gates, the tombstone and its resident slot (removal).
+    [[nodiscard]] auto prepare_indexed_removal(prepared_game_removal const& plan,
+                                               derived_index_report const& status,
+                                               indexed_patch_context& ctx) const -> result<void>;
     // The one-game tree contribution, only when a usable tree exists.
     [[nodiscard]] auto build_patch_tree_run(prepared_metadata_patch const& plan, indexed_patch_context& ctx) const -> result<void>;
+    // The one-game tree retraction of a removal, only when a usable tree exists.
+    [[nodiscard]] auto build_removal_tree_run(prepared_game_removal const& plan, indexed_patch_context& ctx) const -> result<void>;
     // Encodes the candidate runs, classifies each chain (append or fold) and
     // checks free disk space for every candidate.
     [[nodiscard]] auto admit_patch_runs(indexed_patch_context& ctx) const -> result<void>;
@@ -558,6 +617,14 @@ class database_manager
     // The index-relevant half of patch_game_metadata: prepare the derived state,
     // stage its artifacts, and publish them with the edit.
     auto publish_indexed_patch(prepared_metadata_patch const& plan) -> result<void>;
+    // The shared tail of an indexed edit once its derived state is prepared:
+    // admission, candidate tree reader, staging and publish_prepared with the
+    // edit's canonical steps. Fills `report` on success.
+    auto finish_indexed_edit(indexed_patch_context& ctx, canonical_edit_steps steps, std::int64_t game_count_delta, patch_report& report)
+        -> result<void>;
+    // The index-relevant half of remove_game: prepare the tombstone (and the tree
+    // retraction), stage the artifacts and publish them with the DELETE.
+    auto publish_indexed_removal(game_id game_key, derived_index_report const& status) -> result<void>;
     // Replaces a corrupt metadata chain by one sparse checkpoint derived from
     // canonical SQLite (no chess replay), after proving the baseline membership
     // still matches; fails (leaving the caller to rebuild) when it does not.

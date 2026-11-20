@@ -295,21 +295,25 @@ TEST_CASE("publication: delete plus reinsert keeps the game count but every posi
     REQUIRE(mgr->rebuild_position_postings().has_value());
     REQUIRE(failing_position_queries(*mgr, *first) == 0);
 
+    // The removal publishes incrementally: the snapshot covers the new sequence, so every position query still answers (it is the
+    // insert below that invalidates them).
     REQUIRE(mgr->remove_game(*first).has_value());
+    CHECK(failing_position_queries(*mgr, *first) == 0);
+    CHECK(mgr->derived_index_status()->covered_mutation_seq == std::optional<std::uint64_t> {2});
     auto const second = mgr->insert_game(make_game("White", "Black", "0-1", first_move::d4));
     REQUIRE(second.has_value());
     auto const count = mgr->store().count_games();
     REQUIRE(count.has_value());
-    // The count the old snapshot indexed is back, which is exactly what the
-    // former count-equality gate accepted.
-    CHECK(std::cmp_equal(*count, mgr->manifest().postings()->document_count));
+    // The canonical game count is back to what the original snapshot indexed, which is exactly what the former count-equality gate
+    // accepted; only the covered sequence tells the snapshots apart.
+    CHECK(*count == 1);
 
     CHECK(failing_position_queries(*mgr, *second) == position_query_families);
     auto const status = mgr->derived_index_status();
     REQUIRE(status.has_value());
     CHECK_FALSE(status->postings_usable);
     CHECK(status->mutation_seq == 3U);  // insert, remove, insert
-    CHECK(status->covered_mutation_seq == std::optional<std::uint64_t> {1});
+    CHECK(status->covered_mutation_seq == std::optional<std::uint64_t> {2});
 
     // Ordinary canonical reads stay available while the index is stale.
     CHECK(mgr->find_games(motif::db::search_filter {}).has_value());

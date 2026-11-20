@@ -10,14 +10,19 @@ namespace motif::db
 // opened. Admission never exceeds it, whatever limits a caller configures.
 inline constexpr std::uint64_t max_chain_resident_bytes = std::uint64_t {64} << 20U;
 
-inline constexpr std::size_t default_soft_chain_runs = 8;
+inline constexpr std::size_t default_soft_chain_runs = 32;
 inline constexpr std::uint64_t default_soft_chain_encoded_bytes = std::uint64_t {4} << 20U;
-inline constexpr std::size_t default_hard_chain_runs = 16;
+inline constexpr std::size_t default_hard_chain_runs = 64;
 inline constexpr std::uint64_t default_hard_chain_encoded_bytes = std::uint64_t {16} << 20U;
 
 // Admission thresholds for an immutable patch chain (tree patch runs, or
-// postings metadata runs). Initial tunables from the PR 6 design, not measured
-// optima; tests pass small values.
+// postings metadata runs). Tunables, not proven optima; tests pass small values.
+// Every fold is a checkpoint-sized synchronous write inside the edit that crosses
+// the hard cap, so the run caps trade that stall's frequency against the cost of
+// a longer chain. Measured on twic-100k (BENCHMARKS.md, `remove_chain`), a chain
+// of 128 runs raised warm navigation p50 from 39 to 45 us and the open of its
+// bundle from 342 to 354 ms, so the stall is taken every 64 edits instead of
+// every 16 (the PR 6 initial values were 8 and 16).
 //
 //   soft: maintenance should fold when a chain grows past this, but publication
 //         still proceeds;

@@ -105,6 +105,12 @@ auto validate_tree_patch_run(tree_patch_run const& run) -> result<void>
                 return corrupt("unknown patch validity bits");
             }
             auto const has_candidates = (edge.validity_mask & tree_patch_mask_candidates) != 0U;
+            constexpr auto invalidating = tree_patch_mask_invalidate_min_ply | tree_patch_mask_invalidate_samples;
+            if ((edge.validity_mask & tree_patch_mask_exact_extrema) != 0U
+                && (!has_candidates || (edge.validity_mask & invalidating) != 0U || edge.delta.frequency >= 0))
+            {
+                return corrupt("exact extrema need candidates, no invalidation and a retraction");
+            }
             if (has_candidates ? (edge.candidate_sample_min == 0U || edge.candidate_sample_min > edge.candidate_sample_max)
                                : (edge.candidate_min_root_ply != 0U || edge.candidate_sample_min != 0U || edge.candidate_sample_max != 0U))
             {
@@ -338,6 +344,9 @@ struct tree_patch_builder::state
     tree_contribution_enumerator enumerator;
     std::uint32_t operations {0};
     std::int64_t source_delta {0};
+    // An exact-extrema removal describes the corpus minus that one game, so it can
+    // neither repeat nor share its run with another membership operation.
+    bool exact_removal {false};
     std::map<std::uint64_t, node_accumulator> nodes;
 
     explicit state(tree_patch_identity run_identity)
@@ -363,7 +372,8 @@ struct extrema_update
 {
     std::uint64_t mask {};
     std::uint16_t min_root_ply {};
-    std::uint32_t sample {};
+    std::uint32_t sample_min {};
+    std::uint32_t sample_max {};
 };
 
 // Folds one edge contribution into the node's coalesced edge: statistics add
@@ -384,12 +394,12 @@ auto accumulate_edge(NodeAccumulator& node, game_tree_edge const& edge, raw_edge
     if ((extrema.mask & tree_patch_mask_candidates) != 0U) {
         if ((target.validity_mask & tree_patch_mask_candidates) != 0U) {
             target.candidate_min_root_ply = std::min(target.candidate_min_root_ply, extrema.min_root_ply);
-            target.candidate_sample_min = std::min(target.candidate_sample_min, extrema.sample);
-            target.candidate_sample_max = std::max(target.candidate_sample_max, extrema.sample);
+            target.candidate_sample_min = std::min(target.candidate_sample_min, extrema.sample_min);
+            target.candidate_sample_max = std::max(target.candidate_sample_max, extrema.sample_max);
         } else {
             target.candidate_min_root_ply = extrema.min_root_ply;
-            target.candidate_sample_min = extrema.sample;
-            target.candidate_sample_max = extrema.sample;
+            target.candidate_sample_min = extrema.sample_min;
+            target.candidate_sample_max = extrema.sample_max;
         }
     }
     target.validity_mask |= extrema.mask;
@@ -441,6 +451,9 @@ auto tree_patch_builder::add_metadata_edit(tree_game_state const& before, tree_g
 auto tree_patch_builder::add_game_insertion(tree_game_state const& game) -> result<void>
 {
     auto& self = *state_;
+    if (self.exact_removal) {
+        return tl::unexpected {error {error_code::invalid_argument, "an exact-extrema removal cannot share its run with an insertion"}};
+    }
     if (game.id.value == 0U) {
         return tl::unexpected {error {error_code::invalid_argument, "a game needs a nonzero id"}};
     }
@@ -461,8 +474,10 @@ auto tree_patch_builder::add_game_insertion(tree_game_state const& game) -> resu
         }
     }
     for (auto const& edge : self.enumerator.edges()) {
-        auto const extrema =
-            extrema_update {.mask = tree_patch_mask_candidates, .min_root_ply = edge.min_root_ply, .sample = game.id.value};
+        auto const extrema = extrema_update {.mask = tree_patch_mask_candidates,
+                                             .min_root_ply = edge.min_root_ply,
+                                             .sample_min = game.id.value,
+                                             .sample_max = game.id.value};
         if (auto added = accumulate_edge(self.nodes[edge.root_hash], edge, *stats, extrema); !added) {
             return added;
         }
@@ -470,9 +485,12 @@ auto tree_patch_builder::add_game_insertion(tree_game_state const& game) -> resu
     return {};
 }
 
-auto tree_patch_builder::add_game_removal(tree_game_state const& game) -> result<void>
+auto tree_patch_builder::add_game_removal(tree_game_state const& game, tree_removal_extrema_resolver const& resolver) -> result<void>
 {
     auto& self = *state_;
+    if (self.exact_removal || (resolver && (self.operations & tree_patch_operation_membership) != 0U)) {
+        return tl::unexpected {error {error_code::invalid_argument, "an exact-extrema removal cannot share its run with another game"}};
+    }
     auto const stats = make_game_stats(game.result, game.white_elo, game.black_elo);
     if (!stats) {
         return tl::unexpected {stats.error()};
@@ -493,8 +511,21 @@ auto tree_patch_builder::add_game_removal(tree_game_state const& game) -> result
             return bumped;
         }
     }
+    self.exact_removal = static_cast<bool>(resolver);
     for (auto const& edge : self.enumerator.edges()) {
-        auto const extrema = extrema_update {.mask = tree_patch_mask_invalidate_min_ply | tree_patch_mask_invalidate_samples};
+        auto extrema = extrema_update {.mask = tree_patch_mask_invalidate_min_ply | tree_patch_mask_invalidate_samples};
+        if (resolver) {
+            auto const exact = resolver(edge);
+            if (!exact) {
+                return tl::unexpected {exact.error()};
+            }
+            auto const& found = *exact;
+            extrema = found.has_value() ? extrema_update {.mask = tree_patch_mask_candidates | tree_patch_mask_exact_extrema,
+                                                          .min_root_ply = found->min_root_ply,
+                                                          .sample_min = found->sample_min,
+                                                          .sample_max = found->sample_max}
+                                        : extrema_update {};
+        }
         if (auto added = accumulate_edge(self.nodes[edge.root_hash], edge, *negated, extrema); !added) {
             return added;
         }

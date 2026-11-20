@@ -42,6 +42,7 @@ SCENARIOS = {
     "multi_open": "bench: multi_open",
     "segments": "bench: segments",
     "patch_chain": "bench: patch_chain",
+    "remove_chain": "bench: remove_chain",
 }
 
 CORPORA = {"quick": "twic-100k.pgn", "full": "twic-1m.pgn"}
