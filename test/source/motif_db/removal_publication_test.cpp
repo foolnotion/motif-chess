@@ -475,6 +475,29 @@ TEST_CASE("removing a game leaves positions shared with other games, and every a
     }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertions inflate this linear failure check.
+TEST_CASE("opening stats report a damaged postings file after removal", "[motif-db][pr7][removal][corruption]")
+{
+    auto const line = uci_moves({"e2e4", "e7e5"});
+    auto const other = uci_moves({"d2d4", "d7d5"});
+    auto games = std::vector<model_game> {
+        {.moves = line, .result = "1-0"},
+        {.moves = other, .result = "0-1"},
+    };
+    removal_bundle env {std::move(games), /*tree=*/true};
+    auto const position = zobrist_hash {hash_after(line, 1)};
+    REQUIRE(env.manager->remove_game(env.ids.back()).has_value());
+    auto const* postings = env.manager->manifest().postings();
+    REQUIRE(postings != nullptr);
+    fs::resize_file(env.bundle / postings->artifact.filename, 0);
+
+    auto const summary = env.manager->position_summary(position);
+    REQUIRE_FALSE(summary.has_value());
+    auto const stats = env.manager->query_unfiltered_opening_stats(position);
+    REQUIRE_FALSE(stats.has_value());
+    CHECK(stats.error().code == summary.error().code);
+}
+
 // ── Edge cases ───────────────────────────────────────────────────────────────
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catch2 assertion macros inflate this linear sweep.

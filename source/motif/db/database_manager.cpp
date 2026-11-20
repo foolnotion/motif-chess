@@ -3669,7 +3669,10 @@ auto database_manager::query_unfiltered_opening_stats(zobrist_hash const hash) c
         return from_tree();
     }
     auto const summary = postings.summary(hash);
-    if (!summary || !summary->has_value()) {
+    if (!summary) {
+        return tl::unexpected {summary.error()};
+    }
+    if (!summary->has_value()) {
         return std::vector<opening_stat_agg_row> {};
     }
     if (summary->value().max_ply > tree.max_root_ply()) {
