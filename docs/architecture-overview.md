@@ -74,7 +74,7 @@ Engine analysis flow:
   tree keeps answering: each tree edge the removed game may have witnessed the minimum root ply or sample
   game ids of gets the exact extrema of the remaining games, recomputed from a join of two posting blocks,
   so no node is invalidated and no game is replayed to answer an opening-explorer query. A chain run
-  written by an older writer that only invalidated extrema is still honoured: the nodes it affects are
+  written by an older writer that only invalidated extrema is still honored: the nodes it affects are
   answered from exact postings. Chains that reach their hard cap (64 runs) are still folded synchronously
   inside the edit that crosses it (a checkpoint-sized write under the generation lock)
 - the Slint shell covers workspace lifecycle, game browsing, board/notation navigation, PGN import, and
